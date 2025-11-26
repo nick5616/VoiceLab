@@ -1,0 +1,7 @@
+PyQt6
+parselmouth
+sounddevice
+soundfile
+numpy
+scipy
+qtawesome
