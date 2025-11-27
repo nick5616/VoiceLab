@@ -1,5 +1,4 @@
 import sys
-import time
 import numpy as np
 import sounddevice as sd
 import parselmouth
@@ -15,10 +14,25 @@ import qtawesome as qta
 SAMPLE_RATE = 44100
 CHANNELS = 1
 
-# Physics thresholds
-MIN_PITCH, MAX_PITCH = 70, 400
-MIN_RESONANCE, MAX_RESONANCE = 800, 1400
-MIN_WEIGHT, MAX_WEIGHT = -10, -35
+# --- PHYSICS RANGES (TUNED) ---
+# Pitch: Human voice fundamental range
+MIN_PITCH, MAX_PITCH_DISP = 80, 300
+PITCH_FLOOR, PITCH_CEILING = 75, 500
+
+# Resonance: Average of F1+F2+F3
+# Lower = Darker, Higher = Brighter
+MIN_RES, MAX_RES = 1000, 1600     
+
+# Weight: Spectral Slope (dB per octave)
+# -35dB (Steep drop-off) = Light/Breathy
+# -5dB (Flat) = Heavy/Buzzy
+MIN_WEIGHT, MAX_WEIGHT = -35, -5  
+
+# Contour: Standard Deviation of Pitch
+MIN_CONTOUR, MAX_CONTOUR = 5, 50
+
+# Volume: We normalize to 70dB, so this is just for display
+MIN_VOL, MAX_VOL = 40, 90
 
 class AudioRecorder(QThread):
     finished_recording = pyqtSignal(np.ndarray)
@@ -52,44 +66,74 @@ class AudioRecorder(QThread):
 class VoiceAnalyzer:
     @staticmethod
     def analyze(audio_data):
-        # Flatten audio to 1D array
         audio_flat = audio_data.flatten()
         if len(audio_flat) == 0: return None
 
-        # Create Sound object
+        # 1. PRE-PROCESS: CREATE SOUND
         sound = parselmouth.Sound(audio_flat, sampling_frequency=SAMPLE_RATE)
         
-        # 1. PITCH (Using call)
-        # "To Pitch...": timeStep (0=auto), minPitch, maxPitch
-        pitch = call(sound, "To Pitch...", 0.0, MIN_PITCH, MAX_PITCH)
-        mean_f0 = call(pitch, "Get mean", 0, 0, "Hertz")
+        # 2. AUTO-NORMALIZE VOLUME
+        # This fixes "Weight" varying just because you leaned back.
+        # We scale intensity to 70dB standard.
+        call(sound, "Scale intensity...", 70)
         
-        if np.isnan(mean_f0): return None
+        # 3. GENERATE OBJECTS
+        pitch_obj = call(sound, "To Pitch...", 0.0, PITCH_FLOOR, PITCH_CEILING)
+        formant_obj = call(sound, "To Formant (burg)...", 0.0, 5, 5500, 0.025, 50)
+        ltas_obj = call(sound, "To Ltas...", 100)
+        
+        # 4. THE "VOWEL HUNTER" LOOP
+        # We iterate through frames to find "Voiced" segments only.
+        
+        frames_f0 = []
+        frames_res = []
+        
+        # Check every 20ms
+        duration = sound.duration
+        time_step = 0.02 
+        times = np.arange(0, duration, time_step)
+        
+        for t in times:
+            # Get Pitch at this moment
+            f0 = call(pitch_obj, "Get value at time...", t, "Hertz", "Linear")
+            
+            # IS IT VOICED? (Not NaN and not 0)
+            if not np.isnan(f0) and f0 > 0:
+                frames_f0.append(f0)
+                
+                # Get Resonance (F1/F2/F3) ONLY if voiced
+                f1 = call(formant_obj, "Get value at time...", 1, t, "Hertz", "Linear")
+                f2 = call(formant_obj, "Get value at time...", 2, t, "Hertz", "Linear")
+                f3 = call(formant_obj, "Get value at time...", 3, t, "Hertz", "Linear")
+                
+                if not np.isnan(f1) and not np.isnan(f2) and not np.isnan(f3):
+                    # Average of top 3 formants captures the "Color" well
+                    frames_res.append((f1 + f2 + f3) / 3)
 
-        # 2. RESONANCE (Using call)
-        # "To Formant (burg)...": timeStep, maxFormants, maxHz, window, preEmph
-        formants = call(sound, "To Formant (burg)...", 0.0, 5, 5500, 0.025, 50)
-        midpoint = sound.duration / 2
+        # 5. CALCULATE ROBUST METRICS (Median)
+        if len(frames_f0) < 5: 
+            return None # Not enough valid voice data
+            
+        final_pitch = np.median(frames_f0)
+        final_contour = np.std(frames_f0)
+        final_resonance = np.median(frames_res)
         
-        f1 = call(formants, "Get value at time", 1, midpoint, "Hertz", "Linear")
-        f2 = call(formants, "Get value at time", 2, midpoint, "Hertz", "Linear")
-        f3 = call(formants, "Get value at time", 3, midpoint, "Hertz", "Linear")
+        # Weight (Spectral Slope)
+        # Note: Ltas includes silence, but since we normalized volume, it's safer.
+        # Ideally we'd splice audio, but this is computationally cheaper and stable enough with normalization.
+        final_weight = call(ltas_obj, "Get slope", 0, 1000, 1000, 4000, "energy")
         
-        if np.isnan(f1) or np.isnan(f2) or np.isnan(f3):
-            dispersion = 1000 
-        else:
-            dispersion = ((f2 - f1) + (f3 - f2)) / 2
+        # Volume (Raw intensity before we normalized it, for user feedback)
+        # We create a temp sound to check original volume
+        raw_sound = parselmouth.Sound(audio_flat, sampling_frequency=SAMPLE_RATE)
+        final_volume = call(raw_sound, "Get intensity (dB)")
 
-        # 3. WEIGHT (Using call)
-        # "To Ltas...": bandwidth
-        ltas = call(sound, "To Ltas...", 100)
-        # "Get slope": lowFreq, highFreq, energyLow, energyHigh, unit
-        slope = call(ltas, "Get slope", 0, 1000, 1000, 4000, "energy")
-        
         return {
-            "pitch": mean_f0,
-            "resonance": dispersion,  
-            "weight": slope,          
+            "pitch": final_pitch,
+            "contour": final_contour,
+            "resonance": final_resonance,
+            "weight": final_weight,
+            "volume": final_volume,
             "audio": audio_flat
         }
 
@@ -123,33 +167,30 @@ class TakeCard(QFrame):
         header.addWidget(play_btn)
         layout.addLayout(header)
         
-        # Metrics
-        layout.addLayout(self.create_metric_bar("Resonance (Brightness)", data['resonance'], MIN_RESONANCE, MAX_RESONANCE, "Dark", "Bright"))
-        layout.addLayout(self.create_metric_bar("Weight (Buzz)", data['weight'], MAX_WEIGHT, MIN_WEIGHT, "Soft", "Heavy"))
-        
-        # Pitch Badge
-        pitch_val = int(data['pitch'])
-        pitch_lbl = QLabel(f"Avg Pitch: {pitch_val} Hz")
-        pitch_lbl.setStyleSheet("color: #aaaaaa; font-style: italic;")
-        layout.addWidget(pitch_lbl)
+        # --- SLIDERS ---
+        layout.addLayout(self.create_metric_bar("Pitch (High/Low)", data['pitch'], MIN_PITCH, MAX_PITCH_DISP, "Low", "High"))
+        layout.addLayout(self.create_metric_bar("Resonance (Bright/Dark)", data['resonance'], MIN_RES, MAX_RES, "Dark", "Bright"))
+        layout.addLayout(self.create_metric_bar("Weight (Heavy/Light)", data['weight'], MIN_WEIGHT, MAX_WEIGHT, "Light", "Heavy"))
+        layout.addLayout(self.create_metric_bar("Contour (Expressivity)", data['contour'], MIN_CONTOUR, MAX_CONTOUR, "Monotone", "Dynamic"))
+        layout.addLayout(self.create_metric_bar("Input Volume", data['volume'], MIN_VOL, MAX_VOL, "Quiet", "Loud"))
         
         self.setLayout(layout)
 
     def create_metric_bar(self, label_text, value, min_val, max_val, low_label, high_label):
         vbox = QVBoxLayout()
-        lbl_row = QHBoxLayout()
-        lbl_row.addWidget(QLabel(label_text))
-        lbl_row.addStretch()
-        vbox.addLayout(lbl_row)
+        vbox.setContentsMargins(0, 5, 0, 5)
+        
+        lbl = QLabel(f"{label_text}: {int(value)}")
+        lbl.setStyleSheet("font-size: 11px; color: #aaa;")
+        vbox.addWidget(lbl)
         
         bar_row = QHBoxLayout()
         bar_row.addWidget(QLabel(low_label))
         
         progress = QProgressBar()
         progress.setTextVisible(False)
-        progress.setFixedHeight(10)
+        progress.setFixedHeight(8)
         
-        # Normalize logic
         if min_val < max_val:
             norm = (value - min_val) / (max_val - min_val)
         else:
@@ -158,12 +199,14 @@ class TakeCard(QFrame):
         clamped = max(0, min(1, norm)) * 100
         progress.setValue(int(clamped))
         
-        # Colors
-        if clamped < 30: color = "#3498db"
-        elif clamped > 70: color = "#e74c3c"
-        else: color = "#9b59b6"
+        if clamped < 33: color = "#3498db"
+        elif clamped < 66: color = "#9b59b6"
+        else: color = "#e74c3c"
             
-        progress.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; border-radius: 5px; }}")
+        progress.setStyleSheet(f"""
+            QProgressBar {{ background-color: #444; border-radius: 4px; }}
+            QProgressBar::chunk {{ background-color: {color}; border-radius: 4px; }}
+        """)
         
         bar_row.addWidget(progress)
         bar_row.addWidget(QLabel(high_label))
@@ -177,8 +220,8 @@ class TakeCard(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Voice Lab MVP")
-        self.resize(500, 700)
+        self.setWindowTitle("Voice Lab - Vowel Hunter")
+        self.resize(600, 800)
         self.setStyleSheet("background-color: #1e1e1e;")
         
         self.take_count = 0
@@ -208,7 +251,6 @@ class MainWindow(QMainWindow):
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #888; font-size: 14px;")
         
-        # TOGGLE BUTTON
         self.record_btn = QPushButton()
         self.update_record_button_style(recording=False)
         self.record_btn.clicked.connect(self.toggle_recording)
@@ -270,7 +312,7 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("Analysis Complete")
                 self.status_label.setStyleSheet("color: #888;")
             else:
-                self.status_label.setText("No voice detected. Try again.")
+                self.status_label.setText("No clear voice detected.")
                 
         except Exception as e:
             print(f"Error detail: {e}")
