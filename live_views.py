@@ -4,9 +4,9 @@ from collections import deque
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor
-from PyQt6.QtWidgets import QGraphicsEllipseItem
+from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsRectItem
 
 from analysis import NOTE_NAMES, hz_to_note
 from engine import UPDATE_INTERVAL
@@ -18,6 +18,9 @@ MIN_PITCH, MAX_PITCH = 60, 1200
 BACKGROUND = "#1e1e1e"
 
 FORMANT_COLORS = ("#2ecc71", "#f1c40f", "#e74c3c", "#ecf0f1")  # F1-F4
+TARGET_FILL = (46, 204, 113, 50)
+TARGET_EDGE = (46, 204, 113, 160)
+BASELINE_PEN = pg.mkPen((255, 255, 255, 170), width=1, style=Qt.PenStyle.DashLine)
 SPECTRUM_RANGE_DB = 70            # dynamic range shown in the spectrogram
 PEAK_DECAY_DB = 0.05              # per frame; lets the display re-adapt after loud sounds
 
@@ -61,6 +64,15 @@ def _static_plot(plot):
     plot.setMenuEnabled(False)
 
 
+def _target_band(orientation):
+    """A fixed, hidden green band; orientation 'horizontal' spans a y range."""
+    band = pg.LinearRegionItem(orientation=orientation, movable=False,
+                               brush=pg.mkBrush(TARGET_FILL), pen=pg.mkPen(TARGET_EDGE))
+    band.setZValue(-10)
+    band.hide()
+    return band
+
+
 class PitchView(pg.PlotWidget):
     """Scrolling pitch trace on a musical (log) axis that follows your range."""
 
@@ -74,6 +86,24 @@ class PitchView(pg.PlotWidget):
         self.getAxis("left").setWidth(70)
         self.getAxis("bottom").setLabel("seconds")
         self.curve = self.plot(pen=pg.mkPen("#3498db", width=2), connect="finite")
+        self.target_band = _target_band("horizontal")
+        self.addItem(self.target_band)
+        self.baseline_line = pg.InfiniteLine(angle=0, pen=BASELINE_PEN, label="baseline",
+                                             labelOpts={"color": "#bbb", "position": 0.05})
+        self.baseline_line.hide()
+        self.addItem(self.baseline_line)
+        self.reference_hz = []
+
+    def set_reference(self, baseline_hz, target_hz):
+        """Show the baseline pitch and target pitch range (Hz); None hides them."""
+        self.reference_hz = [v for v in [baseline_hz, *(target_hz or [])] if v]
+        self.baseline_line.setVisible(bool(baseline_hz))
+        if baseline_hz:
+            self.baseline_line.setValue(np.log2(baseline_hz))
+        self.target_band.setVisible(bool(target_hz))
+        if target_hz:
+            self.target_band.setRegion(np.log2(target_hz))
+        self._follow_pitch()
 
     def update_frame(self, frame):
         self.history.append(frame["f0"])
@@ -81,12 +111,16 @@ class PitchView(pg.PlotWidget):
         self._follow_pitch()
 
     def _follow_pitch(self):
-        """Keep the recent pitch range in view with at least an octave of span."""
+        """Keep the recent pitch range (and any target) in view with at least
+        an octave of span."""
         recent = np.array(self.history)
         recent = recent[~np.isnan(recent)]
-        if len(recent) == 0:
+        pool = recent if len(recent) else np.array(self.reference_hz)
+        if len(pool) == 0:
             return
-        lo, hi = np.percentile(recent, [5, 95])
+        lo, hi = np.percentile(pool, [5, 95])
+        if self.reference_hz:
+            lo, hi = min(lo, *self.reference_hz), max(hi, *self.reference_hz)
         center = np.sqrt(lo * hi)
         span = max(hi / lo, 2.0) * 1.3
         lo, hi = max(MIN_PITCH, center / np.sqrt(span)), min(MAX_PITCH, center * np.sqrt(span))
@@ -210,6 +244,47 @@ class PitchResonancePlane(pg.PlotWidget):
                                  symbolBrush="#f1c40f", symbolPen=pg.mkPen("w", width=1))
         self.takes = pg.ScatterPlotItem(size=10, pen=pg.mkPen("w"), brush="#9b59b6")
         self.addItem(self.takes)
+
+        # Target: a box when both pitch and resonance targets exist, else a band.
+        self.target_box = QGraphicsRectItem()
+        self.target_box.setBrush(pg.mkBrush(TARGET_FILL))
+        self.target_box.setPen(pg.mkPen(TARGET_EDGE))
+        self.target_box.setZValue(-5)
+        self.target_box.hide()
+        self.addItem(self.target_box)
+        self.pitch_band = _target_band("horizontal")
+        self.resonance_band = _target_band("vertical")
+        self.addItem(self.pitch_band)
+        self.addItem(self.resonance_band)
+        self.baseline_marker = pg.ScatterPlotItem(size=16, symbol="star", pen=pg.mkPen("w"), brush="#ecf0f1")
+        self.addItem(self.baseline_marker)
+        self.baseline_label = pg.TextItem("baseline", color="#ddd", anchor=(0, 0))
+        self.baseline_label.hide()
+        self.addItem(self.baseline_label)
+
+    def set_reference(self, baseline, pitch_target, resonance_target):
+        """baseline: (f0, delta_f) or None; targets: [low, high] or None."""
+        if baseline and all(baseline):
+            f0, df = baseline
+            self.baseline_marker.setData([df], [np.log2(f0)])
+            self.baseline_label.setPos(df, np.log2(f0))
+            self.baseline_label.show()
+        else:
+            self.baseline_marker.setData([], [])
+            self.baseline_label.hide()
+
+        both = bool(pitch_target and resonance_target)
+        self.target_box.setVisible(both)
+        self.pitch_band.setVisible(bool(pitch_target) and not both)
+        self.resonance_band.setVisible(bool(resonance_target) and not both)
+        if both:
+            y0, y1 = np.log2(pitch_target)
+            x0, x1 = resonance_target
+            self.target_box.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        elif pitch_target:
+            self.pitch_band.setRegion(np.log2(pitch_target))
+        elif resonance_target:
+            self.resonance_band.setRegion(resonance_target)
 
     def update_point(self, f0, delta_f):
         """f0 / delta_f are smoothed values, or NaN when not measurable."""

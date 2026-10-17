@@ -18,7 +18,8 @@
       "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke.py\")",
       "Bash(sed -e 's/^print\\(\"frames.*/import analysis as A\\\\nfor t in takes: r=A.analyze_take\\(t\\); print\\(len\\(t\\)\\\\/SR, r[\"pitch\"], r[\"formant_ceiling\"], r[\"delta_f\"]\\); np.save\\(os.path.join\\(OUT,\"take%d.npy\"%takes.index\\(t\\)\\), t\\)/' -e 's/^engine._worker.start\\(\\).*/engine._worker.start\\(\\)\\\\ntakes=[]\\\\n_orig=engine.stop_take\\\\ndef _st\\(\\):\\\\n a=_orig\\(\\); takes.append\\(a\\); return a\\\\nengine.stop_take=_st/' \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke.py\")",
       "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke_debug.py\")",
-      "Bash(grep -iA3 warn)"
+      "Bash(grep -iA3 warn)",
+      "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke3.py\")"
     ]
   }
 }

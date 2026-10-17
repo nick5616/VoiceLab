@@ -68,6 +68,16 @@ python main.py
 4. Compare takes as you experiment with different placements, vowel shapes, or resonance strategies.
 5. Click **Play** on any card to hear it back alongside its metrics.
 
+### Baseline and targets
+
+Progress is measured against your own voice, which also cancels out most mic and room coloration.
+
+- **Set as baseline** on a take of your everyday or starting voice. Every meter then shows a white baseline tick and change from it (e.g. `+3.2 st vs baseline`, `+45 Hz vs baseline`). The pitch view shows a dashed baseline line, and the plane shows a star.
+- **Use as target** on a take you liked. Each metric gets a range around that take: ±1.5 semitones for pitch, ±30 Hz for resonance, ±3 dB for the voice-quality metrics. Meters show the range as a green band and turn green when you're inside it. The pitch view and the Pitch × Resonance plane show it too, and the live note turns green inside the pitch target.
+- **Targets** (top of the live panel) opens a dialog for setting ranges by hand, turning targets off one by one, and clearing the baseline. Keep only one or two targets on while practising, since watching many at once makes feedback harder to use.
+
+The profile is stored in `~/.voicelab/profile.json` (override the folder with the `VOICELAB_HOME` environment variable). It also remembers the last formant calibration, so live resonance is calibrated from launch. A summary of every take (no audio) is appended to `~/.voicelab/history.jsonl` for tracking progress over time.
+
 ## Tips
 
 - Record a take early in a session. It calibrates the formant ceiling that the live resonance meter uses.
