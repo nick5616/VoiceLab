@@ -1,241 +1,251 @@
 import sys
+from collections import deque
+
 import numpy as np
+import pyqtgraph as pg
 import sounddevice as sd
-import parselmouth
-from parselmouth.praat import call
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QLabel, QScrollArea, 
-                             QProgressBar, QFrame)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QLabel, QScrollArea,
+                             QProgressBar, QFrame, QSizePolicy)
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QFont
 import qtawesome as qta
 
-# Matplotlib integration
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+from analysis import SAMPLE_RATE, NOTE_NAMES, hz_to_note, vocal_tract_length_cm
+from engine import LiveEngine, TakeAnalysisWorker, UPDATE_INTERVAL
 
-# --- CONFIGURATION ---
-SAMPLE_RATE = 44100
-CHANNELS = 1
+# --- DISPLAY RANGES ---
+# (key, label, min, max, low label, high label, value format)
+METRICS = [
+    ("delta_f", "Resonance (ΔF)", 900, 1300, "Dark", "Bright", "{:.0f} Hz"),
+    ("h1h2", "Fold Contact (H1*–H2*)", -5, 15, "Heavy", "Light", "{:+.1f} dB"),
+    ("cpp", "Clarity (CPP)", 8, 30, "Breathy", "Clear", "{:.1f} dB"),
+    ("ring", "Ring (2–4 kHz)", -30, 0, "Muffled", "Ringing", "{:+.1f} dB"),
+]
+MIN_PITCH, MAX_PITCH = 60, 1200
+MIN_CONTOUR, MAX_CONTOUR = 0.5, 5    # semitones
+LEVEL_FLOOR = -60                     # dBFS
+PITCH_HISTORY_SECONDS = 8
+# Exponential smoothing for live meters (~200 ms time constant).
+METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
 
-# --- PHYSICS RANGES ---
-MIN_PITCH, MAX_PITCH_DISP = 70, 300
-MIN_F1, MAX_F1 = 300, 900       # jaw/register openness
-MIN_F2, MAX_F2 = 700, 2500      # tongue position → brightness
-MIN_WEIGHT, MAX_WEIGHT = -35, -5
-MIN_CONTOUR, MAX_CONTOUR = 2, 60
-MIN_VOL, MAX_VOL = 40, 90
+BAR_COLORS = ("#3498db", "#9b59b6", "#e74c3c")
+DISABLED_COLOR = "#555"
 
-class AudioRecorder(QThread):
-    finished_recording = pyqtSignal(np.ndarray)
+
+def bar_style(color):
+    return (f"QProgressBar {{ background-color: #444; border-radius: 4px; }} "
+            f"QProgressBar::chunk {{ background-color: {color}; border-radius: 4px; }}")
+
+
+def bar_position(value, min_val, max_val):
+    norm = (value - min_val) / (max_val - min_val)
+    return max(0, min(1, norm)) * 100
+
+
+def bar_color(position):
+    return BAR_COLORS[0] if position < 33 else BAR_COLORS[1] if position < 66 else BAR_COLORS[2]
+
+
+def pitch_label(f0):
+    note, cents = hz_to_note(f0)
+    return f"{note} {cents:+d}¢ · {f0:.0f} Hz"
+
+
+def note_ticks(lo_hz, hi_hz):
+    """Pitch-axis ticks (in log2 Hz) labelled with note names, thinned to fit."""
+    lo_midi = int(np.floor(69 + 12 * np.log2(lo_hz / 440)))
+    hi_midi = int(np.ceil(69 + 12 * np.log2(hi_hz / 440)))
+    span = hi_midi - lo_midi
+    step = 1 if span <= 12 else 2 if span <= 24 else 5
+    major, minor = [], []
+    for midi in range(lo_midi, hi_midi + 1):
+        y = np.log2(440 * 2 ** ((midi - 69) / 12))
+        if midi % step == 0:
+            major.append((y, f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}  {2 ** y:.0f}"))
+        else:
+            minor.append((y, ""))
+    return [major, minor]
+
+
+class MetricBar(QWidget):
+    """Labelled bar between two descriptors; updatable for live use."""
+
+    def __init__(self, label, min_val, max_val, low_label, high_label, fmt="{:.1f}"):
+        super().__init__()
+        self.label, self.min_val, self.max_val, self.fmt = label, min_val, max_val, fmt
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(0, 5, 0, 5)
+
+        self.title = QLabel(label)
+        self.title.setStyleSheet("font-size: 11px; color: #aaa;")
+        vbox.addWidget(self.title)
+
+        bar_row = QHBoxLayout()
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(8)
+        low, high = QLabel(low_label), QLabel(high_label)
+        for lbl in (low, high):
+            lbl.setStyleSheet("color: #ddd; font-size: 11px;")
+            lbl.setFixedWidth(60)
+        high.setAlignment(Qt.AlignmentFlag.AlignRight)
+        bar_row.addWidget(low)
+        bar_row.addWidget(self.progress)
+        bar_row.addWidget(high)
+        vbox.addLayout(bar_row)
+
+    def set_value(self, value, note=None, display=None):
+        if value is None or np.isnan(value):
+            self.title.setText(f"{self.label} — {note or 'no reading'}")
+            self.progress.setValue(0)
+            self.progress.setStyleSheet(bar_style(DISABLED_COLOR))
+            return
+        position = bar_position(value, self.min_val, self.max_val)
+        text = display or self.fmt.format(value)
+        self.title.setText(f"{self.label} ({text})" + (f" — {note}" if note else ""))
+        self.progress.setValue(int(position))
+        self.progress.setStyleSheet(bar_style(DISABLED_COLOR if note else bar_color(position)))
+
+
+class LivePanel(QFrame):
+    """Real-time pitch trace and meters fed by the LiveEngine."""
 
     def __init__(self):
         super().__init__()
-        self.recording = False
-        self.audio_data = []
+        self.setStyleSheet("QFrame { background-color: #2b2b2b; border-radius: 10px; } "
+                           "QLabel { color: #ffffff; }")
+        layout = QVBoxLayout(self)
 
-    def run(self):
-        self.recording = True
-        self.audio_data = []
-        def callback(indata, frames, time, status):
-            if self.recording:
-                self.audio_data.append(indata.copy())
+        header = QHBoxLayout()
+        title = QLabel("Live")
+        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.note_label = QLabel("—")
+        self.note_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.note_label)
+        layout.addLayout(header)
+
+        self.history_len = int(PITCH_HISTORY_SECONDS / UPDATE_INTERVAL)
+        self.pitch_history = deque([np.nan] * self.history_len, maxlen=self.history_len)
+        self.times = np.linspace(-PITCH_HISTORY_SECONDS, 0, self.history_len)
+
+        self.plot = pg.PlotWidget(background="#1e1e1e")
+        self.plot.setFixedHeight(180)
+        # Pitch is plotted as log2(Hz) so equal musical intervals are equal heights.
+        self.plot.showGrid(x=False, y=True, alpha=0.2)
+        self.plot.setMouseEnabled(x=False, y=False)
+        self.plot.hideButtons()
+        self.plot.setXRange(-PITCH_HISTORY_SECONDS, 0, padding=0)
+        self.plot.getAxis("left").setWidth(70)
+        self.plot.getAxis("bottom").setLabel("seconds")
+        self.curve = self.plot.plot(pen=pg.mkPen("#3498db", width=2), connect="finite")
+        layout.addWidget(self.plot)
+
+        self.meters = {key: MetricBar(label, lo, hi, low, high, fmt)
+                       for key, label, lo, hi, low, high, fmt in METRICS}
+        self.smoothed = {key: np.nan for key in self.meters}
+        for meter in self.meters.values():
+            layout.addWidget(meter)
+        self.level_meter = MetricBar("Input Level", LEVEL_FLOOR, 0, "Quiet", "Loud", "{:.0f} dBFS")
+        layout.addWidget(self.level_meter)
+
+    def update_frame(self, frame):
+        f0 = frame.get("f0", np.nan)
+        self.pitch_history.append(f0)
+        self.curve.setData(self.times, np.log2(np.array(self.pitch_history)))
+        self._follow_pitch()
+        self.level_meter.set_value(frame["level"])
+
+        if np.isnan(f0):
+            self.note_label.setText("—")
+            return
+        self.note_label.setText(pitch_label(f0))
+        for key, meter in self.meters.items():
+            value = frame.get(key, np.nan)
+            if not np.isnan(value):
+                prev = self.smoothed[key]
+                self.smoothed[key] = value if np.isnan(prev) else prev + METER_SMOOTHING * (value - prev)
+            smoothed = self.smoothed[key]
+            if key == "delta_f" and not frame.get("resonance_reliable"):
+                meter.set_value(None, note="pitch too high to measure")
+            elif key == "delta_f" and not np.isnan(smoothed):
+                meter.set_value(smoothed, display=f"{smoothed:.0f} Hz, "
+                                                  f"≈{vocal_tract_length_cm(smoothed):.1f} cm tract")
             else:
-                raise sd.CallbackStop()
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, callback=callback):
-            while self.recording:
-                sd.sleep(50)
-        if self.audio_data:
-            full_recording = np.concatenate(self.audio_data, axis=0)
-            self.finished_recording.emit(full_recording)
+                meter.set_value(smoothed)
 
-    def stop(self):
-        self.recording = False
+    def _follow_pitch(self):
+        """Keep the recent pitch range in view with at least an octave of span."""
+        recent = np.array(self.pitch_history)
+        recent = recent[~np.isnan(recent)]
+        if len(recent) == 0:
+            return
+        lo, hi = np.percentile(recent, [5, 95])
+        center = np.sqrt(lo * hi)
+        span = max(hi / lo, 2.0) * 1.3
+        lo, hi = max(MIN_PITCH, center / np.sqrt(span)), min(MAX_PITCH, center * np.sqrt(span))
+        self.plot.setYRange(np.log2(lo), np.log2(hi), padding=0)
+        self.plot.getAxis("left").setTicks(note_ticks(lo, hi))
 
-class VoiceAnalyzer:
-    @staticmethod
-    def analyze(audio_data):
-        audio_flat = audio_data.flatten()
-        if len(audio_flat) == 0: return None
 
-        sound = parselmouth.Sound(audio_flat, sampling_frequency=SAMPLE_RATE)
-        call(sound, "Scale intensity...", 70) # Auto-normalize
-        
-        # 1. TIME SERIES DATA (For Graphs)
-        # We need data arrays that match the time domain
-        pitch = call(sound, "To Pitch...", 0.0, 75, 500)
-        # 5000Hz max formant is better for male/androgynous voices than 5500
-        formants = call(sound, "To Formant (burg)...", 0.0, 5, 5000, 0.025, 50) 
-        
-        # Extract tracks
-        t_vals = np.linspace(0, sound.duration, num=100)
-        f0_track = []
-        f1_track = []
-        f2_track = []
-        f3_track = []
-        
-        valid_f1_samples = []
-        valid_f2_samples = []
+class AnalysisGraph(pg.GraphicsLayoutWidget):
+    """Pitch track on top, F1-F3 below, with a hover readout."""
 
-        for t in t_vals:
-            # Pitch
-            p = call(pitch, "Get value at time...", t, "Hertz", "Linear")
-            f0_track.append(p if not np.isnan(p) else np.nan)
-
-            # Formants
-            _f1 = call(formants, "Get value at time...", 1, t, "Hertz", "Linear")
-            _f2 = call(formants, "Get value at time...", 2, t, "Hertz", "Linear")
-            _f3 = call(formants, "Get value at time...", 3, t, "Hertz", "Linear")
-
-            f1_track.append(_f1)
-            f2_track.append(_f2)
-            f3_track.append(_f3)
-
-            # Only keep voiced frames with valid formants for summary stats
-            if not np.isnan(p):
-                if not np.isnan(_f1):
-                    valid_f1_samples.append(_f1)
-                if not np.isnan(_f2):
-                    valid_f2_samples.append(_f2)
-
-        # 2. SUMMARY STATS (Median for stability)
-        voiced_count = np.sum(~np.isnan(f0_track))
-        if voiced_count < 5 or len(valid_f1_samples) < 5:
-            return {"error": f"Not enough voiced audio ({int(voiced_count)} voiced frames). Try speaking louder or longer."}
-
-        final_pitch = np.nanmedian(f0_track)
-        final_contour = np.nanstd([v for v in f0_track if not np.isnan(v)])
-        final_f1 = np.median(valid_f1_samples)
-        final_f2 = np.median(valid_f2_samples) if len(valid_f2_samples) >= 5 else None
-
-        # Build voiced-only audio: strip unvoiced frames so LTAS/intensity aren't
-        # biased by fricatives, stops, or silence
-        num_frames = call(pitch, "Get number of frames")
-        voiced_segments = []
-        in_voiced = False
-        seg_start = 0.0
-        for i in range(1, num_frames + 1):
-            t = call(pitch, "Get time from frame number...", i)
-            v = call(pitch, "Get value in frame...", i, "Hertz")
-            is_v = not np.isnan(v)
-            if is_v and not in_voiced:
-                in_voiced = True
-                seg_start = t
-            elif not is_v and in_voiced:
-                in_voiced = False
-                voiced_segments.append((seg_start, t))
-        if in_voiced:
-            voiced_segments.append((seg_start, sound.duration))
-
-        voiced_chunks = [
-            audio_flat[int(s * SAMPLE_RATE):int(e * SAMPLE_RATE)]
-            for s, e in voiced_segments
-        ]
-        voiced_audio = np.concatenate(voiced_chunks) if voiced_chunks else audio_flat
-        voiced_sound = parselmouth.Sound(voiced_audio, sampling_frequency=SAMPLE_RATE)
-        call(voiced_sound, "Scale intensity...", 70)
-
-        # Weight (Slope) — voiced only
-        ltas = call(voiced_sound, "To Ltas...", 100)
-        final_weight = call(ltas, "Get slope", 0, 1000, 1000, 4000, "energy")
-
-        # Volume — voiced only
-        final_volume = call(voiced_sound, "Get intensity (dB)")
-
-        return {
-            "pitch": final_pitch,
-            "contour": final_contour,
-            "f1": final_f1,
-            "f2": final_f2,
-            "weight": final_weight,
-            "volume": final_volume,
-            "audio": audio_flat,
-            "tracks": {
-                "times": t_vals,
-                "f0": f0_track,
-                "f1": f1_track,
-                "f2": f2_track,
-                "f3": f3_track
-            }
-        }
-
-class AnalysisGraph(FigureCanvasQTAgg):
     def __init__(self, tracks):
-        self.fig = Figure(figsize=(5, 3), dpi=100, facecolor='#2b2b2b')
-        super().__init__(self.fig)
+        super().__init__()
+        self.setBackground("#2b2b2b")
         self.tracks = tracks
-        self.plot_data()
+        t = tracks["times"]
 
-    def plot_data(self):
-        t = self.tracks['times']
-        f0 = self.tracks['f0']
-        f1 = self.tracks['f1']
-        f2 = self.tracks['f2']
-        f3 = self.tracks['f3']
+        self.ax_pitch = self.addPlot(row=0, col=0)
+        self.ax_res = self.addPlot(row=1, col=0)
+        self.ci.layout.setRowStretchFactor(0, 1)
+        self.ci.layout.setRowStretchFactor(1, 2)
+        self.ax_res.setXLink(self.ax_pitch)
+        self.ax_pitch.setLabel("left", "Hz")
+        self.ax_res.setLabel("left", "Formants Hz")
+        for ax in (self.ax_pitch, self.ax_res):
+            ax.showGrid(x=True, y=True, alpha=0.2)
+            ax.setMouseEnabled(x=False, y=False)
+            ax.hideButtons()
 
-        # Setup Axes
-        gs = self.fig.add_gridspec(2, 1, height_ratios=[1, 2])
-        ax_pitch = self.fig.add_subplot(gs[0])
-        ax_res = self.fig.add_subplot(gs[1], sharex=ax_pitch)
+        self.ax_pitch.plot(t, tracks["f0"], pen=pg.mkPen("#3498db", width=2), connect="finite")
+        self.ax_res.addLegend(offset=(-10, 10))
+        for key, color in (("f3", "#e74c3c"), ("f2", "#f1c40f"), ("f1", "#2ecc71")):
+            self.ax_res.plot(t, tracks[key], pen=pg.mkPen(color, width=1.5),
+                             connect="finite", name=key.upper())
 
-        # Style
-        for ax in [ax_pitch, ax_res]:
-            ax.set_facecolor('#1e1e1e')
-            ax.tick_params(axis='x', colors='#888')
-            ax.tick_params(axis='y', colors='#888')
-            for spine in ax.spines.values():
-                spine.set_color('#444')
+        self.cursors = [pg.InfiniteLine(angle=90, pen=pg.mkPen("w", width=1)) for _ in range(2)]
+        self.ax_pitch.addItem(self.cursors[0])
+        self.ax_res.addItem(self.cursors[1])
+        self.text_p = pg.TextItem(color="w", anchor=(0, 0))
+        self.text_r = pg.TextItem(color="w", anchor=(0, 0))
+        self.ax_pitch.addItem(self.text_p, ignoreBounds=True)
+        self.ax_res.addItem(self.text_r, ignoreBounds=True)
+        self.scene().sigMouseMoved.connect(self.on_hover)
 
-        # Plot Pitch
-        ax_pitch.plot(t, f0, color='#3498db', linewidth=2, label='Pitch')
-        ax_pitch.set_ylabel("Hz", color='#888', fontsize=8)
-        ax_pitch.grid(True, color='#333')
-        
-        # Plot Formants
-        ax_res.plot(t, f3, color='#e74c3c', linewidth=1.5, alpha=0.8, label='F3')
-        ax_res.plot(t, f2, color='#f1c40f', linewidth=1.5, alpha=0.8, label='F2')
-        ax_res.plot(t, f1, color='#2ecc71', linewidth=1.5, alpha=0.8, label='F1')
-        ax_res.set_ylabel("Formants Hz", color='#888', fontsize=8)
-        ax_res.grid(True, color='#333')
-        
-        # Legend
-        ax_res.legend(loc='upper right', fontsize='x-small', facecolor='#333', labelcolor='white')
+    def on_hover(self, pos):
+        for ax in (self.ax_pitch, self.ax_res):
+            if ax.sceneBoundingRect().contains(pos):
+                x = ax.vb.mapSceneToView(pos).x()
+                break
+        else:
+            return
+        for cursor in self.cursors:
+            cursor.setValue(x)
+        idx = int(np.abs(self.tracks["times"] - x).argmin())
+        p_val = self.tracks["f0"][idx]
+        f1, f2, f3 = (self.tracks[k][idx] for k in ("f1", "f2", "f3"))
 
-        # Hover Interaction
-        self.cursor_line_p = ax_pitch.axvline(x=0, color='white', alpha=0.5)
-        self.cursor_line_r = ax_res.axvline(x=0, color='white', alpha=0.5)
-        self.text_p = ax_pitch.text(0.02, 0.9, "", transform=ax_pitch.transAxes, color='white', fontsize=8)
-        self.text_r = ax_res.text(0.02, 0.9, "", transform=ax_res.transAxes, color='white', fontsize=8)
-        
-        self.mpl_connect('motion_notify_event', self.on_hover)
-        self.fig.tight_layout()
+        self.text_p.setText(pitch_label(p_val) if not np.isnan(p_val) else "Unvoiced")
+        self.text_p.setPos(self.ax_pitch.vb.viewRange()[0][0], self.ax_pitch.vb.viewRange()[1][1])
+        if not np.isnan(f1):
+            self.text_r.setText(f"F1:{f1:.0f} F2:{f2:.0f} F3:{f3:.0f}")
+            self.text_r.setPos(self.ax_res.vb.viewRange()[0][0], self.ax_res.vb.viewRange()[1][1])
 
-    def on_hover(self, event):
-        if event.inaxes:
-            x = event.xdata
-            # Update visual cursor
-            self.cursor_line_p.set_xdata([x])
-            self.cursor_line_r.set_xdata([x])
-            
-            # Find closest index
-            idx = (np.abs(self.tracks['times'] - x)).argmin()
-            
-            # Update Text
-            p_val = self.tracks['f0'][idx]
-            f1_val = self.tracks['f1'][idx]
-            f2_val = self.tracks['f2'][idx]
-            f3_val = self.tracks['f3'][idx]
-            
-            if not np.isnan(p_val):
-                self.text_p.set_text(f"Pitch: {int(p_val)} Hz")
-            else:
-                self.text_p.set_text("Unvoiced")
-                
-            if not np.isnan(f1_val):
-                self.text_r.set_text(f"F1:{int(f1_val)} F2:{int(f2_val)} F3:{int(f3_val)}")
-            
-            self.draw()
 
 class TakeCard(QFrame):
     def __init__(self, data, count):
@@ -245,10 +255,10 @@ class TakeCard(QFrame):
             QFrame { background-color: #2b2b2b; border-radius: 10px; margin-bottom: 10px; }
             QLabel { color: #ffffff; }
         """)
-        
+
         self.audio_data = data['audio']
         layout = QVBoxLayout()
-        
+
         # Header
         header = QHBoxLayout()
         title = QLabel(f"Take #{count}")
@@ -260,95 +270,84 @@ class TakeCard(QFrame):
         header.addStretch()
         header.addWidget(play_btn)
         layout.addLayout(header)
-        
+
         # --- GRAPH ---
         graph = AnalysisGraph(data['tracks'])
         graph.setFixedHeight(200)
         layout.addWidget(graph)
 
         # --- METRIC BARS ---
-        layout.addLayout(self.create_metric_bar(f"Pitch ({int(data['pitch'])} Hz)", data['pitch'], MIN_PITCH, MAX_PITCH_DISP, "Low", "High"))
-        layout.addLayout(self.create_metric_bar(f"Register / F1 ({int(data['f1'])} Hz)", data['f1'], MIN_F1, MAX_F1, "Closed", "Open"))
-        if data['f2'] is not None:
-            layout.addLayout(self.create_metric_bar(f"Brightness / F2 ({int(data['f2'])} Hz)", data['f2'], MIN_F2, MAX_F2, "Dark", "Bright"))
-        layout.addLayout(self.create_metric_bar("Tonal Weight", data['weight'], MIN_WEIGHT, MAX_WEIGHT, "Heavy", "Light"))
-        layout.addLayout(self.create_metric_bar("Pitch Contour", data['contour'], MIN_CONTOUR, MAX_CONTOUR, "Monotone", "Dynamic"))
-        
-        self.setLayout(layout)
+        pitch_bar = MetricBar("Pitch", np.log2(MIN_PITCH), np.log2(MAX_PITCH), "Low", "High")
+        pitch_bar.set_value(np.log2(data['pitch']), display=f"{data['note']} {data['cents']:+d}¢ · {data['pitch']:.0f} Hz")
+        layout.addWidget(pitch_bar)
 
-    def create_metric_bar(self, label_text, value, min_val, max_val, low_label, high_label):
-        vbox = QVBoxLayout()
-        vbox.setContentsMargins(0, 5, 0, 5)
-        
-        lbl = QLabel(label_text)
-        lbl.setStyleSheet("font-size: 11px; color: #aaa;")
-        vbox.addWidget(lbl)
-        
-        bar_row = QHBoxLayout()
-        progress = QProgressBar()
-        progress.setTextVisible(False)
-        progress.setFixedHeight(8)
-        
-        if max_val != min_val:
-            norm = (value - min_val) / (max_val - min_val)
-        else:
-            norm = 0.5
-            
-        clamped = max(0, min(1, norm)) * 100
-        progress.setValue(int(clamped))
-        
-        # Color
-        if clamped < 33: color = "#3498db"
-        elif clamped < 66: color = "#9b59b6"
-        else: color = "#e74c3c"
-        progress.setStyleSheet(f"QProgressBar {{ background-color: #444; border-radius: 4px; }} QProgressBar::chunk {{ background-color: {color}; border-radius: 4px; }}")
-        
-        bar_row.addWidget(QLabel(low_label))
-        bar_row.addWidget(progress)
-        bar_row.addWidget(QLabel(high_label))
-        vbox.addLayout(bar_row)
-        return vbox
+        for key, label, lo, hi, low, high, fmt in METRICS:
+            bar = MetricBar(label, lo, hi, low, high, fmt)
+            if key == "delta_f" and data["delta_f"] is not None:
+                bar.set_value(data["delta_f"], display=f"{data['delta_f']:.0f} Hz, ≈{data['vtl']:.1f} cm tract")
+            elif key == "delta_f":
+                bar.set_value(None, note=data["resonance_note"])
+            else:
+                bar.set_value(data[key])
+            layout.addWidget(bar)
+
+        contour = MetricBar("Pitch Movement", MIN_CONTOUR, MAX_CONTOUR, "Monotone", "Dynamic", "{:.1f} st")
+        contour.set_value(data['contour'])
+        layout.addWidget(contour)
+
+        level = MetricBar("Level", LEVEL_FLOOR, 0, "Quiet", "Loud", "{:.0f} dBFS, uncalibrated")
+        level.set_value(data['level'])
+        layout.addWidget(level)
+
+        self.setLayout(layout)
 
     def play_audio(self):
         sd.play(self.audio_data, SAMPLE_RATE)
 
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, engine):
         super().__init__()
-        self.setWindowTitle("Voice Lab - Debugger")
-        self.resize(600, 900)
+        self.setWindowTitle("Voice Lab")
+        self.resize(650, 1000)
         self.setStyleSheet("background-color: #1e1e1e;")
-        
+
         self.take_count = 0
-        self.is_recording = False 
-        self.recorder = AudioRecorder()
-        self.recorder.finished_recording.connect(self.process_recording)
-        
+        self.is_recording = False
+        self.engine = engine
+        self.analysis_worker = None
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
+
+        self.live_panel = LivePanel()
+        self.engine.frame_ready.connect(self.live_panel.update_frame)
+        main_layout.addWidget(self.live_panel)
+
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.addStretch()
-        
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.scroll_content)
         scroll.setStyleSheet("border: none;")
-        
+
         controls = QFrame()
         controls.setStyleSheet("background-color: #252525; border-top: 1px solid #333;")
         controls_layout = QVBoxLayout(controls)
-        
+
         self.status_label = QLabel("Ready to Record")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #888; font-size: 14px;")
-        
+
         self.record_btn = QPushButton()
+        self.record_btn.setFixedSize(80, 80)
+        self.record_btn.setIconSize(QSize(40, 40))
         self.update_record_button_style(recording=False)
         self.record_btn.clicked.connect(self.toggle_recording)
-        
+
         controls_layout.addWidget(self.status_label)
         controls_layout.addWidget(self.record_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(scroll)
@@ -361,8 +360,6 @@ class MainWindow(QMainWindow):
         else:
             self.record_btn.setIcon(qta.icon('fa5s.microphone', color='white'))
             self.record_btn.setStyleSheet("QPushButton { background-color: #e74c3c; border-radius: 40px; border: 2px solid #c0392b; }")
-            self.record_btn.setFixedSize(80, 80)
-            self.record_btn.setIconSize(qta.QtCore.QSize(40, 40))
 
     def toggle_recording(self):
         if not self.is_recording:
@@ -370,36 +367,41 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Recording...")
             self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
             self.update_record_button_style(recording=True)
-            self.recorder.start()
+            self.engine.start_take()
         else:
             self.is_recording = False
             self.status_label.setText("Processing...")
             self.status_label.setStyleSheet("color: #f1c40f;")
             self.update_record_button_style(recording=False)
-            self.recorder.stop()
+            self.record_btn.setEnabled(False)
+            self.analysis_worker = TakeAnalysisWorker(self.engine.stop_take())
+            self.analysis_worker.finished_analysis.connect(self.process_results)
+            self.analysis_worker.start()
 
-    def process_recording(self, audio_data):
-        try:
-            results = VoiceAnalyzer.analyze(audio_data)
-            if results and "error" not in results:
-                self.take_count += 1
-                card = TakeCard(results, self.take_count)
-                self.scroll_layout.insertWidget(0, card)
-                self.status_label.setText("Done")
-                self.status_label.setStyleSheet("color: #888;")
-            elif results and "error" in results:
-                self.status_label.setText(results["error"])
-                self.status_label.setStyleSheet("color: #e74c3c;")
-            else:
-                self.status_label.setText("Analysis failed — check mic input.")
-                self.status_label.setStyleSheet("color: #e74c3c;")
-        except Exception as e:
-            print(f"Error: {e}")
-            self.status_label.setText(f"Error: {e}")
+    def process_results(self, results):
+        self.record_btn.setEnabled(True)
+        if "error" in results:
+            self.status_label.setText(results["error"])
             self.status_label.setStyleSheet("color: #e74c3c;")
+            return
+        # Calibrate the live formant tracker to the ceiling that fit this take.
+        self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
+        self.take_count += 1
+        card = TakeCard(results, self.take_count)
+        self.scroll_layout.insertWidget(0, card)
+        self.status_label.setText("Done")
+        self.status_label.setStyleSheet("color: #888;")
+
+    def closeEvent(self, event):
+        self.engine.stop()
+        super().closeEvent(event)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+    pg.setConfigOptions(antialias=True)
+    engine = LiveEngine()
+    window = MainWindow(engine)
     window.show()
+    engine.start()
     sys.exit(app.exec())

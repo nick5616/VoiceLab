@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.isca-archive.org)",
+      "WebFetch(domain:journals.plos.org)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python -c \"import pypdf\")",
+      "Bash(python -c \"import fitz\")",
+      "Bash(pdftotext -layout \"C:/Users/nickb/.claude/projects/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/tool-results/webfetch-1792195146414-2lb7hw.pdf\" -)",
+      "WebFetch(domain:acousticgender.space)",
+      "Bash(python -m venv venv)",
+      "Bash(./venv/Scripts/python -m pip install -q -r requirements.txt pyqtgraph)",
+      "Bash(./venv/Scripts/python -c \"import parselmouth, pyqtgraph, PyQt6, numpy; print\\(parselmouth.__version__, pyqtgraph.__version__, numpy.__version__\\)\")",
+      "Bash(./venv/Scripts/python -m pip install -q pytest)",
+      "Bash(./venv/Scripts/python -m pytest tests -q)",
+      "Bash(./venv/Scripts/python -c ' *)",
+      "Bash(./venv/Scripts/python -W ignore -c ' *)",
+      "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke.py\")"
+    ]
+  }
+}
