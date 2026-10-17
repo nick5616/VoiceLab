@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from profile_store import Profile  # noqa: E402
 
 TAKE = {"pitch": 200.0, "delta_f": 1150.0, "h1h2": np.float64(4.0), "cpp": 20.0,
-        "ring": -15.0, "contour": 2.0, "level": -20.0, "vtl": 15.2,
+        "ring": -15.0, "contour": 2.0, "pitch_range": 6.0, "level": -20.0, "vtl": 15.2,
         "formant_ceiling": np.int64(6000), "note": "G3", "cents": 35,
         "audio": np.zeros(10), "tracks": {}}
 
@@ -34,8 +34,8 @@ def test_targets_from_take(tmp_path):
     assert profile.targets["h1h2"] == [1.0, 7.0]
     assert "delta_f" not in profile.targets
 
-    profile.set_targets_from_take(TAKE | {"contour": 0.2})
-    assert profile.targets["contour"][0] == 0.0
+    profile.set_targets_from_take(TAKE | {"pitch_range": 0.5})
+    assert profile.targets["pitch_range"][0] == 0.0
 
 
 def test_in_target_and_change(tmp_path):
@@ -60,6 +60,27 @@ def test_history_log(tmp_path):
     assert len(lines) == 2
     entry = json.loads(lines[0])
     assert entry["pitch"] == 200.0 and "audio" not in entry and "time" in entry
+
+
+def test_time_in_target(tmp_path):
+    profile = Profile(tmp_path)
+    assert profile.time_in_target("pitch", [200, 210]) is None
+    profile.set_target("pitch", (180, 220))
+    assert profile.time_in_target("pitch", [np.nan, 170, 190, 200, 230]) == 0.5
+    assert profile.time_in_target("pitch", [np.nan]) is None
+
+
+def test_vowel_baseline_and_log(tmp_path):
+    profile = Profile(tmp_path)
+    result = {"delta_f": np.float64(1050.0), "formant_ceiling": np.int64(5500), "skipped": [],
+              "vowels": {"heed": {"f1": np.float64(340.0), "f2": 2300.0, "delta_f": np.nan}}}
+    profile.set_vowel_baseline(result)
+    profile.log_vowel_check(result)
+    reloaded = Profile(tmp_path)
+    assert reloaded.vowel_baseline["vowels"]["heed"]["f1"] == 340.0
+    assert reloaded.vowel_baseline["vowels"]["heed"]["delta_f"] is None
+    entry = json.loads((tmp_path / "history.jsonl").read_text().splitlines()[0])
+    assert entry["kind"] == "vowels" and entry["delta_f"] == 1050.0
 
 
 def test_corrupt_profile_is_ignored(tmp_path):

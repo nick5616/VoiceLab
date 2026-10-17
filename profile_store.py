@@ -11,11 +11,13 @@ from pathlib import Path
 
 import numpy as np
 
-TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "contour"]
+TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"]
 # Half-width of a target created from a take. Pitch is in semitones, the rest
 # in each metric's own units.
-DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "contour": 0.75}
-SUMMARY_KEYS = TARGET_KEYS + ["level", "vtl", "formant_ceiling", "note", "cents"]
+DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2}
+SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents"]
+# Metrics measured as spreads, which can't go below zero.
+NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 
 
 def data_dir():
@@ -43,7 +45,7 @@ def target_from_value(key, value):
     tol = DEFAULT_TOLERANCES[key]
     if key == "pitch":
         return [value * 2 ** (-tol / 12), value * 2 ** (tol / 12)]
-    if key == "contour":  # a spread can't be negative
+    if key in NONNEGATIVE_KEYS:
         return [max(0.0, value - tol), value + tol]
     return [value - tol, value + tol]
 
@@ -56,6 +58,7 @@ class Profile:
         self.baseline = None
         self.targets = {}
         self.formant_ceiling = None
+        self.vowel_baseline = None
         self.load()
 
     def load(self):
@@ -69,11 +72,12 @@ class Profile:
         self.baseline = data.get("baseline")
         self.targets = {k: v for k, v in data.get("targets", {}).items() if k in TARGET_KEYS}
         self.formant_ceiling = data.get("formant_ceiling")
+        self.vowel_baseline = data.get("vowel_baseline")
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         data = {"baseline": self.baseline, "targets": self.targets,
-                "formant_ceiling": self.formant_ceiling}
+                "formant_ceiling": self.formant_ceiling, "vowel_baseline": self.vowel_baseline}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -100,7 +104,7 @@ class Profile:
             return f"{12 * np.log2(value / base):+.1f} st vs baseline"
         if key == "delta_f":
             return f"{value - base:+.0f} Hz vs baseline"
-        unit = "st" if key == "contour" else "dB"
+        unit = "st" if key in NONNEGATIVE_KEYS else "dB"
         return f"{value - base:+.1f} {unit} vs baseline"
 
     # --- TARGETS ---
@@ -132,6 +136,22 @@ class Profile:
             return None
         return target[0] <= value <= target[1]
 
+    def time_in_target(self, key, track):
+        """Fraction of measured frames of `track` inside the target, or None."""
+        target = self.targets.get(key)
+        values = np.asarray(track, dtype=float)
+        values = values[~np.isnan(values)]
+        if target is None or len(values) == 0:
+            return None
+        return float(np.mean((values >= target[0]) & (values <= target[1])))
+
+    # --- VOWEL CHECK ---
+
+    def set_vowel_baseline(self, vowel_result):
+        self.vowel_baseline = _vowel_summary(vowel_result) | {
+            "recorded": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        self.save()
+
     # --- CALIBRATION / HISTORY ---
 
     def set_formant_ceiling(self, ceiling):
@@ -139,7 +159,20 @@ class Profile:
         self.save()
 
     def log_take(self, result):
+        self._log(summarize(result) | {"kind": "take"})
+
+    def log_vowel_check(self, vowel_result):
+        self._log(_vowel_summary(vowel_result) | {"kind": "vowels"})
+
+    def _log(self, entry):
         self.directory.mkdir(parents=True, exist_ok=True)
-        entry = summarize(result) | {"time": datetime.now().isoformat(timespec="seconds")}
+        entry["time"] = datetime.now().isoformat(timespec="seconds")
         with self.history_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
+
+def _vowel_summary(vowel_result):
+    return {"delta_f": _clean(vowel_result["delta_f"]),
+            "formant_ceiling": _clean(vowel_result["formant_ceiling"]),
+            "vowels": {w: {k: _clean(v) for k, v in vals.items()}
+                       for w, vals in vowel_result["vowels"].items()}}

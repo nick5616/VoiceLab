@@ -11,7 +11,7 @@ A real-time vocal analysis tool for singers, voice actors, people doing gender-a
 | **Fold Contact (H1*–H2*)** | First-minus-second harmonic level, corrected for F1/F2. A proxy for vocal weight (heavy → light)    | Yes  |
 | **Clarity (CPP)**          | Cepstral peak prominence: how periodic the voice is (breathy/rough → clear)                         | Yes  |
 | **Ring (2–4 kHz)**         | Energy in the singer's-formant region relative to 0–2 kHz (muffled → ringing)                       | Yes  |
-| **Pitch Movement**         | Std. deviation of pitch in semitones (monotone → dynamic)                                           | Take |
+| **Intonation Range**       | 5th–95th percentile pitch spread in semitones (flat → expressive). The live meter uses the last 6 s | Yes  |
 | **Level**                  | Voiced level in dBFS. Uncalibrated, so compare takes on the same mic and gain only                  | Yes  |
 
 Each take also shows an interactive graph: pitch track on top, F1/F2/F3 formant tracks below. Hover to inspect values at any point in time.
@@ -67,6 +67,15 @@ python main.py
 3. The app analyzes the take and adds a card to the top of the list.
 4. Compare takes as you experiment with different placements, vowel shapes, or resonance strategies.
 5. Click **Play** on any card to hear it back alongside its metrics.
+
+### Speaking practice
+
+- **Read aloud** (top of the live panel) shows a passage to read. There are five, covering a vowel tour, questions and answers, a story, a phone call, and counting. Reading the same passage each session makes takes comparable over time.
+- **Vowels** tab: a hands-free vowel check. Press Start and say each prompted word (heed, hid, head, had, hod, hud, hood, who'd) once, then pause. Each word is captured automatically. The result is:
+  - your vowel space (F2 against F1) drawn over your saved vowel baseline
+  - a **vowel-balanced ΔF**: each vowel counts equally, so it isn't skewed by which vowels a sentence happened to contain, making it the cleanest resonance comparison between sessions
+  - **Save as vowel baseline** keeps it for later checks
+- **Time in target**: once you have pitch or resonance targets, each take shows the share of voiced time spent inside them. Holding a voice through a whole passage matters more than its median.
 
 ### Baseline and targets
 

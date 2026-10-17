@@ -52,6 +52,17 @@ def semitone_std(f0_values):
     return float(np.std(12 * np.log2(f0 / np.median(f0))))
 
 
+def pitch_range_st(f0_values, min_voiced=20):
+    """Intonation range: 5th-95th percentile pitch spread in semitones.
+    Percentiles keep a single octave error or creak from inflating it."""
+    f0 = np.asarray(f0_values, dtype=float)
+    f0 = f0[~np.isnan(f0)]
+    if len(f0) < min_voiced:
+        return np.nan
+    lo, hi = np.percentile(f0, [5, 95])
+    return float(12 * np.log2(hi / lo))
+
+
 # --- RESONANCE ---
 
 def delta_f(f1, f2, f3, f4):
@@ -68,7 +79,7 @@ def vocal_tract_length_cm(df):
 
 def level_dbfs(frame):
     rms = np.sqrt(np.mean(np.square(frame)))
-    return float(20 * np.log10(rms + 1e-12))
+    return float(20 * np.log10(rms + 1e-6))  # floors digital silence at -120 dBFS
 
 
 def _power_spectrum_db(frame, sample_rate, pad=1):
@@ -163,8 +174,21 @@ def to_formants(sound, ceiling, time_step=0.01):
                                  maximum_formant=ceiling, window_length=0.025)
 
 
-def choose_formant_ceiling(sound, times):
-    """Pick the Burg ceiling whose F1-F4 tracks are smoothest over `times`.
+def _ceiling_score(sound, times, ceiling):
+    """Lower is better: penalizes invented, merged, missing and jumpy formants."""
+    freqs, bws = formant_values(to_formants(sound, ceiling), times)
+    spurious = np.sum(np.nanmedian(bws, axis=0) > MAX_FORMANT_BANDWIDTH)
+    missing = np.isnan(freqs).mean()
+    jumps = np.abs(np.diff(freqs, axis=0)) / np.nanmedian(freqs, axis=0)
+    # A ceiling that is too low splits one resonance into two formants
+    # sitting almost on top of each other.
+    merged = np.mean(np.any(np.diff(freqs, axis=1) < MIN_FORMANT_GAP, axis=1))
+    return spurious + np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged
+
+
+def choose_formant_ceiling(segments):
+    """Pick the Burg ceiling that fits a speaker best over `segments`, a list of
+    (sound, times) pairs scored jointly (e.g. one per vowel token).
 
     A fixed ceiling biases results as the speaker changes their vocal tract
     (e.g. 5000 Hz suits a large tract, 5500 Hz a smaller one), so we try a range
@@ -172,20 +196,14 @@ def choose_formant_ceiling(sound, times):
     FastTrack (Barreda, 2021). A ceiling that is too low forces Praat to invent
     a formant to fill the band; those show up as very wide bandwidths.
     """
-    if len(times) < 10:
+    segments = [(s, t) for s, t in segments if len(t) >= 3]
+    if sum(len(t) for _, t in segments) < 10:
         return DEFAULT_FORMANT_CEILING
     best, best_score = DEFAULT_FORMANT_CEILING, np.inf
     for ceiling in FORMANT_CEILINGS:
-        freqs, bws = formant_values(to_formants(sound, ceiling), times)
-        spurious = np.sum(np.nanmedian(bws, axis=0) > MAX_FORMANT_BANDWIDTH)
-        missing = np.isnan(freqs).mean()
-        jumps = np.abs(np.diff(freqs, axis=0)) / np.nanmedian(freqs, axis=0)
-        # A ceiling that is too low splits one resonance into two formants
-        # sitting almost on top of each other.
-        merged = np.mean(np.any(np.diff(freqs, axis=1) < MIN_FORMANT_GAP, axis=1))
         # Small pull toward the default breaks ties on very steady vowels.
         prior = 1e-3 * abs(ceiling - DEFAULT_FORMANT_CEILING) / 1000
-        score = spurious + np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged + prior
+        score = sum(_ceiling_score(s, t, ceiling) for s, t in segments) / len(segments) + prior
         if score < best_score:
             best, best_score = int(ceiling), score
     return best
@@ -258,8 +276,10 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
                          "Try speaking louder or longer."}
 
     reliable = voiced & (f0 <= FORMANT_RELIABLE_MAX_F0)
-    ceiling = choose_formant_ceiling(sound, times[reliable])
+    ceiling = choose_formant_ceiling([(sound, times[reliable])])
     freqs, bws = formant_values(to_formants(sound, ceiling), times)
+    df_track = delta_f(*freqs.T)
+    df_track[~reliable] = np.nan
 
     h1h2, cpps, rings, levels = [], [], [], []
     half = SPECTRAL_FRAME // 2
@@ -273,8 +293,7 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
         rings.append(ring_db(frame, sample_rate))
         levels.append(level_dbfs(frame))
 
-    df_frames = delta_f(*freqs[reliable].T)
-    df_frames = df_frames[~np.isnan(df_frames)]
+    df_frames = df_track[~np.isnan(df_track)]
     if len(df_frames) >= 10:
         resonance, resonance_note = float(np.median(df_frames)), None
     else:
@@ -290,6 +309,7 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
         "note": note,
         "cents": cents,
         "contour": semitone_std(f0),
+        "pitch_range": pitch_range_st(f0),
         "delta_f": resonance,
         "vtl": vocal_tract_length_cm(resonance) if resonance else None,
         "resonance_note": resonance_note,
@@ -305,5 +325,65 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
             "f1": freqs[:, 0],
             "f2": freqs[:, 1],
             "f3": freqs[:, 2],
+            "delta_f": df_track,
         },
     }
+
+
+# --- VOWEL CHECK ---
+
+# hVd words isolate one vowel each between /h/ and /d/ (Hillenbrand et al., 1995).
+VOWEL_WORDS = ["heed", "hid", "head", "had", "hod", "hud", "hood", "who'd"]
+MIN_NUCLEUS_FRAMES = 8  # 80 ms of voicing
+
+
+def vowel_nucleus(times, f0):
+    """Times in the steady middle (30-70%) of the longest voiced run, which in
+    an hVd word is the vowel."""
+    voiced = ~np.isnan(f0)
+    best_start, best_len, start = 0, 0, None
+    for i, v in enumerate(np.append(voiced, False)):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            if i - start > best_len:
+                best_start, best_len = start, i - start
+            start = None
+    if best_len < MIN_NUCLEUS_FRAMES:
+        return None
+    a = best_start + int(0.3 * best_len)
+    b = best_start + max(int(0.7 * best_len), int(0.3 * best_len) + 3)
+    return times[a:b], float(np.nanmedian(f0[a:b]))
+
+
+def analyze_vowels(tokens, sample_rate=SAMPLE_RATE):
+    """Formants per vowel from {word: audio}. The formant ceiling is chosen
+    jointly over all tokens, as one speaker's vocal tract fits them all.
+
+    Returns per-word F1-F4 and Delta F, plus the vowel-balanced mean Delta F,
+    which removes the effect of which vowels happened to be spoken."""
+    segments, skipped = {}, []
+    for word, audio in tokens.items():
+        sound = parselmouth.Sound(np.asarray(audio, dtype=float).flatten(),
+                                  sampling_frequency=sample_rate)
+        times, f0 = pitch_track(sound)
+        nucleus = vowel_nucleus(times, f0)
+        if nucleus is None or nucleus[1] > FORMANT_RELIABLE_MAX_F0:
+            skipped.append(word)
+            continue
+        segments[word] = (sound, nucleus[0], nucleus[1])
+
+    ceiling = choose_formant_ceiling([(s, t) for s, t, _ in segments.values()])
+    vowels = {}
+    for word, (sound, nucleus_times, f0) in segments.items():
+        freqs, _ = formant_values(to_formants(sound, ceiling), nucleus_times)
+        f1, f2, f3, f4 = (float(v) for v in np.nanmedian(freqs, axis=0))
+        df = float(delta_f(f1, f2, f3, f4))
+        if np.isnan(df):
+            skipped.append(word)
+            continue
+        vowels[word] = {"f0": f0, "f1": f1, "f2": f2, "f3": f3, "f4": f4, "delta_f": df}
+
+    mean_df = float(np.mean([v["delta_f"] for v in vowels.values()])) if vowels else None
+    return {"vowels": vowels, "skipped": [w for w in VOWEL_WORDS if w in skipped],
+            "delta_f": mean_df, "formant_ceiling": ceiling}

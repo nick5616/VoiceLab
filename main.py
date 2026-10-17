@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 
 import numpy as np
 import pyqtgraph as pg
@@ -11,10 +12,11 @@ from PyQt6.QtCore import Qt, QSize, QRectF
 from PyQt6.QtGui import QFont, QPainter, QColor, QPen
 import qtawesome as qta
 
-from analysis import SAMPLE_RATE, hz_to_note, vocal_tract_length_cm
-from engine import LiveEngine, TakeAnalysisWorker, UPDATE_INTERVAL
+from analysis import SAMPLE_RATE, hz_to_note, pitch_range_st, vocal_tract_length_cm
+from engine import LiveEngine, take_analysis_worker, UPDATE_INTERVAL
 from live_views import PitchView, SpectrumView, PitchResonancePlane, pitch_label
 from profile_store import Profile, TARGET_KEYS, target_from_value
+from speech import ReadingPrompt, VowelCheck
 
 # --- METRIC DISPLAY ---
 # key: (label, min, max, low label, high label, value format, scale)
@@ -25,11 +27,12 @@ METRIC_DEFS = {
     "h1h2": ("Fold Contact (H1*–H2*)", -5, 15, "Heavy", "Light", "{:+.1f} dB", None),
     "cpp": ("Clarity (CPP)", 8, 30, "Breathy", "Clear", "{:.1f} dB", None),
     "ring": ("Ring (2–4 kHz)", -30, 0, "Muffled", "Ringing", "{:+.1f} dB", None),
-    "contour": ("Pitch Movement", 0.5, 5, "Monotone", "Dynamic", "{:.1f} st", None),
+    "pitch_range": ("Intonation Range", 0, 12, "Flat", "Expressive", "{:.1f} st", None),
     "level": ("Level", -60, 0, "Quiet", "Loud", "{:.0f} dBFS, uncalibrated", None),
 }
 LIVE_METER_KEYS = ["delta_f", "h1h2", "cpp", "ring"]
-TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "contour", "level"]
+TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "level"]
+INTONATION_WINDOW_SECONDS = 6
 # Targets dialog: key -> (spinbox min, max, decimals, unit)
 TARGET_EDIT = {
     "pitch": (50, 1200, 0, "Hz"),
@@ -37,7 +40,7 @@ TARGET_EDIT = {
     "h1h2": (-20, 30, 1, "dB"),
     "cpp": (0, 50, 1, "dB"),
     "ring": (-50, 10, 1, "dB"),
-    "contour": (0, 10, 2, "st"),
+    "pitch_range": (0, 24, 1, "st"),
 }
 LIVE_VIEW_HEIGHT = 220
 # Exponential smoothing for live meters (~200 ms time constant).
@@ -176,13 +179,23 @@ class LivePanel(QFrame):
         targets_btn = QPushButton(qta.icon("fa5s.bullseye", color="white"), " Targets")
         targets_btn.setStyleSheet(BUTTON_STYLE)
         targets_btn.clicked.connect(on_edit_targets)
+        read_btn = QPushButton(qta.icon("fa5s.book-open", color="white"), " Read aloud")
+        read_btn.setCheckable(True)
+        read_btn.setStyleSheet(f"QPushButton {{ {BUTTON_STYLE} }} "
+                               "QPushButton:checked { background-color: #3498db; }")
         self.note_label = QLabel("—")
         self.note_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         header.addWidget(title)
         header.addWidget(targets_btn)
+        header.addWidget(read_btn)
         header.addStretch()
         header.addWidget(self.note_label)
         layout.addLayout(header)
+
+        self.reading_prompt = ReadingPrompt()
+        self.reading_prompt.hide()
+        read_btn.toggled.connect(self.reading_prompt.setVisible)
+        layout.addWidget(self.reading_prompt)
 
         self.pitch_view = PitchView()
         self.spectrum_view = SpectrumView(spectrum_freqs)
@@ -204,6 +217,10 @@ class LivePanel(QFrame):
         self.smoothed_log_f0 = np.nan
         for meter in self.meters.values():
             layout.addWidget(meter)
+        self.intonation_meter = MetricBar("pitch_range")
+        self.intonation_meter.label = f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)"
+        self.recent_f0 = deque(maxlen=int(INTONATION_WINDOW_SECONDS / UPDATE_INTERVAL))
+        layout.addWidget(self.intonation_meter)
         self.level_meter = MetricBar("level")
         self.level_meter.label = "Input Level"
         layout.addWidget(self.level_meter)
@@ -211,7 +228,7 @@ class LivePanel(QFrame):
 
     def refresh_profile(self):
         p = self.profile
-        for meter in self.meters.values():
+        for meter in [*self.meters.values(), self.intonation_meter]:
             meter.set_reference(p)
         self.pitch_view.set_reference(p.baseline_value("pitch"), p.target("pitch"))
         baseline = (p.baseline_value("pitch"), p.baseline_value("delta_f")) if p.baseline else None
@@ -226,6 +243,8 @@ class LivePanel(QFrame):
         self.pitch_view.update_frame(frame)
         self.spectrum_view.update_frame(frame)
         self.level_meter.set_value(frame["level"], self.profile)
+        self.recent_f0.append(f0)
+        self.intonation_meter.set_value(pitch_range_st(self.recent_f0), self.profile)
 
         if np.isnan(f0):
             self.note_label.setText("—")
@@ -444,6 +463,10 @@ class TakeCard(QFrame):
         graph.setFixedHeight(200)
         layout.addWidget(graph)
 
+        self.time_in_target = QLabel()
+        self.time_in_target.setStyleSheet("color: #2ecc71; font-size: 12px;")
+        layout.addWidget(self.time_in_target)
+
         # --- METRIC BARS ---
         self.bars = {key: MetricBar(key) for key in TAKE_BAR_KEYS}
         for bar in self.bars.values():
@@ -452,6 +475,14 @@ class TakeCard(QFrame):
         self.refresh_profile()
 
     def refresh_profile(self):
+        # Share of voiced time inside each target: holding a voice across a whole
+        # passage matters more than its median.
+        tracks = self.data["tracks"]
+        shares = [(name, self.profile.time_in_target(key, tracks[track]))
+                  for name, key, track in (("pitch", "pitch", "f0"), ("resonance", "delta_f", "delta_f"))]
+        parts = [f"{name} {share:.0%}" for name, share in shares if share is not None]
+        self.time_in_target.setText(f"Time in target: {' · '.join(parts)}" if parts else "")
+        self.time_in_target.setVisible(bool(parts))
         for key, bar in self.bars.items():
             bar.set_reference(self.profile)
             if key == "delta_f" and self.data["delta_f"] is None:
@@ -486,6 +517,9 @@ class MainWindow(QMainWindow):
         self.live_panel = LivePanel(engine.analyzer.spectrum_freqs, profile, self.edit_targets)
         self.engine.frame_ready.connect(self.live_panel.update_frame)
         main_layout.addWidget(self.live_panel)
+        self.vowel_check = VowelCheck(engine, profile)
+        self.vowel_check.running_changed.connect(lambda running: self.record_btn.setEnabled(not running))
+        self.live_panel.tabs.addTab(self.vowel_check, "Vowels")
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
@@ -536,12 +570,12 @@ class MainWindow(QMainWindow):
             self.status_label.setStyleSheet("color: #f1c40f;")
             self.update_record_button_style(recording=False)
             self.record_btn.setEnabled(False)
-            self.analysis_worker = TakeAnalysisWorker(self.engine.stop_take())
+            self.analysis_worker = take_analysis_worker(self.engine.stop_take())
             self.analysis_worker.finished_analysis.connect(self.process_results)
             self.analysis_worker.start()
 
     def process_results(self, results):
-        self.record_btn.setEnabled(True)
+        self.record_btn.setEnabled(not self.vowel_check.running)
         if "error" in results:
             self.status_label.setText(results["error"])
             self.status_label.setStyleSheet("color: #e74c3c;")
@@ -574,6 +608,7 @@ class MainWindow(QMainWindow):
 
     def refresh_profile(self, message=None):
         self.live_panel.refresh_profile()
+        self.vowel_check.refresh_profile()
         for card in self.cards:
             card.refresh_profile()
         if message:

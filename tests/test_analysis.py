@@ -112,6 +112,63 @@ def test_contour_is_in_semitones():
     assert abs(low["contour"] - high["contour"]) < 0.3
 
 
+def test_pitch_range_in_semitones():
+    def glide(f_start, f_end):
+        f0 = np.geomspace(f_start, f_end, int(1.5 * SR))
+        return 0.3 * np.sin(2 * np.pi * np.cumsum(f0) / SR)
+
+    # An octave glide spans ~0.9 octave between its 5th and 95th percentiles.
+    assert abs(analysis.analyze_take(glide(110, 220))["pitch_range"] - 10.8) < 1
+    assert analysis.analyze_take(synth_vowel(150, MALE_FORMANTS))["pitch_range"] < 0.5
+
+
+# Adult male averages from Hillenbrand et al. (1995): F1, F2, F3.
+HVD_FORMANTS = {
+    "heed": (342, 2322, 3000), "hid": (427, 2034, 2684), "head": (580, 1799, 2605),
+    "had": (588, 1952, 2601), "hod": (768, 1333, 2522), "hud": (623, 1200, 2550),
+    "hood": (469, 1122, 2434), "who'd": (378, 997, 2343),
+}
+
+
+def hvd_token(word, f0, scale=1.0):
+    f1, f2, f3 = HVD_FORMANTS[word]
+    formants = [(f1, 80), (f2, 100), (f3, 120), (3600, 150), (4500, 200)]
+    vowel = synth_vowel(f0, scaled(formants, scale), seconds=0.35)
+    gap = np.zeros(int(0.25 * SR))
+    return np.concatenate([gap, vowel, gap])
+
+
+def test_vowel_check_recovers_vowel_space():
+    tokens = {word: hvd_token(word, 120) for word in analysis.VOWEL_WORDS}
+    result = analysis.analyze_vowels(tokens)
+    assert result["skipped"] == []
+    for word, (f1, f2, _) in HVD_FORMANTS.items():
+        v = result["vowels"][word]
+        assert abs(v["f1"] - f1) / f1 < 0.12, word
+        assert abs(v["f2"] - f2) / f2 < 0.08, word
+
+
+def test_vowel_check_balanced_resonance_tracks_tract_size():
+    words = analysis.VOWEL_WORDS
+    larger = analysis.analyze_vowels({w: hvd_token(w, 120) for w in words})
+    smaller = analysis.analyze_vowels({w: hvd_token(w, 200, scale=1.15) for w in words})
+    assert abs(smaller["delta_f"] / larger["delta_f"] - 1.15) < 0.05
+
+
+def test_vowel_check_skips_silent_tokens():
+    tokens = {"heed": hvd_token("heed", 120), "hid": np.zeros(int(0.8 * SR))}
+    result = analysis.analyze_vowels(tokens)
+    assert result["skipped"] == ["hid"]
+    assert "heed" in result["vowels"]
+
+
+def test_take_has_resonance_track():
+    result = analysis.analyze_take(synth_vowel(150, MALE_FORMANTS))
+    track = result["tracks"]["delta_f"]
+    assert len(track) == len(result["tracks"]["f0"])
+    assert abs(np.nanmedian(track) - result["delta_f"]) < 1
+
+
 def test_level_is_not_normalized_away():
     loud = analysis.analyze_take(synth_vowel(150, MALE_FORMANTS))
     quiet_audio = synth_vowel(150, MALE_FORMANTS) * 0.1

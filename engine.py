@@ -55,6 +55,10 @@ class LiveEngine(QObject):
         with self._lock:
             return self._ring.copy()
 
+    def is_capturing(self):
+        with self._lock:
+            return self._take is not None
+
     def start_take(self):
         with self._lock:
             self._take = []
@@ -85,17 +89,21 @@ class _LiveWorker(QThread):
             time.sleep(max(0.0, UPDATE_INTERVAL - elapsed))
 
 
-class TakeAnalysisWorker(QThread):
+class AnalysisWorker(QThread):
+    """Runs fn(*args) off the UI thread and emits its result dict."""
     finished_analysis = pyqtSignal(dict)
 
-    def __init__(self, audio, sample_rate=SAMPLE_RATE):
+    def __init__(self, fn, *args):
         super().__init__()
-        self.audio = audio
-        self.sample_rate = sample_rate
+        self.fn, self.args = fn, args
 
     def run(self):
         try:
-            result = analyze_take(self.audio, self.sample_rate)
+            result = self.fn(*self.args)
         except Exception as e:
             result = {"error": f"Error: {e}"}
         self.finished_analysis.emit(result)
+
+
+def take_analysis_worker(audio, sample_rate=SAMPLE_RATE):
+    return AnalysisWorker(analyze_take, audio, sample_rate)
