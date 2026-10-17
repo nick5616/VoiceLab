@@ -9,7 +9,6 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from analysis import SAMPLE_RATE, FrameAnalyzer, analyze_take
 
 UPDATE_INTERVAL = 0.025   # live meter refresh (s)
-SILENCE_DBFS = -50        # below this, skip analysis and report silence
 BLOCK_SIZE = 512
 
 
@@ -78,15 +77,10 @@ class _LiveWorker(QThread):
         self.running = True
         while self.running:
             started = time.perf_counter()
-            window = self.engine.latest_window()
-            level = 20 * np.log10(np.sqrt(np.mean(window[-2048:] ** 2)) + 1e-12)
-            if level < SILENCE_DBFS:
-                self.frame_ready.emit({"level": level, "f0": np.nan})
-            else:
-                try:
-                    self.frame_ready.emit(self.engine.analyzer.analyze(window))
-                except Exception as e:  # keep the meters alive on odd frames
-                    print(f"Live analysis error: {e}")
+            try:
+                self.frame_ready.emit(self.engine.analyzer.analyze(self.engine.latest_window()))
+            except Exception as e:  # keep the meters alive on odd frames
+                print(f"Live analysis error: {e}")
             elapsed = time.perf_counter() - started
             time.sleep(max(0.0, UPDATE_INTERVAL - elapsed))
 

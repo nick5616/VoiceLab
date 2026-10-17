@@ -20,7 +20,7 @@ Each take also shows an interactive graph: pitch track on top, F1/F2/F3 formant 
 
 - **Resonance** uses ΔF rather than individual formants because single formants mostly reflect which vowel you're saying. In a 2025 study a single speaker deliberately varied pitch, resonance and weight; ΔF tracked resonance with 94% ranking accuracy and stayed largely independent of the other two ([Netzorg et al., Interspeech 2025](https://www.isca-archive.org/interspeech_2025/netzorg25_interspeech.pdf)).
 - **Weight** has no reliable single acoustic measure. The same study found that only electroglottograph contact quotient and loudness tracked it, while spectral slope also moved with resonance. Fold Contact, Clarity and Level are proxies, and are best used to compare your own takes against each other.
-- **Formant ceiling** (the frequency range Praat searches for formants) is chosen per take. VoiceLab tests several ceilings and keeps the one whose formant tracks are smoothest and don't merge. The live meters then use that ceiling.
+- **Formant ceiling** (the frequency range Praat searches for formants) is chosen per take. VoiceLab tests several ceilings and rejects any that produce fake formants: ones with very wide bandwidths, or two sitting almost on top of each other. Of the rest it keeps the one with the smoothest tracks. The live meters then use that ceiling.
 - **High pitch**: above ~350 Hz the harmonics are too far apart for formant tracking, so resonance is greyed out rather than reporting a wrong number.
 
 ## Requirements
@@ -59,7 +59,10 @@ python main.py
 
 ## Usage
 
-1. The **Live** panel listens as soon as the app opens: a scrolling pitch trace with note names, plus live meters.
+1. The **Live** panel listens as soon as the app opens. Pick a view, and the meters underneath stay visible on every tab:
+   - **Pitch**: scrolling pitch trace on a note-name axis that follows your range.
+   - **Spectrum**: a scrolling spectrogram with F1–F4 tracks overlaid, and the current spectrum on the right with harmonics (blue dots) and formants (dashed lines) on the same frequency axis. Use it for vowel shaping and formant tuning, for example lining up a harmonic with F1. Formant tracks are hidden above ~350 Hz, but you can still see harmonics brighten as they pass through a resonance.
+   - **Pitch × Resonance**: your live position with a 3-second trail, rough population regions as orientation (not targets), and each recorded take as a numbered point.
 2. Click the red microphone button to record a take, speak or sing, then click stop.
 3. The app analyzes the take and adds a card to the top of the list.
 4. Compare takes as you experiment with different placements, vowel shapes, or resonance strategies.

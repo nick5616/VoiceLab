@@ -20,10 +20,16 @@ FORMANT_CEILINGS = np.arange(4500, 6501, 250)
 DEFAULT_FORMANT_CEILING = 5500
 # Adjacent real formants are rarely closer than this.
 MIN_FORMANT_GAP = 250
+# Real F1-F4 bandwidths stay well under this; wider "formants" are fitting artifacts.
+MAX_FORMANT_BANDWIDTH = 600
 SPEED_OF_SOUND_CM = 35000
 
 # Analysis frame for spectral measures (~46 ms at 44.1 kHz).
 SPECTRAL_FRAME = 2048
+# Live spectrum display: covers F1-F4 of most voices and the 2-4 kHz ring region.
+SPECTRUM_MAX_HZ = 5500
+# Below this level live frames skip analysis and report silence.
+SILENCE_DBFS = -50
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -146,10 +152,10 @@ def pitch_track(sound, time_step=0.01):
 
 
 def formant_values(formant_obj, times):
-    """Arrays of shape (len(times), 4) for F1-F4 and (len(times), 2) for B1-B2."""
+    """Arrays of shape (len(times), 4) for F1-F4 and their bandwidths B1-B4."""
     freqs = np.array([[formant_obj.get_value_at_time(i, t) for i in range(1, 5)] for t in times])
-    bws = np.array([[formant_obj.get_bandwidth_at_time(i, t) for i in range(1, 3)] for t in times])
-    return freqs.reshape(-1, 4), bws.reshape(-1, 2)
+    bws = np.array([[formant_obj.get_bandwidth_at_time(i, t) for i in range(1, 5)] for t in times])
+    return freqs.reshape(-1, 4), bws.reshape(-1, 4)
 
 
 def to_formants(sound, ceiling, time_step=0.01):
@@ -163,21 +169,23 @@ def choose_formant_ceiling(sound, times):
     A fixed ceiling biases results as the speaker changes their vocal tract
     (e.g. 5000 Hz suits a large tract, 5500 Hz a smaller one), so we try a range
     and keep the one with the least frame-to-frame jitter, in the spirit of
-    FastTrack (Barreda, 2021).
+    FastTrack (Barreda, 2021). A ceiling that is too low forces Praat to invent
+    a formant to fill the band; those show up as very wide bandwidths.
     """
     if len(times) < 10:
         return DEFAULT_FORMANT_CEILING
     best, best_score = DEFAULT_FORMANT_CEILING, np.inf
     for ceiling in FORMANT_CEILINGS:
-        freqs, _ = formant_values(to_formants(sound, ceiling), times)
+        freqs, bws = formant_values(to_formants(sound, ceiling), times)
+        spurious = np.sum(np.nanmedian(bws, axis=0) > MAX_FORMANT_BANDWIDTH)
         missing = np.isnan(freqs).mean()
         jumps = np.abs(np.diff(freqs, axis=0)) / np.nanmedian(freqs, axis=0)
         # A ceiling that is too low splits one resonance into two formants
         # sitting almost on top of each other.
-        merged = np.mean(np.nanmin(np.diff(freqs, axis=1), axis=1) < MIN_FORMANT_GAP)
+        merged = np.mean(np.any(np.diff(freqs, axis=1) < MIN_FORMANT_GAP, axis=1))
         # Small pull toward the default breaks ties on very steady vowels.
         prior = 1e-3 * abs(ceiling - DEFAULT_FORMANT_CEILING) / 1000
-        score = np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged + prior
+        score = spurious + np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged + prior
         if score < best_score:
             best, best_score = int(ceiling), score
     return best
@@ -193,12 +201,23 @@ class FrameAnalyzer:
     def __init__(self, sample_rate=SAMPLE_RATE):
         self.sample_rate = sample_rate
         self.formant_ceiling = DEFAULT_FORMANT_CEILING
+        freqs, _ = _power_spectrum_db(np.zeros(SPECTRAL_FRAME), sample_rate, pad=2)
+        self._spectrum_bins = freqs <= SPECTRUM_MAX_HZ
+        self.spectrum_freqs = freqs[self._spectrum_bins]
+
+    def spectrum(self, frame):
+        """Power spectrum (dB) of the frame over 0-SPECTRUM_MAX_HZ."""
+        _, power_db = _power_spectrum_db(frame, self.sample_rate, pad=2)
+        return power_db[self._spectrum_bins]
 
     def analyze(self, window):
         frame = window[-SPECTRAL_FRAME:]
         result = {"level": level_dbfs(frame), "f0": np.nan, "delta_f": np.nan,
                   "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
-                  "resonance_reliable": False}
+                  "formants": np.full(4, np.nan), "resonance_reliable": False,
+                  "spectrum": self.spectrum(frame)}
+        if result["level"] < SILENCE_DBFS:
+            return result
 
         sound = parselmouth.Sound(window, sampling_frequency=self.sample_rate)
         _, f0_track = pitch_track(sound)
@@ -217,6 +236,7 @@ class FrameAnalyzer:
         result["cpp"] = cpp(frame, self.sample_rate, f0)
         result["h1h2"] = h1_h2_corrected(frame, self.sample_rate, f0, freqs, bws)
         result["ring"] = ring_db(frame, self.sample_rate)
+        result["formants"] = freqs
         if not np.isnan(freqs).any():
             result["delta_f"] = float(delta_f(*freqs))
         result["resonance_reliable"] = f0 <= FORMANT_RELIABLE_MAX_F0

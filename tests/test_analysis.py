@@ -62,9 +62,12 @@ def test_delta_f_recovers_formant_spacing():
 
 
 def test_formant_ceiling_adapts_to_smaller_tract():
-    result = analysis.analyze_take(synth_vowel(200, scaled(MALE_FORMANTS, 1.18)))
-    assert result["formant_ceiling"] > analysis.DEFAULT_FORMANT_CEILING
-    assert abs(result["delta_f"] - 1180) / 1180 < 0.05
+    for f0 in (200, 300):
+        # Leading silence, as in a real take, must not change the result.
+        audio = np.concatenate([np.zeros(int(0.3 * SR)), synth_vowel(f0, scaled(MALE_FORMANTS, 1.18))])
+        result = analysis.analyze_take(audio)
+        assert result["formant_ceiling"] > analysis.DEFAULT_FORMANT_CEILING
+        assert abs(result["delta_f"] - 1180) / 1180 < 0.04
 
 
 def test_smaller_tract_reads_brighter_regardless_of_pitch():

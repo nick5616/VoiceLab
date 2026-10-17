@@ -1,18 +1,18 @@
 import sys
-from collections import deque
 
 import numpy as np
 import pyqtgraph as pg
 import sounddevice as sd
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QScrollArea,
-                             QProgressBar, QFrame, QSizePolicy)
+                             QProgressBar, QFrame, QSizePolicy, QTabWidget)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont
 import qtawesome as qta
 
-from analysis import SAMPLE_RATE, NOTE_NAMES, hz_to_note, vocal_tract_length_cm
+from analysis import SAMPLE_RATE, vocal_tract_length_cm
 from engine import LiveEngine, TakeAnalysisWorker, UPDATE_INTERVAL
+from live_views import PitchView, SpectrumView, PitchResonancePlane, pitch_label
 
 # --- DISPLAY RANGES ---
 # (key, label, min, max, low label, high label, value format)
@@ -25,7 +25,7 @@ METRICS = [
 MIN_PITCH, MAX_PITCH = 60, 1200
 MIN_CONTOUR, MAX_CONTOUR = 0.5, 5    # semitones
 LEVEL_FLOOR = -60                     # dBFS
-PITCH_HISTORY_SECONDS = 8
+LIVE_VIEW_HEIGHT = 220
 # Exponential smoothing for live meters (~200 ms time constant).
 METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
 
@@ -45,27 +45,6 @@ def bar_position(value, min_val, max_val):
 
 def bar_color(position):
     return BAR_COLORS[0] if position < 33 else BAR_COLORS[1] if position < 66 else BAR_COLORS[2]
-
-
-def pitch_label(f0):
-    note, cents = hz_to_note(f0)
-    return f"{note} {cents:+d}¢ · {f0:.0f} Hz"
-
-
-def note_ticks(lo_hz, hi_hz):
-    """Pitch-axis ticks (in log2 Hz) labelled with note names, thinned to fit."""
-    lo_midi = int(np.floor(69 + 12 * np.log2(lo_hz / 440)))
-    hi_midi = int(np.ceil(69 + 12 * np.log2(hi_hz / 440)))
-    span = hi_midi - lo_midi
-    step = 1 if span <= 12 else 2 if span <= 24 else 5
-    major, minor = [], []
-    for midi in range(lo_midi, hi_midi + 1):
-        y = np.log2(440 * 2 ** ((midi - 69) / 12))
-        if midi % step == 0:
-            major.append((y, f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}  {2 ** y:.0f}"))
-        else:
-            minor.append((y, ""))
-    return [major, minor]
 
 
 class MetricBar(QWidget):
@@ -110,9 +89,9 @@ class MetricBar(QWidget):
 
 
 class LivePanel(QFrame):
-    """Real-time pitch trace and meters fed by the LiveEngine."""
+    """Tabbed live views and meters fed by the LiveEngine."""
 
-    def __init__(self):
+    def __init__(self, spectrum_freqs):
         super().__init__()
         self.setStyleSheet("QFrame { background-color: #2b2b2b; border-radius: 10px; } "
                            "QLabel { color: #ffffff; }")
@@ -128,46 +107,50 @@ class LivePanel(QFrame):
         header.addWidget(self.note_label)
         layout.addLayout(header)
 
-        self.history_len = int(PITCH_HISTORY_SECONDS / UPDATE_INTERVAL)
-        self.pitch_history = deque([np.nan] * self.history_len, maxlen=self.history_len)
-        self.times = np.linspace(-PITCH_HISTORY_SECONDS, 0, self.history_len)
-
-        self.plot = pg.PlotWidget(background="#1e1e1e")
-        self.plot.setFixedHeight(180)
-        # Pitch is plotted as log2(Hz) so equal musical intervals are equal heights.
-        self.plot.showGrid(x=False, y=True, alpha=0.2)
-        self.plot.setMouseEnabled(x=False, y=False)
-        self.plot.hideButtons()
-        self.plot.setXRange(-PITCH_HISTORY_SECONDS, 0, padding=0)
-        self.plot.getAxis("left").setWidth(70)
-        self.plot.getAxis("bottom").setLabel("seconds")
-        self.curve = self.plot.plot(pen=pg.mkPen("#3498db", width=2), connect="finite")
-        layout.addWidget(self.plot)
+        self.pitch_view = PitchView()
+        self.spectrum_view = SpectrumView(spectrum_freqs)
+        self.plane = PitchResonancePlane()
+        self.tabs = QTabWidget()
+        self.tabs.setFixedHeight(LIVE_VIEW_HEIGHT + 30)
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab { background: #333; color: #aaa; padding: 5px 14px; border-radius: 4px; margin-right: 4px; }
+            QTabBar::tab:selected { background: #3498db; color: white; }
+        """)
+        self.tabs.addTab(self.pitch_view, "Pitch")
+        self.tabs.addTab(self.spectrum_view, "Spectrum")
+        self.tabs.addTab(self.plane, "Pitch × Resonance")
+        layout.addWidget(self.tabs)
 
         self.meters = {key: MetricBar(label, lo, hi, low, high, fmt)
                        for key, label, lo, hi, low, high, fmt in METRICS}
         self.smoothed = {key: np.nan for key in self.meters}
+        self.smoothed_log_f0 = np.nan
         for meter in self.meters.values():
             layout.addWidget(meter)
         self.level_meter = MetricBar("Input Level", LEVEL_FLOOR, 0, "Quiet", "Loud", "{:.0f} dBFS")
         layout.addWidget(self.level_meter)
 
+    @staticmethod
+    def _smooth(prev, value):
+        return value if np.isnan(prev) else prev + METER_SMOOTHING * (value - prev)
+
     def update_frame(self, frame):
-        f0 = frame.get("f0", np.nan)
-        self.pitch_history.append(f0)
-        self.curve.setData(self.times, np.log2(np.array(self.pitch_history)))
-        self._follow_pitch()
+        f0 = frame["f0"]
+        self.pitch_view.update_frame(frame)
+        self.spectrum_view.update_frame(frame)
         self.level_meter.set_value(frame["level"])
 
         if np.isnan(f0):
             self.note_label.setText("—")
+            self.plane.update_point(np.nan, np.nan)
             return
         self.note_label.setText(pitch_label(f0))
+        self.smoothed_log_f0 = self._smooth(self.smoothed_log_f0, np.log2(f0))
         for key, meter in self.meters.items():
-            value = frame.get(key, np.nan)
+            value = frame[key]
             if not np.isnan(value):
-                prev = self.smoothed[key]
-                self.smoothed[key] = value if np.isnan(prev) else prev + METER_SMOOTHING * (value - prev)
+                self.smoothed[key] = self._smooth(self.smoothed[key], value)
             smoothed = self.smoothed[key]
             if key == "delta_f" and not frame.get("resonance_reliable"):
                 meter.set_value(None, note="pitch too high to measure")
@@ -177,18 +160,8 @@ class LivePanel(QFrame):
             else:
                 meter.set_value(smoothed)
 
-    def _follow_pitch(self):
-        """Keep the recent pitch range in view with at least an octave of span."""
-        recent = np.array(self.pitch_history)
-        recent = recent[~np.isnan(recent)]
-        if len(recent) == 0:
-            return
-        lo, hi = np.percentile(recent, [5, 95])
-        center = np.sqrt(lo * hi)
-        span = max(hi / lo, 2.0) * 1.3
-        lo, hi = max(MIN_PITCH, center / np.sqrt(span)), min(MAX_PITCH, center * np.sqrt(span))
-        self.plot.setYRange(np.log2(lo), np.log2(hi), padding=0)
-        self.plot.getAxis("left").setTicks(note_ticks(lo, hi))
+        resonance = self.smoothed["delta_f"] if frame["resonance_reliable"] else np.nan
+        self.plane.update_point(2 ** self.smoothed_log_f0, resonance)
 
 
 class AnalysisGraph(pg.GraphicsLayoutWidget):
@@ -321,7 +294,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        self.live_panel = LivePanel()
+        self.live_panel = LivePanel(engine.analyzer.spectrum_freqs)
         self.engine.frame_ready.connect(self.live_panel.update_frame)
         main_layout.addWidget(self.live_panel)
 
@@ -387,6 +360,8 @@ class MainWindow(QMainWindow):
         # Calibrate the live formant tracker to the ceiling that fit this take.
         self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
         self.take_count += 1
+        if results["delta_f"] is not None:
+            self.live_panel.plane.add_take(self.take_count, results["pitch"], results["delta_f"])
         card = TakeCard(results, self.take_count)
         self.scroll_layout.insertWidget(0, card)
         self.status_label.setText("Done")
