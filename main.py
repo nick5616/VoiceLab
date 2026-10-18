@@ -13,7 +13,7 @@ from PyQt6.QtCore import Qt, QSize, QRectF, pyqtSignal
 from PyQt6.QtGui import QFont, QPainter, QColor, QPen
 import qtawesome as qta
 
-from analysis import (IN_TUNE_CENTS, MIN_RELIABLE_SNR, SAMPLE_RATE, NoiseMonitor, analyze_take,
+from analysis import (IN_TUNE_CENTS, MIN_RELIABLE_SNR, SAMPLE_RATE, VOICE_BAND_HZ, NoiseMonitor, analyze_take,
                       hz_to_midi, hz_to_note, pitch_range_st, vibrato_stats, vocal_tract_length_cm)
 from engine import AnalysisWorker, LiveEngine, take_analysis_worker, UPDATE_INTERVAL
 from exercise import ExerciseView, midi_name
@@ -49,6 +49,7 @@ TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "leve
 INTONATION_WINDOW_SECONDS = 6
 VIBRATO_WINDOW_SECONDS = 1.2
 NOISE_WINDOW_SECONDS = 10
+HISS_GAP_DB = 6                 # band SNR this much above full-band SNR = noise is mostly hiss
 NOISE_BADGE_EVERY = 10          # live frames between SNR badge updates
 IMPORT_MAX_SECONDS = 90         # imported files are trimmed to keep analysis quick
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
@@ -99,6 +100,14 @@ def import_and_analyze(path, isolate):
                 ([f"first {IMPORT_MAX_SECONDS} s"] if trimmed else [])
         result["source"] = " · ".join(notes)
     return result
+
+
+def hiss_note(snr, snr_full):
+    """Explains when most of the noise sits above the voice band, or None."""
+    if snr is None or snr_full is None or snr - snr_full < HISS_GAP_DB:
+        return None
+    return (f"Most of the noise is high-pitched hiss above {VOICE_BAND_HZ // 1000} kHz "
+            f"(full-band SNR {snr_full:.0f} dB). Measurements ignore that range.")
 
 
 def bar_color(position, on_target):
@@ -379,7 +388,7 @@ class LivePanel(QFrame):
         self.plane.update_point(2 ** self.smoothed_log_f0, resonance)
 
     def _update_snr_badge(self):
-        snr = self.noise.snr()
+        snr, snr_full = self.noise.snr()
         if snr is None:
             self.snr_badge.setText("SNR —")
             self.snr_badge.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -388,10 +397,14 @@ class LivePanel(QFrame):
         self.snr_badge.setText(f"SNR {snr:.0f} dB" + ("" if ok else " · noisy"))
         self.snr_badge.setStyleSheet(f"color: {ON_TARGET_COLOR if ok else OFF_TARGET_COLOR}; "
                                      "font-size: 11px; font-weight: bold;")
-        self.snr_badge.setToolTip(
-            "Voice-to-noise ratio over the last 10 s." + ("" if ok else
-            f" Below {MIN_RELIABLE_SNR} dB, Clarity, Fold Contact and Ring become unreliable; "
-            "pitch and resonance hold up better. Move closer to the mic or reduce room noise."))
+        tip = [f"Voice-to-noise ratio in the voice band (0–{VOICE_BAND_HZ // 1000} kHz), where "
+               "VoiceLab measures, over the last 10 s."]
+        if hiss_note(snr, snr_full):
+            tip.append(hiss_note(snr, snr_full))
+        if not ok:
+            tip.append(f"Below {MIN_RELIABLE_SNR} dB, Clarity, Fold Contact and Ring become unreliable; "
+                       "pitch and resonance hold up better. Move closer to the mic or reduce room noise.")
+        self.snr_badge.setToolTip(" ".join(tip))
 
     def _update_tuning(self, f0):
         """Cents from the exercise's target note, or from the nearest note."""
@@ -680,15 +693,23 @@ class TakeCard(QFrame):
             layout.addWidget(source)
         snr = data.get("snr")
         if snr is not None and snr < MIN_RELIABLE_SNR:
-            warning = QLabel(f"⚠ Background noise: SNR {snr:.0f} dB. Clarity, Fold Contact and Ring "
-                             "may be unreliable; pitch and resonance hold up better.")
+            warning = QLabel(f"⚠ Background noise: voice-band SNR {snr:.0f} dB. Clarity, Fold Contact "
+                             "and Ring may be unreliable; pitch and resonance hold up better.")
             warning.setWordWrap(True)
             warning.setStyleSheet(f"color: {OFF_TARGET_COLOR}; font-size: 12px;")
             layout.addWidget(warning)
+        note = hiss_note(snr, data.get("snr_full"))
+        if note:
+            info = QLabel(note)
+            info.setWordWrap(True)
+            info.setStyleSheet("color: #aaa; font-size: 11px;")
+            layout.addWidget(info)
 
         self.shift_panel = ShiftPanel(data, on_set_target)
         self.shift_panel.hide()
         shift_btn.toggled.connect(self.shift_panel.setVisible)
+        # While shifting, the card's Play button plays the shifted version.
+        shift_btn.toggled.connect(lambda on: play_btn.setText(" Play shifted" if on else " Play"))
         layout.addWidget(self.shift_panel)
 
         # --- GRAPH ---
@@ -743,7 +764,10 @@ class TakeCard(QFrame):
                 bar.set_value(self.data[key], self.profile)
 
     def play_audio(self):
-        sd.play(self.data['audio'], SAMPLE_RATE)
+        if self.shift_panel.isVisible():
+            self.shift_panel.play_shifted()
+        else:
+            sd.play(self.data['audio'], SAMPLE_RATE)
 
 
 class MainWindow(QMainWindow):

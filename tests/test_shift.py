@@ -54,10 +54,12 @@ def test_breathiness_lowers_clarity(base):
     assert out["cpp"] < base["cpp"] - 3
 
 
-def test_brightness_raises_ring(base):
+def test_brightness_raises_ring_not_resonance(base):
     brighter = analysis.analyze_take(shift_voice(BASE, SR, brightness=4))
     darker = analysis.analyze_take(shift_voice(BASE, SR, brightness=-4))
     assert brighter["ring"] > base["ring"] + 3 > darker["ring"] + 6
+    for shifted in (brighter, darker):
+        assert abs(shifted["delta_f"] / base["delta_f"] - 1) < 0.05
 
 
 def test_shift_keeps_loudness():
@@ -65,16 +67,59 @@ def test_shift_keeps_loudness():
     assert abs(analysis.level_dbfs(out) - analysis.level_dbfs(BASE)) < 1
 
 
+def hiss(n, cutoff=4500, seed=1):
+    """High-pitched mic hiss: white noise above `cutoff`."""
+    from scipy.signal import butter, sosfilt
+    w = np.random.default_rng(seed).standard_normal(n)
+    return sosfilt(butter(6, cutoff, "high", fs=SR, output="sos"), w)
+
+
+def with_pauses(voice, noise):
+    gap = np.zeros(int(0.5 * SR))
+    audio = np.concatenate([gap, voice, gap])
+    return audio + noise[:len(audio)]
+
+
 def test_snr_from_pauses():
     rng = np.random.default_rng(1)
     voice = synth_vowel(150, MALE_FORMANTS, seconds=1.0)
     for noise_db in (-60, -40):
-        noise_amp = 10 ** (noise_db / 20)
-        audio = np.concatenate([np.zeros(int(0.5 * SR)), voice, np.zeros(int(0.5 * SR))])
-        audio = audio + noise_amp * rng.standard_normal(len(audio))
-        result = analysis.analyze_take(audio)
-        expected = analysis.level_dbfs(voice) - analysis.level_dbfs(noise_amp * rng.standard_normal(SR))
-        assert abs(result["snr"] - expected) < 4, noise_db
+        noise = 10 ** (noise_db / 20) * rng.standard_normal(2 * SR)
+        result = analysis.analyze_take(with_pauses(voice, noise))
+        expected = analysis.level_dbfs(voice) - analysis.level_dbfs(noise)
+        assert abs(result["snr_full"] - expected) < 4, noise_db
+        # White noise has less energy in the voice band, so band SNR is higher.
+        assert result["snr"] > result["snr_full"]
+
+
+def test_snr_ignores_hiss_above_the_voice_band():
+    voice = synth_vowel(150, MALE_FORMANTS, seconds=1.0)
+    noise = hiss(2 * SR)
+    noise *= 10 ** (-20 / 20) * np.sqrt(np.mean(voice ** 2)) / np.sqrt(np.mean(noise ** 2))
+    result = analysis.analyze_take(with_pauses(voice, noise))
+    assert abs(result["snr_full"] - 20) < 3
+    assert result["snr"] > 40
+
+
+def test_measures_robust_to_high_pitched_noise():
+    voice = synth_vowel(130, MALE_FORMANTS, seconds=1.5, noise=0.15)
+    clean = analysis.analyze_take(voice)
+    noise = hiss(len(voice))
+    noise *= 10 ** (-20 / 20) * np.sqrt(np.mean(voice ** 2)) / np.sqrt(np.mean(noise ** 2))
+    noisy = analysis.analyze_take(voice + noise)
+    assert abs(noisy["cpp"] - clean["cpp"]) < 1.5
+    assert abs(noisy["ring"] - clean["ring"]) < 1
+    assert abs(noisy["h1h2"] - clean["h1h2"]) < 1
+    assert abs(noisy["pitch"] - clean["pitch"]) < 1
+
+
+def test_pitch_tracking_survives_heavy_hiss():
+    voice = synth_vowel(130, MALE_FORMANTS, seconds=1.5, noise=0.15)
+    noise = hiss(len(voice))
+    noise *= 10 ** (-10 / 20) * np.sqrt(np.mean(voice ** 2)) / np.sqrt(np.mean(noise ** 2))
+    clean = analysis.analyze_take(voice)["tracks"]["f0"]
+    noisy = analysis.analyze_take(voice + noise)["tracks"]["f0"]
+    assert (~np.isnan(noisy)).sum() >= 0.95 * (~np.isnan(clean)).sum()
 
 
 def test_snr_needs_pauses():
@@ -84,11 +129,11 @@ def test_snr_needs_pauses():
 def test_noise_monitor():
     monitor = analysis.NoiseMonitor(400)
     for _ in range(50):
-        monitor.add({"level": -70.0, "f0": np.nan})
-    assert monitor.snr() is None                       # no voice yet
+        monitor.add({"level": -50.0, "band_level": -70.0, "f0": np.nan})
+    assert monitor.snr() == (None, None)              # no voice yet
     for _ in range(30):
-        monitor.add({"level": -20.0, "f0": 200.0})
-    assert monitor.snr() == 50.0
+        monitor.add({"level": -20.0, "band_level": -20.0, "f0": 200.0})
+    assert monitor.snr() == (50.0, 30.0)
 
 
 def test_vocal_isolation_removes_accompaniment():

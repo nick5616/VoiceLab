@@ -42,7 +42,12 @@
       "Bash(./venv/Scripts/python -m pytest tests/test_shift.py -q -k \"not isolation\")",
       "Bash(./venv/Scripts/python -m pytest tests/test_shift.py -q -k isolation)",
       "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke6.py\")",
-      "Bash(PYTHONIOENCODING=utf-8 HF_HUB_DISABLE_SYMLINKS_WARNING=1 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke6.py\")"
+      "Bash(PYTHONIOENCODING=utf-8 HF_HUB_DISABLE_SYMLINKS_WARNING=1 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke6.py\")",
+      "PowerShell(Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo\\(44100, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono\\); $out = \"C:\\\\Users\\\\nickb\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nickb-repos-VoiceLab\\\\e9e4cb09-c746-49d7-9a7b-622592a7e5a7\\\\scratchpad\\\\tts.wav\"; $s.SetOutputToWaveFile\\($out, $fmt\\); $s.Speak\\(\"Hello, this is a test of my voice. I am reading a short sentence, and then I will pause. Is it working well today?\"\\); $s.Dispose\\(\\); \\(Get-Item $out\\).Length)",
+      "Bash(PYTHONIOENCODING=utf-8 QT_QPA_PLATFORM=offscreen ./venv/Scripts/python -W ignore -c ' *)",
+      "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/noise_experiment.py\")",
+      "Bash(./venv/Scripts/python -m pytest tests -q -k \"not isolation\")",
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke7.py\")"
     ]
   }
 }

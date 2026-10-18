@@ -11,6 +11,7 @@ from collections import deque
 
 import numpy as np
 import parselmouth
+from parselmouth.praat import call
 
 SAMPLE_RATE = 44100
 
@@ -24,12 +25,18 @@ DEFAULT_FORMANT_CEILING = 5500
 MIN_FORMANT_GAP = 250
 # Real F1-F4 bandwidths stay well under this; wider "formants" are fitting artifacts.
 MAX_FORMANT_BANDWIDTH = 600
+# Median F1 over a take or a set of vowels stays well below this in speech and
+# sung vowels below ~350 Hz pitch.
+MAX_MEDIAN_F1 = 900
 SPEED_OF_SOUND_CM = 35000
 
 # Analysis frame for spectral measures (~46 ms at 44.1 kHz).
 SPECTRAL_FRAME = 2048
 # Live spectrum display: covers F1-F4 of most voices and the 2-4 kHz ring region.
 SPECTRUM_MAX_HZ = 5500
+# Voice-quality measures and SNR use only this band, where the harmonics carry
+# most of the voice's energy; hiss and whine above it are ignored.
+VOICE_BAND_HZ = 4000
 # Below this level live frames skip analysis and report silence.
 SILENCE_DBFS = -50
 
@@ -92,17 +99,32 @@ def _power_spectrum_db(frame, sample_rate, pad=1):
     return freqs, 10 * np.log10(np.abs(spec) ** 2 + 1e-20)
 
 
+def band_level_db(frame, sample_rate, max_hz=VOICE_BAND_HZ):
+    """Level (dBFS) of the frame's content below max_hz."""
+    freqs, power_db = _power_spectrum_db(frame, sample_rate)
+    window_power = np.sum(np.hanning(len(frame)) ** 2)
+    band = 10 ** (power_db[freqs <= max_hz] / 10)
+    return float(10 * np.log10(2 * band.sum() / (len(frame) * window_power) + 1e-12))
+
+
 def cpp(frame, sample_rate, f0):
     """Cepstral peak prominence (dB): height of the rahmonic peak near 1/f0
     above the regression line through the cepstrum. Higher = clearer, more
-    periodic voice; lower = breathier or rougher."""
+    periodic voice; lower = breathier or rougher.
+
+    Computed over the voice band (0-VOICE_BAND_HZ) only, where the harmonics
+    are strong: hiss or whine above it then barely moves the value (in tests at
+    20 dB SNR, within ~1 dB instead of 4-6 dB low)."""
     if f0 is None or np.isnan(f0):
         return np.nan
-    _, power_db = _power_spectrum_db(frame, sample_rate)
+    freqs, power_db = _power_spectrum_db(frame, sample_rate, pad=2)
+    band = freqs <= VOICE_BAND_HZ
     # Power cepstrum in dB, as in Praat's PowerCepstrum, so values are comparable
-    # with published CPP figures.
-    ceps = 20 * np.log10(np.abs(np.fft.irfft(power_db)) + 1e-12)
-    quef = np.arange(len(ceps)) / sample_rate
+    # with published CPP figures. Using only the band's bins is equivalent to
+    # analysing at a sample rate of 2 x VOICE_BAND_HZ.
+    ceps = 20 * np.log10(np.abs(np.fft.irfft(power_db[band])) + 1e-12)
+    quef = np.arange(len(ceps)) / (2 * freqs[band][-1])
+    ceps, quef = ceps[:len(ceps) // 2], quef[:len(ceps) // 2]
 
     lo, hi = 1 / (1.25 * f0), 1 / (0.8 * f0)
     search = (quef >= lo) & (quef <= hi)
@@ -145,12 +167,22 @@ def h1_h2_corrected(frame, sample_rate, f0, formants, bandwidths):
     return float(h1 - h2)
 
 
-def ring_db(frame, sample_rate):
-    """Energy in 2-4 kHz (singer's formant / 'ring' region) relative to 0-2 kHz."""
-    freqs, power_db = _power_spectrum_db(frame, sample_rate)
+def ring_db(frame, sample_rate, f0):
+    """Harmonic energy in 2-4 kHz (singer's formant / 'ring' region) relative
+    to 0-2 kHz. Only the peaks at multiples of f0 are summed, so noise between
+    the harmonics doesn't count as voice."""
+    if f0 is None or np.isnan(f0):
+        return np.nan
+    freqs, power_db = _power_spectrum_db(frame, sample_rate, pad=4)
     power = 10 ** (power_db / 10)
-    low = power[(freqs > 50) & (freqs < 2000)].sum()
-    high = power[(freqs >= 2000) & (freqs < 4000)].sum()
+    low = high = 0.0
+    for k in range(1, int(VOICE_BAND_HZ // f0) + 1):
+        band = (freqs >= k * f0 * 0.95) & (freqs <= k * f0 * 1.05)
+        peak = power[band].max()
+        if k * f0 < 2000:
+            low += peak
+        else:
+            high += peak
     return float(10 * np.log10((high + 1e-20) / (low + 1e-20)))
 
 
@@ -173,35 +205,56 @@ def estimate_snr(levels, voiced, min_noise_frames=20, min_voice_frames=20):
     return float(np.median(levels[voiced]) - noise)
 
 
-def frame_levels(audio, sample_rate, times, window=0.03):
-    """dBFS level of a short window centred on each time."""
-    half = int(window * sample_rate / 2)
-    centers = (np.asarray(times) * sample_rate).astype(int)
-    return np.array([level_dbfs(audio[max(0, c - half):c + half]) if c - half < len(audio) else -120.0
-                     for c in centers])
+def frame_levels(audio, sample_rate, times, band=False):
+    """dBFS level of a frame centred on each time (voice band only if `band`)."""
+    half = SPECTRAL_FRAME // 2
+    levels = []
+    for c in (np.asarray(times) * sample_rate).astype(int):
+        frame = audio[max(0, c - half):c + half]
+        if len(frame) < SPECTRAL_FRAME:
+            levels.append(np.nan)
+        else:
+            levels.append(band_level_db(frame, sample_rate) if band else level_dbfs(frame))
+    return np.array(levels)
+
+
+def snr_pair(full_levels, band_levels, voiced, **kwargs):
+    """(voice-band SNR, full-band SNR); either may be None."""
+    ok = ~np.isnan(full_levels) & ~np.isnan(band_levels)
+    return (estimate_snr(band_levels[ok], voiced[ok], **kwargs),
+            estimate_snr(full_levels[ok], voiced[ok], **kwargs))
 
 
 class NoiseMonitor:
-    """Rolling voice-to-noise ratio from live frames."""
+    """Rolling voice-to-noise ratio from live frames, in the voice band (what
+    the measurements see) and full band (what you hear)."""
 
     def __init__(self, frames):
         self.levels = deque(maxlen=frames)
+        self.band_levels = deque(maxlen=frames)
         self.voiced = deque(maxlen=frames)
 
     def add(self, frame):
         self.levels.append(frame["level"])
+        self.band_levels.append(frame.get("band_level", frame["level"]))
         self.voiced.append(not np.isnan(frame["f0"]))
 
     def snr(self):
+        """(voice-band SNR, full-band SNR) or (None, None)."""
         # Live frames come every ~25 ms: need ~1 s of pauses and ~0.5 s of voice.
-        return estimate_snr(self.levels, self.voiced, min_noise_frames=40, min_voice_frames=20)
+        return snr_pair(np.array(self.levels), np.array(self.band_levels), np.array(self.voiced),
+                        min_noise_frames=40, min_voice_frames=20)
 
 
 # --- PRAAT WRAPPERS ---
 
 def pitch_track(sound, time_step=0.01):
-    pitch = sound.to_pitch_ac(time_step=time_step, pitch_floor=PITCH_FLOOR,
-                              pitch_ceiling=PITCH_CEILING)
+    # Track pitch on the voice band only: high-pitched hiss otherwise weakens the
+    # periodicity Praat sees, so voiced frames get marked unvoiced (in tests, up
+    # to 85% of them), and it also cuts octave-jump spikes.
+    voice_band = call(sound, "Filter (pass Hann band)...", 0, VOICE_BAND_HZ, 100)
+    pitch = voice_band.to_pitch_ac(time_step=time_step, pitch_floor=PITCH_FLOOR,
+                                   pitch_ceiling=PITCH_CEILING)
     f0 = pitch.selected_array["frequency"].astype(float)
     f0[f0 == 0] = np.nan
     return pitch.xs(), f0
@@ -220,7 +273,8 @@ def to_formants(sound, ceiling, time_step=0.01):
 
 
 def _ceiling_score(sound, times, ceiling):
-    """Lower is better: penalizes invented, merged, missing and jumpy formants."""
+    """(score, F1 values): lower score is better; penalizes invented, merged,
+    missing and jumpy formants."""
     freqs, bws = formant_values(to_formants(sound, ceiling), times)
     spurious = np.sum(np.nanmedian(bws, axis=0) > MAX_FORMANT_BANDWIDTH)
     missing = np.isnan(freqs).mean()
@@ -228,7 +282,7 @@ def _ceiling_score(sound, times, ceiling):
     # A ceiling that is too low splits one resonance into two formants
     # sitting almost on top of each other.
     merged = np.mean(np.any(np.diff(freqs, axis=1) < MIN_FORMANT_GAP, axis=1))
-    return spurious + np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged
+    return spurious + np.nansum(np.nanmedian(jumps, axis=0)) + missing + merged, freqs[:, 0]
 
 
 def choose_formant_ceiling(segments):
@@ -246,9 +300,14 @@ def choose_formant_ceiling(segments):
         return DEFAULT_FORMANT_CEILING
     best, best_score = DEFAULT_FORMANT_CEILING, np.inf
     for ceiling in FORMANT_CEILINGS:
+        scores, f1s = zip(*(_ceiling_score(s, t, ceiling) for s, t in segments))
         # Small pull toward the default breaks ties on very steady vowels.
         prior = 1e-3 * abs(ceiling - DEFAULT_FORMANT_CEILING) / 1000
-        score = sum(_ceiling_score(s, t, ceiling) for s, t in segments) / len(segments) + prior
+        score = sum(scores) / len(segments) + prior
+        # A typical F1 this high means the real F1 was missed and every formant
+        # slid up one slot (happens with very bright, tilted spectra).
+        if np.nanmedian(np.concatenate(f1s)) > MAX_MEDIAN_F1:
+            score += 1
         if score < best_score:
             best, best_score = int(ceiling), score
     return best
@@ -275,8 +334,8 @@ class FrameAnalyzer:
 
     def analyze(self, window):
         frame = window[-SPECTRAL_FRAME:]
-        result = {"level": level_dbfs(frame), "f0": np.nan, "delta_f": np.nan,
-                  "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
+        result = {"level": level_dbfs(frame), "band_level": band_level_db(frame, self.sample_rate),
+                  "f0": np.nan, "delta_f": np.nan, "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
                   "formants": np.full(4, np.nan), "resonance_reliable": False,
                   "spectrum": self.spectrum(frame)}
         if result["level"] < SILENCE_DBFS:
@@ -298,7 +357,7 @@ class FrameAnalyzer:
 
         result["cpp"] = cpp(frame, self.sample_rate, f0)
         result["h1h2"] = h1_h2_corrected(frame, self.sample_rate, f0, freqs, bws)
-        result["ring"] = ring_db(frame, self.sample_rate)
+        result["ring"] = ring_db(frame, self.sample_rate, f0)
         result["formants"] = freqs
         if not np.isnan(freqs).any():
             result["delta_f"] = float(delta_f(*freqs))
@@ -335,7 +394,7 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
             continue
         h1h2.append(h1_h2_corrected(frame, sample_rate, f, fr, bw))
         cpps.append(cpp(frame, sample_rate, f))
-        rings.append(ring_db(frame, sample_rate))
+        rings.append(ring_db(frame, sample_rate, f))
         levels.append(level_dbfs(frame))
 
     df_frames = df_track[~np.isnan(df_track)]
@@ -349,8 +408,11 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
 
     median_f0 = float(np.nanmedian(f0))
     note, cents = hz_to_note(median_f0)
+    snr, snr_full = snr_pair(frame_levels(audio, sample_rate, times),
+                             frame_levels(audio, sample_rate, times, band=True), voiced)
     return {
-        "snr": estimate_snr(frame_levels(audio, sample_rate, times), voiced),
+        "snr": snr,              # voice band: what the measurements see
+        "snr_full": snr_full,    # full band: includes hiss above the voice band
         "singing": singing_stats(times, f0),
         "pitch": median_f0,
         "note": note,

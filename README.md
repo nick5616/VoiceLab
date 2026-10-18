@@ -9,8 +9,8 @@ A real-time vocal analysis tool for singers, voice actors, people doing gender-a
 | **Pitch**                  | Fundamental frequency (F0), shown as note name, cents and Hz                                        | Yes  |
 | **Resonance (ΔF)**         | Formant dispersion over F1–F4 and the apparent vocal tract length it implies (dark → bright)        | Yes  |
 | **Fold Contact (H1*–H2*)** | First-minus-second harmonic level, corrected for F1/F2. A proxy for vocal weight (heavy → light)    | Yes  |
-| **Clarity (CPP)**          | Cepstral peak prominence: how periodic the voice is (breathy/rough → clear)                         | Yes  |
-| **Ring (2–4 kHz)**         | Energy in the singer's-formant region relative to 0–2 kHz (muffled → ringing)                       | Yes  |
+| **Clarity (CPP)**          | Cepstral peak prominence over 0–4 kHz: how periodic the voice is (breathy/rough → clear)            | Yes  |
+| **Ring (2–4 kHz)**         | Harmonic energy in the singer's-formant region relative to 0–2 kHz (muffled → ringing)              | Yes  |
 | **Intonation Range**       | 5th–95th percentile pitch spread in semitones (flat → expressive). The live meter uses the last 6 s | Yes  |
 | **Level**                  | Voiced level in dBFS. Uncalibrated, so compare takes on the same mic and gain only                  | Yes  |
 
@@ -73,13 +73,24 @@ python main.py
 
 ### Noise check
 
-The badge in the live panel's header shows your **voice-to-noise ratio (SNR)** over the last 10 s. It's measured from the pauses between phrases, so it shows "SNR —" until you've paused. Below 30 dB it turns orange: Clarity, Fold Contact and Ring become unreliable in noise, while pitch and resonance hold up better ([review](https://pmc.ncbi.nlm.nih.gov/articles/PMC11673399)). Takes recorded below 30 dB carry the same warning.
+The badge in the live panel's header shows your **voice-to-noise ratio (SNR)** over the last 10 s. It's measured in the voice band (0–4 kHz), where VoiceLab measures, from the pauses between phrases, so it shows "SNR —" until you've paused. Below 30 dB it turns orange: Clarity, Fold Contact and Ring become unreliable in noise, while pitch and resonance hold up better ([review](https://pmc.ncbi.nlm.nih.gov/articles/PMC11673399)). Takes recorded below 30 dB carry the same warning.
 
-VoiceLab deliberately doesn't run noise suppression on your voice. Denoisers remove breath noise and fine harmonic detail along with the room noise, which would make a breathy voice measure clearer than it is.
+**High-pitched mic hiss or whine is handled by keeping measurements where the voice is.** Every measurement works around it:
+
+| Measurement     | How it avoids the hiss                                                                                                |
+| --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Pitch           | Tracked on a 0–4 kHz copy of the signal. On raw audio, hiss made Praat drop up to 85% of voiced frames.               |
+| Clarity (CPP)   | Computed over 0–4 kHz only. At 20 dB SNR of hiss it stays within ~1 dB of the clean value, versus 4–6 dB low over the full band. |
+| Ring            | Sums only the harmonic peaks at multiples of your pitch, so noise between harmonics isn't counted.                    |
+| Formants        | Already limited by the formant ceiling (≈5–6.5 kHz).                                                                  |
+
+When most of the noise sits above 4 kHz, the badge tooltip and take cards say so, and show the full-band SNR for reference.
+
+VoiceLab deliberately doesn't run noise suppression on your voice. Denoisers remove breath noise and fine harmonic detail along with the room noise, which would make a breathy voice measure clearer than it is. Spectral subtraction of a learned noise profile was also tested, and it made Clarity less accurate, not more.
 
 ### Shifting a take
 
-**Shift** on a take card opens sliders that re-render the take with your voice moved:
+**Shift** on a take card opens sliders that re-render the take with your voice moved. Let go of a slider and the shifted version renders and plays. **▶ Original** and **▶ Shifted** switch between them, and while the panel is open the card's Play button plays the shifted version.
 
 | Slider           | Range          | How                                  |
 | ---------------- | -------------- | ------------------------------------ |
@@ -90,7 +101,7 @@ VoiceLab deliberately doesn't run noise suppression on your voice. Denoisers rem
 | Breathiness      | −100 to +100   | WORLD vocoder: aperiodicity          |
 | Brightness       | ±6 dB/octave   | WORLD vocoder: spectral tilt         |
 
-**Preview** plays the result and measures it with the same metrics (e.g. `ΔF 1270 Hz (+174)`). **Use shifted as target** turns a version you like into your targets. Breathiness and brightness together approximate vocal weight.
+Each render is also measured with the same metrics (e.g. `ΔF 1270 Hz (+174)`). **Use shifted as target** turns a version you like into your targets. Breathiness and brightness together approximate vocal weight.
 
 Treat a shift as a preview of a direction, not proof your voice can make that exact sound: large shifts leave the range any real vocal tract produces, and the WORLD vocoder sounds slightly buzzy at extreme settings.
 

@@ -1,8 +1,9 @@
 """Per-take panel of sliders that re-render the take with the voice shifted,
 play it, and show what the shifted version measures."""
 import numpy as np
+import qtawesome as qta
 import sounddevice as sd
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout
 
 from analysis import SAMPLE_RATE, hz_to_note
@@ -10,6 +11,7 @@ from engine import AnalysisWorker
 from shift import NEUTRAL, SHIFT_PARAMS, is_neutral, render_and_analyze
 
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
+RENDER_DELAY_MS = 400   # wait this long after the last slider move before rendering
 STEPS = {"semitones": 0.5, "resonance": 1, "intonation": 5, "tempo": 5,
          "breathiness": 5, "brightness": 0.5}
 HINTS = {
@@ -29,6 +31,7 @@ class ShiftPanel(QFrame):
         self.on_use_as_target = on_use_as_target
         self.worker = None
         self.rendered = None
+        self.pending_play = False
         self.setStyleSheet("ShiftPanel { background-color: #232323; border-radius: 6px; } "
                            "QLabel { color: #ddd; font-size: 11px; margin: 0px; background: transparent; }")
         layout = QVBoxLayout(self)
@@ -51,23 +54,29 @@ class ShiftPanel(QFrame):
         layout.addLayout(grid)
 
         buttons = QHBoxLayout()
-        self.preview_btn = QPushButton("Preview")
-        self.original_btn = QPushButton("Play original")
+        self.original_btn = QPushButton(qta.icon("fa5s.play", color="white"), " Original")
+        self.shifted_btn = QPushButton(qta.icon("fa5s.play", color="white"), " Shifted")
         self.reset_btn = QPushButton("Reset")
         self.target_btn = QPushButton("Use shifted as target")
-        for btn in (self.preview_btn, self.original_btn, self.reset_btn, self.target_btn):
+        for btn in (self.original_btn, self.shifted_btn, self.reset_btn, self.target_btn):
             btn.setStyleSheet(BUTTON_STYLE)
             buttons.addWidget(btn)
-        self.preview_btn.clicked.connect(self.preview)
-        self.original_btn.clicked.connect(lambda: sd.play(self.data["audio"], SAMPLE_RATE))
+        self.shifted_btn.setStyleSheet("background-color: #2980b9; color: white; padding: 5px 10px; border-radius: 5px;")
+        self.original_btn.clicked.connect(self.play_original)
+        self.shifted_btn.clicked.connect(lambda: self.play_shifted())
         self.reset_btn.clicked.connect(self.reset)
         self.target_btn.clicked.connect(self._use_as_target)
-        self.target_btn.setEnabled(False)
         layout.addLayout(buttons)
 
-        self.result_label = QLabel("Move a slider, then Preview to hear and measure the shifted voice.")
+        self.result_label = QLabel()
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
+
+        # Re-render shortly after the sliders stop moving, then play it.
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.setInterval(RENDER_DELAY_MS)
+        self.render_timer.timeout.connect(lambda: self.render(play=True))
         self._update_labels()
 
     def params(self):
@@ -78,38 +87,76 @@ class ShiftPanel(QFrame):
             unit = SHIFT_PARAMS[key][4]
             sign = "+" if key in ("semitones", "resonance", "breathiness", "brightness") and value > 0 else ""
             self.value_labels[key].setText(f"{sign}{value:g} {unit}".strip())
-        self.preview_btn.setEnabled(not is_neutral(self.params()) and self.worker is None)
+        neutral = is_neutral(self.params())
+        self.shifted_btn.setEnabled(not neutral)
+        self.target_btn.setEnabled(not neutral and self._is_current())
+        if neutral:
+            self.result_label.setText("Move a slider: the shifted version renders and plays when you let go.")
+        elif not self._is_current() and self.worker is None:
+            self.render_timer.start()
+
+    def _is_current(self):
+        return self.rendered is not None and self.rendered["params"] == self.params()
 
     def reset(self):
         for key, slider in self.sliders.items():
             slider.setValue(int(NEUTRAL[key] / STEPS[key]))
 
-    def preview(self):
-        params = self.params()
-        if self.rendered and self.rendered["params"] == params:
+    def play_original(self):
+        sd.play(self.data["audio"], SAMPLE_RATE)
+        self.result_label.setText("Playing original. " + self._summary_text())
+
+    def play_shifted(self):
+        """Play the shifted version, rendering it first if the sliders moved."""
+        if is_neutral(self.params()):
+            self.play_original()
+        elif self._is_current():
             sd.play(self.rendered["audio"], SAMPLE_RATE)
+            self.result_label.setText("Playing shifted. " + self._summary_text())
+        else:
+            self.render(play=True)
+
+    def render(self, play=False):
+        params = self.params()
+        if is_neutral(params):
             return
-        self.preview_btn.setEnabled(False)
-        self.result_label.setText("Rendering…")
+        if self.worker is not None:          # one render at a time; redo after
+            self.pending_play = self.pending_play or play
+            return
+        self.pending_play = play
+        self.result_label.setText(f"Rendering {self._params_text(params)}…")
         self.worker = AnalysisWorker(render_and_analyze, self.data["audio"], params)
         self.worker.finished_analysis.connect(self._rendered)
         self.worker.start()
 
     def _rendered(self, result):
         self.worker = None
-        self._update_labels()
         if "error" in result:
             self.result_label.setText(result["error"])
             return
         self.rendered = result
-        sd.play(result["audio"], SAMPLE_RATE)
-        analysis = result["analysis"]
-        if "error" in analysis:
-            self.result_label.setText(f"Shifted audio couldn't be measured: {analysis['error']}")
-            self.target_btn.setEnabled(False)
+        if not self._is_current():           # sliders moved while rendering
+            self.render(play=self.pending_play)
             return
-        self.result_label.setText("Shifted version measures: " + self._compare(analysis))
-        self.target_btn.setEnabled(True)
+        self._update_labels()
+        if self.pending_play:
+            sd.play(result["audio"], SAMPLE_RATE)
+        self.result_label.setText(("Playing shifted. " if self.pending_play else "") + self._summary_text())
+
+    def _summary_text(self):
+        if not self._is_current():
+            return ""
+        analysis = self.rendered["analysis"]
+        if "error" in analysis:
+            return f"Shifted audio couldn't be measured: {analysis['error']}"
+        return f"Shifted ({self._params_text(self.rendered['params'])}) measures: {self._compare(analysis)}"
+
+    @staticmethod
+    def _params_text(params):
+        changed = [f"{SHIFT_PARAMS[k][0].lower()} {v:+g}{SHIFT_PARAMS[k][4] and ' ' + SHIFT_PARAMS[k][4]}"
+                   if k not in ("intonation", "tempo") else f"{SHIFT_PARAMS[k][0].lower()} {v:g}%"
+                   for k, v in params.items() if v != NEUTRAL[k]]
+        return ", ".join(changed)
 
     def _compare(self, shifted):
         """Shifted values with the change from the original take."""

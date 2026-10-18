@@ -24,6 +24,8 @@ SHIFT_PARAMS = {
 NEUTRAL = {key: spec[3] for key, spec in SHIFT_PARAMS.items()}
 BRIGHTNESS_PIVOT_HZ = 1000     # tilt rotates around this frequency
 WORLD_FRAME_MS = 5.0
+AP_FLOOR_DB = 60          # treat aperiodicity below -60 dB as fully periodic
+BREATH_RAISE_DB = 25      # noise floor raise at full breathiness
 
 
 def is_neutral(params):
@@ -70,9 +72,12 @@ def _world_shift(x, sample_rate, breathiness, brightness):
         gain_db = brightness * np.log2(np.maximum(freqs, 100) / BRIGHTNESS_PIVOT_HZ)
         sp = sp * 10 ** (gain_db / 10)
     if breathiness:
-        # Scale aperiodicity in dB toward 0 dB (pure noise) or away from it.
-        ap_db = 20 * np.log10(np.clip(ap, 1e-6, 1))
-        ap = np.clip(10 ** (ap_db * (1 - 0.7 * breathiness) / 20), 0, 1)
+        # Move aperiodicity (in dB) toward 0 dB = pure noise, or away from it.
+        # Breathy voice adds air across the whole spectrum, not just the top, so
+        # besides scaling we raise (or lower) the noise floor across all bands.
+        ap_db = 20 * np.log10(np.clip(ap, 10 ** (-AP_FLOOR_DB / 20), 1))
+        ap_db = ap_db * (1 - 0.5 * breathiness) + BREATH_RAISE_DB * breathiness
+        ap = 10 ** (np.minimum(ap_db, 0) / 20)
     return pw.synthesize(f0, np.ascontiguousarray(sp), np.ascontiguousarray(ap),
                          sample_rate, WORLD_FRAME_MS)
 

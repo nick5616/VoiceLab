@@ -16,7 +16,7 @@ TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"]
 # in each metric's own units.
 DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2}
 SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
-                              "snr", "source"]
+                              "snr", "snr_full", "source"]
 # Metrics measured as spreads, which can't go below zero.
 NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 
