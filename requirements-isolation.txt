@@ -1,0 +1,5 @@
+# Optional: vocal isolation (Demucs) for imported audio with music behind the voice.
+# Large install (PyTorch). VoiceLab works without it.
+torch
+torchaudio
+demucs

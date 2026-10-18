@@ -7,16 +7,22 @@ import sounddevice as sd
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QScrollArea,
                              QFrame, QSizePolicy, QTabWidget, QDialog, QGridLayout,
-                             QCheckBox, QDoubleSpinBox, QDialogButtonBox)
-from PyQt6.QtCore import Qt, QSize, QRectF
+                             QCheckBox, QDoubleSpinBox, QDialogButtonBox, QButtonGroup,
+                             QFileDialog, QMessageBox)
+from PyQt6.QtCore import Qt, QSize, QRectF, pyqtSignal
 from PyQt6.QtGui import QFont, QPainter, QColor, QPen
 import qtawesome as qta
 
-from analysis import SAMPLE_RATE, hz_to_note, pitch_range_st, vocal_tract_length_cm
-from engine import LiveEngine, take_analysis_worker, UPDATE_INTERVAL
+from analysis import (IN_TUNE_CENTS, MIN_RELIABLE_SNR, SAMPLE_RATE, NoiseMonitor, analyze_take,
+                      hz_to_midi, hz_to_note, pitch_range_st, vibrato_stats, vocal_tract_length_cm)
+from engine import AnalysisWorker, LiveEngine, take_analysis_worker, UPDATE_INTERVAL
+from exercise import ExerciseView, midi_name
+import isolation
+from shift_panel import ShiftPanel
 from live_views import PitchView, SpectrumView, PitchResonancePlane, pitch_label
 from profile_store import Profile, TARGET_KEYS, target_from_value
 from speech import ReadingPrompt, VowelCheck
+from voice_map import VoiceMapView
 
 # --- METRIC DISPLAY ---
 # key: (label, min, max, low label, high label, value format, scale)
@@ -29,10 +35,23 @@ METRIC_DEFS = {
     "ring": ("Ring (2–4 kHz)", -30, 0, "Muffled", "Ringing", "{:+.1f} dB", None),
     "pitch_range": ("Intonation Range", 0, 12, "Flat", "Expressive", "{:.1f} st", None),
     "level": ("Level", -60, 0, "Quiet", "Loud", "{:.0f} dBFS, uncalibrated", None),
+    "tuning": ("Tuning", -50, 50, "Flat", "Sharp", "{:+.0f}¢", None),
+    "vibrato": ("Vibrato", 0, 100, "Straight", "Wide", "±{:.0f}¢", None),
 }
-LIVE_METER_KEYS = ["delta_f", "h1h2", "cpp", "ring"]
+BOTH_MODES = {"speak", "sing"}
+# Live meters in display order, with the modes they appear in.
+LIVE_METERS = [
+    ("tuning", {"sing"}), ("vibrato", {"sing"}), ("delta_f", {"speak"}), ("h1h2", BOTH_MODES),
+    ("cpp", BOTH_MODES), ("ring", BOTH_MODES), ("pitch_range", {"speak"}), ("level", BOTH_MODES),
+]
+SMOOTHED_KEYS = ["delta_f", "h1h2", "cpp", "ring"]   # per-frame metrics, smoothed for display
 TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "level"]
 INTONATION_WINDOW_SECONDS = 6
+VIBRATO_WINDOW_SECONDS = 1.2
+NOISE_WINDOW_SECONDS = 10
+NOISE_BADGE_EVERY = 10          # live frames between SNR badge updates
+IMPORT_MAX_SECONDS = 90         # imported files are trimmed to keep analysis quick
+AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 # Targets dialog: key -> (spinbox min, max, decimals, unit)
 TARGET_EDIT = {
     "pitch": (50, 1200, 0, "Hz"),
@@ -54,6 +73,34 @@ TARGET_BAND_COLOR = QColor(46, 204, 113, 70)
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
 
 
+def load_audio(path):
+    """Mono audio at SAMPLE_RATE, trimmed to IMPORT_MAX_SECONDS; returns (audio, trimmed)."""
+    import soundfile as sf
+    from math import gcd
+    from scipy.signal import resample_poly
+    audio, sr = sf.read(path, dtype="float64", always_2d=True)
+    audio = audio.mean(axis=1)
+    trimmed = len(audio) > IMPORT_MAX_SECONDS * sr
+    audio = audio[:int(IMPORT_MAX_SECONDS * sr)]
+    if sr != SAMPLE_RATE:
+        g = gcd(SAMPLE_RATE, sr)
+        audio = resample_poly(audio, SAMPLE_RATE // g, sr // g)
+    return audio, trimmed
+
+
+def import_and_analyze(path, isolate):
+    audio, trimmed = load_audio(path)
+    if isolate:
+        audio = isolation.isolate_vocals(audio, SAMPLE_RATE)
+    result = analyze_take(audio)
+    if "error" not in result:
+        name = path.replace("\\", "/").split("/")[-1]
+        notes = [name] + (["vocals isolated with Demucs"] if isolate else []) + \
+                ([f"first {IMPORT_MAX_SECONDS} s"] if trimmed else [])
+        result["source"] = " · ".join(notes)
+    return result
+
+
 def bar_color(position, on_target):
     if on_target is not None:
         return ON_TARGET_COLOR if on_target else OFF_TARGET_COLOR
@@ -71,11 +118,13 @@ def format_value(key, value):
 
 class RangeBar(QWidget):
     """Track with a value fill, optional green target band and baseline tick.
-    Positions are fractions 0-1 of the track."""
+    Positions are fractions 0-1 of the track. A centered bar fills from the
+    middle, for deviations such as tuning."""
 
-    def __init__(self):
+    def __init__(self, centered=False):
         super().__init__()
         self.setFixedHeight(12)
+        self.centered = centered
         self.position = None
         self.color = DISABLED_COLOR
         self.band = None
@@ -89,7 +138,11 @@ class RangeBar(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor("#444"))
         p.drawRoundedRect(track, 4, 4)
-        if self.position is not None:
+        if self.position is not None and self.centered:
+            p.setBrush(QColor(self.color))
+            x0, x1 = sorted((w * 0.5, w * self.position))
+            p.drawRoundedRect(QRectF(x0, 2, max(4.0, x1 - x0), h - 4), 3, 3)
+        elif self.position is not None:
             p.setBrush(QColor(self.color))
             p.drawRoundedRect(QRectF(0, 2, max(track.height(), w * self.position), h - 4), 4, 4)
         if self.band is not None:
@@ -106,9 +159,10 @@ class RangeBar(QWidget):
 class MetricBar(QWidget):
     """Labelled RangeBar for one metric, aware of baseline and target."""
 
-    def __init__(self, key):
+    def __init__(self, key, centered=False):
         super().__init__()
         self.key = key
+        self.modes = BOTH_MODES
         self.label, lo, hi, low_label, high_label, self.fmt, scale = METRIC_DEFS[key]
         self.scale = scale or (lambda v: v)
         self.lo, self.hi = self.scale(lo), self.scale(hi)
@@ -121,7 +175,7 @@ class MetricBar(QWidget):
         vbox.addWidget(self.title)
 
         bar_row = QHBoxLayout()
-        self.bar = RangeBar()
+        self.bar = RangeBar(centered)
         low, high = QLabel(low_label), QLabel(high_label)
         for lbl in (low, high):
             lbl.setStyleSheet("color: #ddd; font-size: 11px;")
@@ -142,18 +196,20 @@ class MetricBar(QWidget):
         self.bar.band = tuple(self._fraction(v) for v in target) if target else None
         self.bar.update()
 
-    def set_value(self, value, profile, note=None):
-        """`note` marks the reading as unavailable and explains why."""
+    def set_value(self, value, profile, note=None, display=None, on_target=None):
+        """`note` marks the reading as unavailable and explains why; `display`
+        overrides the value text; `on_target` overrides the profile's verdict."""
         if note or value is None or np.isnan(value):
             self.title.setText(f"{self.label} — {note or 'no reading'}")
             self.bar.position, self.bar.color = None, DISABLED_COLOR
             self.bar.update()
             return
-        parts = [format_value(self.key, value)]
+        parts = [display or format_value(self.key, value)]
         change = profile.change_text(self.key, value)
         if change:
             parts.append(change)
-        on_target = profile.in_target(self.key, value)
+        if on_target is None:
+            on_target = profile.in_target(self.key, value)
         title = f"{self.label} ({' · '.join(parts)})"
         if on_target is not None:
             title += "  ✓ on target" if on_target else "  off target"
@@ -164,37 +220,58 @@ class MetricBar(QWidget):
 
 
 class LivePanel(QFrame):
-    """Tabbed live views and meters fed by the LiveEngine."""
+    """Tabbed live views and meters fed by the LiveEngine, in Speak or Sing mode."""
+
+    mode_changed = pyqtSignal(str)
 
     def __init__(self, spectrum_freqs, profile, on_edit_targets):
         super().__init__()
         self.profile = profile
+        self.mode = None
+        # Returns the exercise's current target note (MIDI) or None.
+        self.target_provider = lambda: None
         self.setStyleSheet("QFrame { background-color: #2b2b2b; border-radius: 10px; } "
                            "QLabel { color: #ffffff; }")
         layout = QVBoxLayout(self)
 
+        toggle_style = (f"QPushButton {{ {BUTTON_STYLE} }} "
+                        "QPushButton:checked { background-color: #3498db; }")
         header = QHBoxLayout()
-        title = QLabel("Live")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.mode_buttons = {}
+        mode_group = QButtonGroup(self)
+        for mode, label, icon in (("speak", "Speak", "fa5s.comment"), ("sing", "Sing", "fa5s.music")):
+            btn = QPushButton(qta.icon(icon, color="white"), f" {label}")
+            btn.setCheckable(True)
+            btn.setStyleSheet(toggle_style)
+            btn.clicked.connect(lambda _, m=mode: self.set_mode(m, user=True))
+            mode_group.addButton(btn)
+            self.mode_buttons[mode] = btn
+            header.addWidget(btn)
         targets_btn = QPushButton(qta.icon("fa5s.bullseye", color="white"), " Targets")
         targets_btn.setStyleSheet(BUTTON_STYLE)
         targets_btn.clicked.connect(on_edit_targets)
-        read_btn = QPushButton(qta.icon("fa5s.book-open", color="white"), " Read aloud")
-        read_btn.setCheckable(True)
-        read_btn.setStyleSheet(f"QPushButton {{ {BUTTON_STYLE} }} "
-                               "QPushButton:checked { background-color: #3498db; }")
+        self.read_btn = QPushButton(qta.icon("fa5s.book-open", color="white"), " Read aloud")
+        self.read_btn.setCheckable(True)
+        self.read_btn.setStyleSheet(toggle_style)
         self.note_label = QLabel("—")
         self.note_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
-        header.addWidget(title)
+        self.snr_badge = QLabel("SNR —")
+        self.snr_badge.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.snr_badge.setToolTip("Voice-to-noise ratio. Pause briefly so the room noise can be measured.")
+        self.noise = NoiseMonitor(int(NOISE_WINDOW_SECONDS / UPDATE_INTERVAL))
+        self.frames_seen = 0
+        header.addSpacing(8)
         header.addWidget(targets_btn)
-        header.addWidget(read_btn)
+        header.addWidget(self.read_btn)
         header.addStretch()
+        header.addWidget(self.snr_badge)
+        header.addSpacing(10)
         header.addWidget(self.note_label)
         layout.addLayout(header)
 
         self.reading_prompt = ReadingPrompt()
         self.reading_prompt.hide()
-        read_btn.toggled.connect(self.reading_prompt.setVisible)
+        self.read_btn.toggled.connect(self.reading_prompt.setVisible)
         layout.addWidget(self.reading_prompt)
 
         self.pitch_view = PitchView()
@@ -207,29 +284,56 @@ class LivePanel(QFrame):
             QTabBar::tab { background: #333; color: #aaa; padding: 5px 14px; border-radius: 4px; margin-right: 4px; }
             QTabBar::tab:selected { background: #3498db; color: white; }
         """)
-        self.tabs.addTab(self.pitch_view, "Pitch")
-        self.tabs.addTab(self.spectrum_view, "Spectrum")
-        self.tabs.addTab(self.plane, "Pitch × Resonance")
+        self.tab_modes = []
+        self.default_tab = {}
+        self.add_tab(self.pitch_view, "Pitch", BOTH_MODES, default_for="speak")
+        self.add_tab(self.spectrum_view, "Spectrum", BOTH_MODES)
+        self.add_tab(self.plane, "Pitch × Resonance", {"speak"})
         layout.addWidget(self.tabs)
 
-        self.meters = {key: MetricBar(key) for key in LIVE_METER_KEYS}
-        self.smoothed = {key: np.nan for key in self.meters}
-        self.smoothed_log_f0 = np.nan
-        for meter in self.meters.values():
+        self.meters = {}
+        for key, modes in LIVE_METERS:
+            meter = MetricBar(key, centered=(key == "tuning"))
+            meter.modes = modes
+            self.meters[key] = meter
             layout.addWidget(meter)
-        self.intonation_meter = MetricBar("pitch_range")
-        self.intonation_meter.label = f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)"
+        self.meters["pitch_range"].label = f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)"
+        self.meters["level"].label = "Input Level"
+        # In-tune zone: ±IN_TUNE_CENTS on a ±50 cent bar.
+        self.meters["tuning"].bar.band = (0.5 - IN_TUNE_CENTS / 100, 0.5 + IN_TUNE_CENTS / 100)
+        self.smoothed = {key: np.nan for key in SMOOTHED_KEYS}
+        self.smoothed_log_f0 = np.nan
         self.recent_f0 = deque(maxlen=int(INTONATION_WINDOW_SECONDS / UPDATE_INTERVAL))
-        layout.addWidget(self.intonation_meter)
-        self.level_meter = MetricBar("level")
-        self.level_meter.label = "Input Level"
-        layout.addWidget(self.level_meter)
         self.refresh_profile()
+
+    def add_tab(self, widget, name, modes, default_for=None):
+        self.tabs.addTab(widget, name)
+        self.tab_modes.append((widget, modes))
+        if default_for:
+            self.default_tab[default_for] = widget
+        if self.mode:
+            self.tabs.setTabVisible(self.tabs.indexOf(widget), self.mode in modes)
+
+    def set_mode(self, mode, user=False):
+        self.mode = mode
+        self.mode_buttons[mode].setChecked(True)
+        for widget, modes in self.tab_modes:
+            self.tabs.setTabVisible(self.tabs.indexOf(widget), mode in modes)
+        for meter in self.meters.values():
+            meter.setVisible(mode in meter.modes)
+        self.read_btn.setVisible(mode == "speak")
+        if mode != "speak":
+            self.read_btn.setChecked(False)
+        if mode in self.default_tab:
+            self.tabs.setCurrentWidget(self.default_tab[mode])
+        if user:
+            self.mode_changed.emit(mode)
 
     def refresh_profile(self):
         p = self.profile
-        for meter in [*self.meters.values(), self.intonation_meter]:
-            meter.set_reference(p)
+        for key, meter in self.meters.items():
+            if key not in ("tuning", "vibrato"):   # fixed scales, no profile targets
+                meter.set_reference(p)
         self.pitch_view.set_reference(p.baseline_value("pitch"), p.target("pitch"))
         baseline = (p.baseline_value("pitch"), p.baseline_value("delta_f")) if p.baseline else None
         self.plane.set_reference(baseline, p.target("pitch"), p.target("delta_f"))
@@ -242,21 +346,28 @@ class LivePanel(QFrame):
         f0 = frame["f0"]
         self.pitch_view.update_frame(frame)
         self.spectrum_view.update_frame(frame)
-        self.level_meter.set_value(frame["level"], self.profile)
+        self.meters["level"].set_value(frame["level"], self.profile)
+        self.noise.add(frame)
+        self.frames_seen += 1
+        if self.frames_seen % NOISE_BADGE_EVERY == 0:
+            self._update_snr_badge()
         self.recent_f0.append(f0)
-        self.intonation_meter.set_value(pitch_range_st(self.recent_f0), self.profile)
+        self.meters["pitch_range"].set_value(pitch_range_st(self.recent_f0), self.profile)
+        self._update_vibrato()
 
         if np.isnan(f0):
             self.note_label.setText("—")
             self.note_label.setStyleSheet("color: white;")
+            self.meters["tuning"].set_value(None, self.profile, note="—")
             self.plane.update_point(np.nan, np.nan)
             return
         on_target = self.profile.in_target("pitch", f0)
         self.note_label.setText(pitch_label(f0))
         self.note_label.setStyleSheet(f"color: {ON_TARGET_COLOR if on_target else 'white'};")
+        self._update_tuning(f0)
         self.smoothed_log_f0 = self._smooth(self.smoothed_log_f0, np.log2(f0))
-        for key, meter in self.meters.items():
-            value = frame[key]
+        for key in SMOOTHED_KEYS:
+            meter, value = self.meters[key], frame[key]
             if not np.isnan(value):
                 self.smoothed[key] = self._smooth(self.smoothed[key], value)
             if key == "delta_f" and not frame["resonance_reliable"]:
@@ -266,6 +377,53 @@ class LivePanel(QFrame):
 
         resonance = self.smoothed["delta_f"] if frame["resonance_reliable"] else np.nan
         self.plane.update_point(2 ** self.smoothed_log_f0, resonance)
+
+    def _update_snr_badge(self):
+        snr = self.noise.snr()
+        if snr is None:
+            self.snr_badge.setText("SNR —")
+            self.snr_badge.setStyleSheet("color: #aaa; font-size: 11px;")
+            return
+        ok = snr >= MIN_RELIABLE_SNR
+        self.snr_badge.setText(f"SNR {snr:.0f} dB" + ("" if ok else " · noisy"))
+        self.snr_badge.setStyleSheet(f"color: {ON_TARGET_COLOR if ok else OFF_TARGET_COLOR}; "
+                                     "font-size: 11px; font-weight: bold;")
+        self.snr_badge.setToolTip(
+            "Voice-to-noise ratio over the last 10 s." + ("" if ok else
+            f" Below {MIN_RELIABLE_SNR} dB, Clarity, Fold Contact and Ring become unreliable; "
+            "pitch and resonance hold up better. Move closer to the mic or reduce room noise."))
+
+    def _update_tuning(self, f0):
+        """Cents from the exercise's target note, or from the nearest note."""
+        target = self.target_provider()
+        if target is not None:
+            cents = 100 * (float(hz_to_midi(f0)) - target)
+            cents -= 1200 * round(cents / 1200)      # any octave counts
+            text = f"{cents:+.0f}¢ vs {midi_name(target)}"
+        else:
+            note, cents = hz_to_note(f0)
+            text = f"{cents:+d}¢ from {note}"
+        self.meters["tuning"].set_value(cents, self.profile, display=text,
+                                        on_target=abs(cents) <= IN_TUNE_CENTS)
+
+    def _update_vibrato(self):
+        """Vibrato over the last ~1.2 s, only while a note is held."""
+        n = int(VIBRATO_WINDOW_SECONDS / UPDATE_INTERVAL)
+        recent = np.array(list(self.recent_f0)[-n:])
+        meter = self.meters["vibrato"]
+        if len(recent) < n or np.isnan(recent).any():
+            meter.set_value(None, self.profile, note="hold a note")
+            return
+        cents = 100 * hz_to_midi(recent)
+        if np.ptp(cents) > 300:                       # moving between notes
+            meter.set_value(None, self.profile, note="hold a note")
+            return
+        vib = vibrato_stats(cents, 1 / UPDATE_INTERVAL)
+        if vib["rate"] is None:
+            meter.set_value(0, self.profile, display="straight tone")
+        else:
+            meter.set_value(vib["extent"], self.profile,
+                            display=f"{vib['rate']:.1f} Hz · ±{vib['extent']:.0f}¢")
 
 
 class TargetsDialog(QDialog):
@@ -427,14 +585,64 @@ class AnalysisGraph(pg.GraphicsLayoutWidget):
             self.text_r.setPos(self.ax_res.vb.viewRange()[0][0], self.ax_res.vb.viewRange()[1][1])
 
 
+class NoteScoreChart(pg.PlotWidget):
+    """Per-note tuning error of an exercise, with the in-tune zone shaded."""
+
+    def __init__(self, notes):
+        super().__init__(background="#2b2b2b")
+        self.setMouseEnabled(x=False, y=False)
+        self.hideButtons()
+        self.setMenuEnabled(False)
+        self.setFixedHeight(120)
+        self.getAxis("left").setLabel("¢")
+        zone = pg.LinearRegionItem((-IN_TUNE_CENTS, IN_TUNE_CENTS), orientation="horizontal",
+                                   movable=False, brush=pg.mkBrush(46, 204, 113, 40), pen=pg.mkPen(None))
+        self.addItem(zone)
+        xs = np.arange(len(notes))
+        heights = [np.clip(n["cents"], -100, 100) if n["cents"] is not None else 0 for n in notes]
+        brushes = ["#555" if n["cents"] is None else
+                   ON_TARGET_COLOR if abs(n["cents"]) <= IN_TUNE_CENTS else OFF_TARGET_COLOR
+                   for n in notes]
+        self.addItem(pg.BarGraphItem(x=xs, height=heights, width=0.7, brushes=brushes, pen=None))
+        # Dots keep spot-on notes (zero-height bars) visible.
+        sung = [i for i, n in enumerate(notes) if n["cents"] is not None]
+        self.addItem(pg.ScatterPlotItem([xs[i] for i in sung], [heights[i] for i in sung], size=8,
+                                        pen=None, brush=[brushes[i] for i in sung]))
+        missed = [i for i, n in enumerate(notes) if n["cents"] is None]
+        if missed:
+            self.plot(missed, [0] * len(missed), pen=None, symbol="x", symbolBrush="#888", symbolPen="#888")
+        self.getAxis("bottom").setTicks([[(i, midi_name(n["midi"])) for i, n in enumerate(notes)]])
+        self.setYRange(-100, 100, padding=0)
+        self.setXRange(-0.6, len(notes) - 0.4, padding=0)
+
+
+def singing_summary(singing):
+    """One line on held notes, vibrato, drift and tuning, or None."""
+    if not singing or not singing["held_notes"]:
+        return None
+    parts = [f"Held notes: {singing['held_notes']}"]
+    if singing["vibrato_notes"]:
+        regularity = singing["vibrato_regularity"]
+        parts.append(f"vibrato on {singing['vibrato_notes']}: {singing['vibrato_rate']:.1f} Hz "
+                     f"±{singing['vibrato_extent']:.0f}¢"
+                     + (f", cycle variation {regularity:.0%}" if regularity is not None else ""))
+    else:
+        parts.append("straight tone")
+    if singing["drift"] is not None:
+        parts.append(f"drift ±{singing['drift']:.0f}¢")
+    parts.append(f"{singing['tuning_offset']:.0f}¢ from A440 notes")
+    return " · ".join(parts)
+
+
 class TakeCard(QFrame):
     def __init__(self, data, count, profile, on_set_baseline, on_set_target):
         super().__init__()
         self.data, self.profile = data, profile
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
+        # Scoped to the card: a bare QFrame rule would also hit every QLabel inside.
         self.setStyleSheet("""
-            QFrame { background-color: #2b2b2b; border-radius: 10px; margin-bottom: 10px; }
-            QLabel { color: #ffffff; }
+            TakeCard { background-color: #2b2b2b; border-radius: 10px; margin-bottom: 10px; }
+            QLabel { color: #ffffff; background: transparent; }
         """)
         layout = QVBoxLayout()
 
@@ -442,21 +650,46 @@ class TakeCard(QFrame):
         header = QHBoxLayout()
         title = QLabel(f"Take #{count}")
         title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        baseline_btn = QPushButton(qta.icon("fa5s.flag", color="white"), " Set as baseline")
+        baseline_btn = QPushButton(qta.icon("fa5s.flag", color="white"), " Baseline")
+        baseline_btn.setToolTip("Set as baseline")
         baseline_btn.clicked.connect(lambda: on_set_baseline(data))
-        target_btn = QPushButton(qta.icon("fa5s.bullseye", color="white"), " Use as target")
+        target_btn = QPushButton(qta.icon("fa5s.bullseye", color="white"), " Target")
+        target_btn.setToolTip("Use as target")
         target_btn.clicked.connect(lambda: on_set_target(data))
+        shift_btn = QPushButton(qta.icon("fa5s.sliders-h", color="white"), " Shift")
+        shift_btn.setToolTip("Hear this take with the voice shifted")
+        shift_btn.setCheckable(True)
         play_btn = QPushButton(qta.icon('fa5s.play', color="white"), " Play")
         play_btn.clicked.connect(self.play_audio)
         for btn in (baseline_btn, target_btn):
             btn.setStyleSheet(BUTTON_STYLE)
+        shift_btn.setStyleSheet(f"QPushButton {{ {BUTTON_STYLE} }} "
+                                "QPushButton:checked { background-color: #3498db; }")
         play_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px 10px; border-radius: 5px;")
         header.addWidget(title)
         header.addStretch()
         header.addWidget(baseline_btn)
         header.addWidget(target_btn)
+        header.addWidget(shift_btn)
         header.addWidget(play_btn)
         layout.addLayout(header)
+
+        if data.get("source"):
+            source = QLabel(data["source"])
+            source.setStyleSheet("color: #aaa; font-size: 11px;")
+            layout.addWidget(source)
+        snr = data.get("snr")
+        if snr is not None and snr < MIN_RELIABLE_SNR:
+            warning = QLabel(f"⚠ Background noise: SNR {snr:.0f} dB. Clarity, Fold Contact and Ring "
+                             "may be unreliable; pitch and resonance hold up better.")
+            warning.setWordWrap(True)
+            warning.setStyleSheet(f"color: {OFF_TARGET_COLOR}; font-size: 12px;")
+            layout.addWidget(warning)
+
+        self.shift_panel = ShiftPanel(data, on_set_target)
+        self.shift_panel.hide()
+        shift_btn.toggled.connect(self.shift_panel.setVisible)
+        layout.addWidget(self.shift_panel)
 
         # --- GRAPH ---
         graph = AnalysisGraph(data['tracks'])
@@ -466,6 +699,25 @@ class TakeCard(QFrame):
         self.time_in_target = QLabel()
         self.time_in_target.setStyleSheet("color: #2ecc71; font-size: 12px;")
         layout.addWidget(self.time_in_target)
+
+        # --- SINGING ---
+        exercise = data.get("exercise")
+        if exercise:
+            text = f"{exercise['name']}: {exercise['notes_in_tune']}/{exercise['notes_total']} notes in tune"
+            if exercise["mean_abs_cents"] is not None:
+                text += (f" (±{IN_TUNE_CENTS}¢) · average error {exercise['mean_abs_cents']:.0f}¢ · "
+                         f"{exercise['time_in_tune']:.0%} of note time in tune")
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setStyleSheet("font-size: 12px;")
+            layout.addWidget(label)
+            layout.addWidget(NoteScoreChart(exercise["notes"]))
+        summary = singing_summary(data.get("singing"))
+        if summary:
+            label = QLabel(summary)
+            label.setWordWrap(True)
+            label.setStyleSheet("color: #ddd; font-size: 12px;")
+            layout.addWidget(label)
 
         # --- METRIC BARS ---
         self.bars = {key: MetricBar(key) for key in TAKE_BAR_KEYS}
@@ -503,6 +755,7 @@ class MainWindow(QMainWindow):
 
         self.take_count = 0
         self.is_recording = False
+        self.analyzing = False
         self.engine = engine
         self.profile = profile
         self.analysis_worker = None
@@ -518,8 +771,17 @@ class MainWindow(QMainWindow):
         self.engine.frame_ready.connect(self.live_panel.update_frame)
         main_layout.addWidget(self.live_panel)
         self.vowel_check = VowelCheck(engine, profile)
-        self.vowel_check.running_changed.connect(lambda running: self.record_btn.setEnabled(not running))
-        self.live_panel.tabs.addTab(self.vowel_check, "Vowels")
+        self.vowel_check.running_changed.connect(self.update_record_enabled)
+        self.exercise_view = ExerciseView(engine)
+        self.exercise_view.running_changed.connect(self.update_record_enabled)
+        self.exercise_view.take_ready.connect(self.process_results)
+        self.voice_map = VoiceMapView(engine, profile.voice_map_path)
+        self.live_panel.add_tab(self.vowel_check, "Vowels", {"speak"})
+        self.live_panel.add_tab(self.exercise_view, "Exercise", {"sing"}, default_for="sing")
+        self.live_panel.add_tab(self.voice_map, "Voice Map", {"sing"})
+        self.live_panel.target_provider = self.exercise_view.current_target
+        self.live_panel.mode_changed.connect(profile.set_mode)
+        self.live_panel.set_mode(profile.mode)
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
@@ -544,8 +806,17 @@ class MainWindow(QMainWindow):
         self.update_record_button_style(recording=False)
         self.record_btn.clicked.connect(self.toggle_recording)
 
+        self.import_btn = QPushButton(qta.icon("fa5s.file-audio", color="white"), " Import audio…")
+        self.import_btn.setStyleSheet(BUTTON_STYLE)
+        self.import_btn.setToolTip("Analyse a recording: your own, or a reference singer or speaker.")
+        self.import_btn.clicked.connect(self.import_audio)
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.import_btn, 1, Qt.AlignmentFlag.AlignLeft)
+        button_row.addWidget(self.record_btn)
+        button_row.addStretch(1)
+
         controls_layout.addWidget(self.status_label)
-        controls_layout.addWidget(self.record_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        controls_layout.addLayout(button_row)
         main_layout.addWidget(scroll)
         main_layout.addWidget(controls)
 
@@ -564,25 +835,59 @@ class MainWindow(QMainWindow):
             self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
             self.update_record_button_style(recording=True)
             self.engine.start_take()
+            self.update_record_enabled()
         else:
             self.is_recording = False
             self.status_label.setText("Processing...")
             self.status_label.setStyleSheet("color: #f1c40f;")
             self.update_record_button_style(recording=False)
+            self.analyzing = True
             self.record_btn.setEnabled(False)
             self.analysis_worker = take_analysis_worker(self.engine.stop_take())
             self.analysis_worker.finished_analysis.connect(self.process_results)
             self.analysis_worker.start()
 
+    def update_record_enabled(self, *_):
+        """The record button is unavailable while a drill or exercise records."""
+        busy = self.vowel_check.running or self.exercise_view.running or self.analyzing
+        self.record_btn.setEnabled(not busy)
+        self.import_btn.setEnabled(not busy and not self.is_recording)
+
+    def import_audio(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILE_FILTER)
+        if not path:
+            return
+        isolate = False
+        if isolation.available():
+            answer = QMessageBox.question(
+                self, "Isolate vocals?",
+                "Is there music behind the voice? Demucs can isolate the vocals first.\n"
+                "This is slower, and the first use downloads its model (~80 MB).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            isolate = answer == QMessageBox.StandardButton.Yes
+        self.analyzing = True
+        self.update_record_enabled()
+        self.status_label.setText("Isolating vocals and analyzing…" if isolate else "Analyzing file…")
+        self.status_label.setStyleSheet("color: #f1c40f;")
+        self.analysis_worker = AnalysisWorker(import_and_analyze, path, isolate)
+        self.analysis_worker.finished_analysis.connect(self.process_results)
+        self.analysis_worker.start()
+
     def process_results(self, results):
-        self.record_btn.setEnabled(not self.vowel_check.running)
+        self.analyzing = False
+        self.update_record_enabled()
         if "error" in results:
             self.status_label.setText(results["error"])
             self.status_label.setStyleSheet("color: #e74c3c;")
             return
-        # Calibrate the live formant tracker to the ceiling that fit this take.
-        self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
-        self.profile.set_formant_ceiling(results["formant_ceiling"])
+        # Calibrate the live formant tracker to the ceiling that fit this take,
+        # unless it's an imported file, which may be someone else's voice.
+        if not results.get("source"):
+            self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
+            self.profile.set_formant_ceiling(results["formant_ceiling"])
         self.profile.log_take(results)
         self.take_count += 1
         if results["delta_f"] is not None:
@@ -617,6 +922,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.engine.stop()
+        self.voice_map.save()
         super().closeEvent(event)
 
 

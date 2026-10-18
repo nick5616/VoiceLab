@@ -6,4 +6,6 @@ soundfile
 numpy
 scipy
 qtawesome
+mido
+pyworld
 pytest

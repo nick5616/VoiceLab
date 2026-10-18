@@ -28,9 +28,12 @@ def synth_vowel(f0, formants, seconds=1.5, open_quotient=0.6, noise=0.0, seed=0)
     harmonic, i.e. a 'lighter' voice; a smaller one gives a 'heavier' one.
     """
     rng = np.random.default_rng(seed)
-    n = int(seconds * SR)
-    t = np.arange(n) / SR
-    phase = (t * f0) % 1.0
+    if np.ndim(f0):  # per-sample pitch contour (vibrato, melodies)
+        n = len(f0)
+        phase = (np.cumsum(f0) / SR) % 1.0
+    else:
+        n = int(seconds * SR)
+        phase = (np.arange(n) / SR * f0) % 1.0
     opening = open_quotient * 0.66
     pulse = np.where(phase < opening, 0.5 * (1 - np.cos(np.pi * phase / opening)),
                      np.where(phase < open_quotient,
@@ -167,6 +170,63 @@ def test_take_has_resonance_track():
     track = result["tracks"]["delta_f"]
     assert len(track) == len(result["tracks"]["f0"])
     assert abs(np.nanmedian(track) - result["delta_f"]) < 1
+
+
+def vibrato_contour(f0, seconds, rate=5.5, extent_cents=50):
+    t = np.arange(int(seconds * SR)) / SR
+    return f0 * 2 ** (extent_cents * np.sin(2 * np.pi * rate * t) / 1200)
+
+
+def melody_contour(midis, note_seconds, offset_cents=0.0):
+    hz = analysis.midi_to_hz(np.repeat(midis, int(note_seconds * SR)) + offset_cents / 100)
+    return hz
+
+
+def test_vibrato_rate_and_extent():
+    result = analysis.analyze_take(synth_vowel(vibrato_contour(220, 2.0), MALE_FORMANTS))
+    singing = result["singing"]
+    assert singing["held_notes"] == 1 and singing["vibrato_notes"] == 1
+    assert abs(singing["vibrato_rate"] - 5.5) < 0.3
+    assert abs(singing["vibrato_extent"] - 50) < 10
+    assert singing["vibrato_regularity"] < 0.1
+
+
+def test_straight_tone_has_no_vibrato():
+    singing = analysis.analyze_take(synth_vowel(220, MALE_FORMANTS, seconds=2.0))["singing"]
+    assert singing["vibrato_notes"] == 0 and singing["vibrato_rate"] is None
+    assert singing["drift"] < 3
+    assert singing["tuning_offset"] < 5  # 220 Hz is exactly A3
+
+
+def test_notes_are_segmented_without_splitting_vibrato():
+    contour = np.concatenate([vibrato_contour(220, 1.0), vibrato_contour(277.2, 1.0),
+                              vibrato_contour(329.6, 1.0)])
+    singing = analysis.analyze_take(synth_vowel(contour, MALE_FORMANTS))["singing"]
+    assert singing["notes"] == 3
+
+
+def test_exercise_scoring_with_octave_folding():
+    midis = [57, 59, 61, 62, 64]                 # A3 B3 C#4 D4 E4
+    targets = [(0.5 + i * 0.6, 0.6, m) for i, m in enumerate(midis)]
+    # Sung an octave low and 20 cents sharp, after half a second of silence.
+    audio = np.concatenate([np.zeros(int(0.5 * SR)),
+                            synth_vowel(melody_contour(np.array(midis) - 12, 0.6, 20), MALE_FORMANTS)])
+    result = analysis.analyze_take(audio)
+    score = analysis.score_exercise(result["tracks"]["times"], result["tracks"]["f0"], targets)
+    assert score["notes_sung"] == 5 and score["notes_in_tune"] == 5
+    assert all(n["octave"] == -1 for n in score["notes"])
+    assert abs(score["mean_abs_cents"] - 20) < 5
+
+
+def test_exercise_scoring_flags_missed_and_flat_notes():
+    targets = [(0.0, 0.6, 57), (0.6, 0.6, 59), (1.2, 0.6, 61)]
+    contour = np.concatenate([melody_contour([57], 0.6, -45), melody_contour([59], 0.6)])
+    audio = np.concatenate([synth_vowel(contour, MALE_FORMANTS), np.zeros(int(0.6 * SR))])
+    result = analysis.analyze_take(audio)
+    score = analysis.score_exercise(result["tracks"]["times"], result["tracks"]["f0"], targets)
+    assert score["notes_sung"] == 2 and score["notes_in_tune"] == 1
+    assert score["notes"][0]["cents"] < -35
+    assert score["notes"][2]["cents"] is None
 
 
 def test_level_is_not_normalized_away():

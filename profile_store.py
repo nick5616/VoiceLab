@@ -15,7 +15,8 @@ TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"]
 # Half-width of a target created from a take. Pitch is in semitones, the rest
 # in each metric's own units.
 DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2}
-SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents"]
+SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
+                              "snr", "source"]
 # Metrics measured as spreads, which can't go below zero.
 NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 
@@ -59,6 +60,7 @@ class Profile:
         self.targets = {}
         self.formant_ceiling = None
         self.vowel_baseline = None
+        self.mode = "speak"
         self.load()
 
     def load(self):
@@ -73,11 +75,13 @@ class Profile:
         self.targets = {k: v for k, v in data.get("targets", {}).items() if k in TARGET_KEYS}
         self.formant_ceiling = data.get("formant_ceiling")
         self.vowel_baseline = data.get("vowel_baseline")
+        self.mode = data.get("mode", "speak")
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         data = {"baseline": self.baseline, "targets": self.targets,
-                "formant_ceiling": self.formant_ceiling, "vowel_baseline": self.vowel_baseline}
+                "formant_ceiling": self.formant_ceiling, "vowel_baseline": self.vowel_baseline,
+                "mode": self.mode}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -151,6 +155,14 @@ class Profile:
         self.vowel_baseline = _vowel_summary(vowel_result) | {
             "recorded": datetime.now().strftime("%Y-%m-%d %H:%M")}
         self.save()
+
+    def set_mode(self, mode):
+        self.mode = mode
+        self.save()
+
+    @property
+    def voice_map_path(self):
+        return self.directory / "voicemap.npz"
 
     # --- CALIBRATION / HISTORY ---
 

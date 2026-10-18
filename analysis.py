@@ -7,6 +7,8 @@ Metric choices follow the research summary in the README:
   formant-corrected H1*-H2* (Iseli & Alwan), cepstral peak prominence and level.
 - Pitch variation is measured in semitones so it is comparable across registers.
 """
+from collections import deque
+
 import numpy as np
 import parselmouth
 
@@ -150,6 +152,49 @@ def ring_db(frame, sample_rate):
     low = power[(freqs > 50) & (freqs < 2000)].sum()
     high = power[(freqs >= 2000) & (freqs < 4000)].sum()
     return float(10 * np.log10((high + 1e-20) / (low + 1e-20)))
+
+
+# --- NOISE ---
+
+# Below ~30 dB voice-to-noise ratio, voice-quality measures (CPP, H1-H2, HNR,
+# jitter/shimmer) lose reliability; pitch and formants hold up better.
+MIN_RELIABLE_SNR = 30
+NOISE_PERCENTILE = 10   # quietest unvoiced frames = the pauses between phrases
+
+
+def estimate_snr(levels, voiced, min_noise_frames=20, min_voice_frames=20):
+    """Voice-to-noise ratio (dB) from per-frame levels: median voiced level over
+    the level of the quietest unvoiced frames. None without enough pauses."""
+    levels = np.asarray(levels, dtype=float)
+    voiced = np.asarray(voiced, dtype=bool)
+    if (~voiced).sum() < min_noise_frames or voiced.sum() < min_voice_frames:
+        return None
+    noise = np.percentile(levels[~voiced], NOISE_PERCENTILE)
+    return float(np.median(levels[voiced]) - noise)
+
+
+def frame_levels(audio, sample_rate, times, window=0.03):
+    """dBFS level of a short window centred on each time."""
+    half = int(window * sample_rate / 2)
+    centers = (np.asarray(times) * sample_rate).astype(int)
+    return np.array([level_dbfs(audio[max(0, c - half):c + half]) if c - half < len(audio) else -120.0
+                     for c in centers])
+
+
+class NoiseMonitor:
+    """Rolling voice-to-noise ratio from live frames."""
+
+    def __init__(self, frames):
+        self.levels = deque(maxlen=frames)
+        self.voiced = deque(maxlen=frames)
+
+    def add(self, frame):
+        self.levels.append(frame["level"])
+        self.voiced.append(not np.isnan(frame["f0"]))
+
+    def snr(self):
+        # Live frames come every ~25 ms: need ~1 s of pauses and ~0.5 s of voice.
+        return estimate_snr(self.levels, self.voiced, min_noise_frames=40, min_voice_frames=20)
 
 
 # --- PRAAT WRAPPERS ---
@@ -305,6 +350,8 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
     median_f0 = float(np.nanmedian(f0))
     note, cents = hz_to_note(median_f0)
     return {
+        "snr": estimate_snr(frame_levels(audio, sample_rate, times), voiced),
+        "singing": singing_stats(times, f0),
         "pitch": median_f0,
         "note": note,
         "cents": cents,
@@ -327,6 +374,162 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
             "f3": freqs[:, 2],
             "delta_f": df_track,
         },
+    }
+
+
+# --- SINGING ---
+
+NOTE_MIN_SECONDS = 0.4
+HELD_NOTE_SECONDS = 0.6
+NOTE_CHANGE_CENTS = 80        # smoothed pitch moving this far starts a new note
+VIBRATO_BAND = (3.5, 9.0)     # Hz; typical vibrato rates are ~4.5-7 Hz
+MIN_VIBRATO_CENTS = 10
+TREND_SECONDS = 0.3           # averaging window separating slow drift from vibrato
+EXERCISE_SETTLE_SECONDS = 0.15
+IN_TUNE_CENTS = 25
+
+
+def hz_to_midi(f0):
+    return 69 + 12 * np.log2(np.asarray(f0, dtype=float) / 440.0)
+
+
+def midi_to_hz(midi):
+    return 440.0 * 2 ** ((np.asarray(midi, dtype=float) - 69) / 12)
+
+
+def _moving_average(x, n):
+    n = max(1, int(round(n)))
+    padded = np.pad(x, (n // 2, n - 1 - n // 2), mode="edge")
+    return np.convolve(padded, np.ones(n) / n, mode="valid")
+
+
+def _voiced_runs(f0):
+    voiced = np.append(~np.isnan(f0), False)
+    runs, start = [], None
+    for i, v in enumerate(voiced):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            runs.append((start, i))
+            start = None
+    return runs
+
+
+def segment_notes(f0, frame_rate, min_seconds=NOTE_MIN_SECONDS):
+    """(start, end) frame ranges of sung notes: voiced runs, split wherever the
+    smoothed pitch moves more than NOTE_CHANGE_CENTS from the note so far.
+    The ~0.2 s smoothing averages vibrato away so it doesn't split notes."""
+    notes = []
+    min_frames = min_seconds * frame_rate
+    for run_start, run_end in _voiced_runs(f0):
+        cents = 100 * hz_to_midi(f0[run_start:run_end])
+        smooth = _moving_average(cents, 0.2 * frame_rate)
+        start, total = 0, smooth[0]
+        for i in range(1, len(smooth)):
+            if abs(smooth[i] - total / (i - start)) > NOTE_CHANGE_CENTS:
+                if i - start >= min_frames:
+                    notes.append((run_start + start, run_start + i))
+                start, total = i, 0.0
+            total += smooth[i]
+        if len(smooth) - start >= min_frames:
+            notes.append((run_start + start, run_end))
+    return notes
+
+
+def vibrato_stats(cents, frame_rate):
+    """Vibrato in a held note's pitch (in cents): rate (Hz), extent (+/- cents),
+    regularity (cycle-length variation, lower = steadier) and drift (slow
+    wandering, std in cents). Vibrato fields are None when there is none."""
+    trend = _moving_average(cents, TREND_SECONDS * frame_rate)
+    trim = int(TREND_SECONDS * frame_rate / 2)
+    detrended = (cents - trend)[trim:len(cents) - trim]
+    trend = trend[trim:len(cents) - trim]
+    result = {"rate": None, "extent": None, "regularity": None,
+              "drift": float(np.std(trend)) if len(trend) else np.nan}
+    if len(detrended) < frame_rate * 0.5:
+        return result
+
+    nfft = 4096
+    spec = np.abs(np.fft.rfft(detrended * np.hanning(len(detrended)), nfft)) ** 2
+    freqs = np.fft.rfftfreq(nfft, 1 / frame_rate)
+    band = (freqs >= VIBRATO_BAND[0]) & (freqs <= VIBRATO_BAND[1])
+    in_band = spec[band].sum() / (spec[freqs >= 1.0].sum() + 1e-12)
+    extent = float(np.sqrt(2) * np.std(detrended))   # amplitude of a sinusoid
+    if in_band < 0.5 or extent < MIN_VIBRATO_CENTS:
+        return result
+
+    # Upward zero crossings give individual cycle lengths.
+    s = detrended
+    idx = np.flatnonzero((s[:-1] < 0) & (s[1:] >= 0))
+    crossings = idx + s[idx] / (s[idx] - s[idx + 1])
+    periods = np.diff(crossings) / frame_rate
+    if len(periods) >= 2:
+        rate = 1 / np.mean(periods)
+        regularity = float(np.std(periods) / np.mean(periods))
+    else:
+        rate, regularity = freqs[band][np.argmax(spec[band])], None
+    result.update(rate=float(rate), extent=extent, regularity=regularity)
+    return result
+
+
+def singing_stats(times, f0):
+    """Summary of sung notes in a take: note count, vibrato on held notes,
+    sustain drift and tuning relative to A440 equal temperament."""
+    if len(times) < 2:
+        return None
+    frame_rate = 1 / (times[1] - times[0])
+    notes = segment_notes(f0, frame_rate)
+    if not notes:
+        return None
+    offsets, held = [], []
+    for a, b in notes:
+        midi = hz_to_midi(f0[a:b])
+        median = np.median(midi)
+        offsets.append(100 * (median - np.round(median)))
+        if (b - a) / frame_rate >= HELD_NOTE_SECONDS:
+            held.append(vibrato_stats(100 * midi, frame_rate))
+
+    def median_of(key):
+        values = [h[key] for h in held if h[key] is not None and not np.isnan(h[key])]
+        return float(np.median(values)) if values else None
+
+    return {
+        "notes": len(notes),
+        "held_notes": len(held),
+        "vibrato_notes": sum(h["rate"] is not None for h in held),
+        "vibrato_rate": median_of("rate"),
+        "vibrato_extent": median_of("extent"),
+        "vibrato_regularity": median_of("regularity"),
+        "drift": median_of("drift"),
+        "tuning_offset": float(np.median(np.abs(offsets))),
+    }
+
+
+def score_exercise(times, f0, targets):
+    """Score a take against target notes [(start_s, duration_s, midi), ...].
+
+    Each note is judged after a short settle time. Errors are folded to the
+    nearest octave, so singing the melody an octave down still scores."""
+    notes = []
+    for start, duration, midi in targets:
+        window = ((times >= start + EXERCISE_SETTLE_SECONDS) & (times < start + duration)
+                  & ~np.isnan(f0))
+        if window.sum() < 3:
+            notes.append({"midi": int(midi), "cents": None, "in_tune": 0.0, "octave": 0})
+            continue
+        cents = 100 * (hz_to_midi(f0[window]) - midi)
+        octave = int(np.round(np.median(cents) / 1200))
+        cents = cents - 1200 * octave
+        notes.append({"midi": int(midi), "cents": float(np.median(cents)), "octave": octave,
+                      "in_tune": float(np.mean(np.abs(cents) <= IN_TUNE_CENTS))})
+    sung = [n for n in notes if n["cents"] is not None]
+    return {
+        "notes": notes,
+        "notes_total": len(notes),
+        "notes_sung": len(sung),
+        "notes_in_tune": sum(abs(n["cents"]) <= IN_TUNE_CENTS for n in sung),
+        "mean_abs_cents": float(np.mean([abs(n["cents"]) for n in sung])) if sung else None,
+        "time_in_tune": float(np.mean([n["in_tune"] for n in notes])) if notes else None,
     }
 
 

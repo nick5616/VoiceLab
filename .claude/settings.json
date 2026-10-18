@@ -23,7 +23,26 @@
       "Bash(./venv/Scripts/python -m pytest tests/test_analysis.py -q)",
       "Bash(./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke4.py\")",
       "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke4.py\")",
-      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke3.py\")"
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke3.py\")",
+      "Bash(mkdir -p wheels)",
+      "Bash(/c/Users/nickb/repos/VoiceLab/venv/Scripts/python -m pip download --no-deps --only-binary=:all: -d wheels pyworld)",
+      "Bash(/c/Users/nickb/repos/VoiceLab/venv/Scripts/python -m pip download --no-deps --only-binary=:all: -d wheels deepfilternet)",
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore -c ' *)",
+      "Bash(ls \"C:/Users/nickb/.claude/projects/c--Users-nickb-repos-VoiceLab/memory/\"; cat \"C:/Users/nickb/.claude/projects/c--Users-nickb-repos-VoiceLab/memory/MEMORY.md\" 2>/dev/null)",
+      "Read(//c/Users/nickb/.claude/projects/c--Users-nickb-repos-VoiceLab/memory/**)",
+      "Bash(./venv/Scripts/python -m pip install -q mido)",
+      "Bash(./venv/Scripts/python -c \"import mido; print\\(mido.__version__\\)\")",
+      "Bash(./venv/Scripts/python -m pip show mido)",
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke5.py\")",
+      "Bash(./venv/Scripts/python -m pip install -q pyworld)",
+      "Bash(./venv/Scripts/python -c \"import pyworld; print\\('pyworld ok'\\)\")",
+      "Bash(./venv/Scripts/python -m pip install -q torch torchaudio demucs)",
+      "Bash(./venv/Scripts/python -c \"import torch, demucs; print\\('torch', torch.__version__\\); import demucs.api; print\\('demucs.api ok'\\)\")",
+      "Bash(./venv/Scripts/python -c \"import pyworld\")",
+      "Bash(./venv/Scripts/python -m pytest tests/test_shift.py -q -k \"not isolation\")",
+      "Bash(./venv/Scripts/python -m pytest tests/test_shift.py -q -k isolation)",
+      "Bash(PYTHONIOENCODING=utf-8 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke6.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 HF_HUB_DISABLE_SYMLINKS_WARNING=1 ./venv/Scripts/python -W ignore \"C:/Users/nickb/AppData/Local/Temp/claude/c--Users-nickb-repos-VoiceLab/e9e4cb09-c746-49d7-9a7b-622592a7e5a7/scratchpad/smoke6.py\")"
     ]
   }
 }
