@@ -39,6 +39,19 @@ SPECTRUM_MAX_HZ = 5500
 VOICE_BAND_HZ = 4000
 # Below this level live frames skip analysis and report silence.
 SILENCE_DBFS = -50
+# Samples at or above this are treated as clipped (input overloaded).
+CLIP_LEVEL = 0.99
+# Live frames must be this far above the input's noise floor to be analysed as
+# voice. Mains hum is genuinely periodic (pitch ~60 Hz), so on a mic with a high
+# noise floor a fixed silence level alone lets hum and noise read as voice.
+VOICE_MARGIN_DB = 8
+# The noise floor drops at once to a quieter frame but rises only this fast,
+# so a long held note doesn't become the "floor".
+NOISE_FLOOR_RISE_DB_PER_S = 1.0
+DIGITAL_SILENCE_DBFS = -100     # e.g. the empty buffer at startup: not a noise floor
+# Until this much input has been heard the floor is unknown, so only the fixed
+# silence level applies (speaking right at launch still registers).
+NOISE_FLOOR_WARMUP_SECONDS = 0.5
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -89,6 +102,13 @@ def vocal_tract_length_cm(df):
 def level_dbfs(frame):
     rms = np.sqrt(np.mean(np.square(frame)))
     return float(20 * np.log10(rms + 1e-6))  # floors digital silence at -120 dBFS
+
+
+def clip_events(audio):
+    """Number of separate runs of clipped samples. Clipping squares off the
+    waveform, adding high harmonics that inflate Ring and lower Clarity."""
+    clipped = np.abs(np.asarray(audio, dtype=float)) >= CLIP_LEVEL
+    return int(np.count_nonzero(clipped[1:] & ~clipped[:-1]) + (clipped[0] if len(clipped) else 0))
 
 
 def _power_spectrum_db(frame, sample_rate, pad=1):
@@ -320,12 +340,29 @@ class FrameAnalyzer:
 
     WINDOW_SECONDS = 0.12
 
-    def __init__(self, sample_rate=SAMPLE_RATE):
+    def __init__(self, sample_rate=SAMPLE_RATE, frame_interval=0.025):
         self.sample_rate = sample_rate
         self.formant_ceiling = DEFAULT_FORMANT_CEILING
+        self.noise_floor = None       # voice-band dBFS
+        self._floor_rise = NOISE_FLOOR_RISE_DB_PER_S * frame_interval
+        self._warmup_frames = int(NOISE_FLOOR_WARMUP_SECONDS / frame_interval)
         freqs, _ = _power_spectrum_db(np.zeros(SPECTRAL_FRAME), sample_rate, pad=2)
         self._spectrum_bins = freqs <= SPECTRUM_MAX_HZ
         self.spectrum_freqs = freqs[self._spectrum_bins]
+
+    def _above_noise(self, band_level):
+        """Update the noise floor with this frame; True if it stands out
+        from the floor enough to be voice."""
+        if band_level <= DIGITAL_SILENCE_DBFS:
+            return False
+        if self.noise_floor is None or band_level < self.noise_floor:
+            self.noise_floor = band_level
+        else:
+            self.noise_floor += self._floor_rise
+        if self._warmup_frames > 0:       # floor not known yet
+            self._warmup_frames -= 1
+            return True
+        return band_level >= self.noise_floor + VOICE_MARGIN_DB
 
     def spectrum(self, frame):
         """Power spectrum (dB) of the frame over 0-SPECTRUM_MAX_HZ."""
@@ -335,10 +372,11 @@ class FrameAnalyzer:
     def analyze(self, window):
         frame = window[-SPECTRAL_FRAME:]
         result = {"level": level_dbfs(frame), "band_level": band_level_db(frame, self.sample_rate),
+                  "clipped": bool(np.max(np.abs(frame), initial=0) >= CLIP_LEVEL),
                   "f0": np.nan, "delta_f": np.nan, "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
                   "formants": np.full(4, np.nan), "resonance_reliable": False,
                   "spectrum": self.spectrum(frame)}
-        if result["level"] < SILENCE_DBFS:
+        if not self._above_noise(result["band_level"]) or result["level"] < SILENCE_DBFS:
             return result
 
         sound = parselmouth.Sound(window, sampling_frequency=self.sample_rate)
@@ -413,6 +451,7 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
     return {
         "snr": snr,              # voice band: what the measurements see
         "snr_full": snr_full,    # full band: includes hiss above the voice band
+        "clip_events": clip_events(audio),
         "singing": singing_stats(times, f0),
         "pitch": median_f0,
         "note": note,

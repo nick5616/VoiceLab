@@ -244,6 +244,7 @@ class PitchResonancePlane(pg.PlotWidget):
                                  symbolBrush="#f1c40f", symbolPen=pg.mkPen("w", width=1))
         self.takes = pg.ScatterPlotItem(size=10, pen=pg.mkPen("w"), brush="#9b59b6")
         self.addItem(self.takes)
+        self.take_points = {}    # take number -> (x, y, label)
 
         # Target: a box when both pitch and resonance targets exist, else a band.
         self.target_box = QGraphicsRectItem()
@@ -303,7 +304,22 @@ class PitchResonancePlane(pg.PlotWidget):
         self.current.setData([point[0]], [point[1]])
 
     def add_take(self, number, f0, delta_f):
-        self.takes.addPoints([delta_f], [np.log2(f0)])
         label = pg.TextItem(f"#{number}", color="#ddd", anchor=(0, 1))
         label.setPos(delta_f, np.log2(f0))
         self.addItem(label)
+        self.take_points[number] = (delta_f, np.log2(f0), label)
+        self._draw_takes()
+
+    def remove_take(self, number):
+        point = self.take_points.pop(number, None)
+        if point:
+            self.removeItem(point[2])
+            self._draw_takes()
+
+    def clear_takes(self):
+        for number in list(self.take_points):
+            self.remove_take(number)
+
+    def _draw_takes(self):
+        points = list(self.take_points.values())
+        self.takes.setData([p[0] for p in points], [p[1] for p in points])

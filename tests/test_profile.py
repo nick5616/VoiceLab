@@ -62,6 +62,39 @@ def test_history_log(tmp_path):
     assert entry["pitch"] == 200.0 and "audio" not in entry and "time" in entry
 
 
+def test_history_keeps_exercise_and_singing(tmp_path):
+    profile = Profile(tmp_path)
+    take = TAKE | {"uid": "u1", "mode": "sing",
+                   "singing": {"vibrato_rate": np.float64(5.6), "drift": np.nan},
+                   "exercise": {"name": "Scale", "notes_total": 9, "notes_in_tune": np.int64(7),
+                                "mean_abs_cents": 14.0, "notes": [{"midi": 48}], "targets": [(0, 1, 48)]}}
+    profile.log_take(take)
+    entry = profile.read_history()[0]
+    assert entry["mode"] == "sing" and entry["uid"] == "u1"
+    assert entry["singing"] == {"vibrato_rate": 5.6, "drift": None}
+    assert entry["exercise"]["notes_in_tune"] == 7 and "notes" not in entry["exercise"]
+
+
+def test_forget_takes(tmp_path):
+    profile = Profile(tmp_path)
+    for uid in ("a", "b"):
+        profile.log_take(TAKE | {"uid": uid})
+    profile.log_vowel_check({"delta_f": 1000.0, "formant_ceiling": 5500, "vowels": {}})
+    with profile.history_path.open("a") as f:
+        f.write("{truncated\n")
+    profile.forget_takes(["a"])
+    assert [e.get("uid") for e in profile.read_history()] == ["b", None]
+
+
+def test_settings_round_trip(tmp_path):
+    profile = Profile(tmp_path)
+    profile.set_takes_dir(tmp_path / "takes")
+    profile.set_input_device("USB Mic")
+    reloaded = Profile(tmp_path)
+    assert reloaded.takes_dir == str(tmp_path / "takes") and reloaded.takes_dir_asked
+    assert reloaded.input_device == "USB Mic"
+
+
 def test_time_in_target(tmp_path):
     profile = Profile(tmp_path)
     assert profile.time_in_target("pitch", [200, 210]) is None

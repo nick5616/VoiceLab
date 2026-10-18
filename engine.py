@@ -18,7 +18,7 @@ class LiveEngine(QObject):
     def __init__(self, sample_rate=SAMPLE_RATE):
         super().__init__()
         self.sample_rate = sample_rate
-        self.analyzer = FrameAnalyzer(sample_rate)
+        self.analyzer = FrameAnalyzer(sample_rate, UPDATE_INTERVAL)
         self._ring = np.zeros(int(sample_rate * FrameAnalyzer.WINDOW_SECONDS))
         self._lock = threading.Lock()
         self._take = None
@@ -26,18 +26,31 @@ class LiveEngine(QObject):
         self._worker = _LiveWorker(self)
         self._worker.frame_ready.connect(self.frame_ready)
 
-    def start(self):
-        self._stream = sd.InputStream(samplerate=self.sample_rate, channels=1,
-                                      blocksize=BLOCK_SIZE, callback=self._on_audio)
-        self._stream.start()
+    def start(self, device=None):
+        """Open the mic (device index, or None for the system default) and
+        start the live analysis. The analysis starts even if the mic fails, so
+        picking another device later brings the meters to life."""
         self._worker.start()
+        self.open_stream(device)
+
+    def open_stream(self, device=None):
+        """(Re)open the input stream, e.g. after choosing another mic."""
+        self._close_stream()
+        stream = sd.InputStream(samplerate=self.sample_rate, channels=1, device=device,
+                                blocksize=BLOCK_SIZE, callback=self._on_audio)
+        stream.start()
+        self._stream = stream
+
+    def _close_stream(self):
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
 
     def stop(self):
         self._worker.running = False
         self._worker.wait()
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+        self._close_stream()
 
     def _on_audio(self, indata, frames, time_info, status):
         self.feed(indata[:, 0])
@@ -67,6 +80,24 @@ class LiveEngine(QObject):
         with self._lock:
             chunks, self._take = self._take, None
         return np.concatenate(chunks) if chunks else np.zeros(0)
+
+
+def input_devices():
+    """[(index, name)] of microphones. Only the default host API is listed:
+    Windows shows every device once per API (MME, DirectSound, WASAPI...).
+    Its "Sound Mapper" is the system default under another name, so it's left out."""
+    try:
+        hostapi = sd.default.hostapi
+        return [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+                if d["max_input_channels"] > 0 and d["hostapi"] == hostapi
+                and "Sound Mapper" not in d["name"]]
+    except sd.PortAudioError:
+        return []
+
+
+def device_index(name):
+    """Index of the input device called `name`, or None (system default)."""
+    return next((i for i, n in input_devices() if n == name), None)
 
 
 class _LiveWorker(QThread):

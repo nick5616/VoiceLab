@@ -16,7 +16,10 @@ TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"]
 # in each metric's own units.
 DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2}
 SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
-                              "snr", "snr_full", "source"]
+                              "snr", "snr_full", "clip_events", "source", "mode", "uid"]
+# Scalar parts of a take's exercise score worth tracking over time.
+EXERCISE_SUMMARY_KEYS = ["name", "notes_total", "notes_sung", "notes_in_tune",
+                         "mean_abs_cents", "time_in_tune"]
 # Metrics measured as spreads, which can't go below zero.
 NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 
@@ -36,8 +39,14 @@ def _clean(value):
 
 
 def summarize(result):
-    """The scalar metrics of an analyze_take result, ready to store."""
-    return {key: _clean(result.get(key)) for key in SUMMARY_KEYS}
+    """The scalar metrics of an analyze_take result (plus its singing stats and
+    exercise score, if any), ready to store."""
+    summary = {key: _clean(result.get(key)) for key in SUMMARY_KEYS}
+    if result.get("singing"):
+        summary["singing"] = {k: _clean(v) for k, v in result["singing"].items()}
+    if result.get("exercise"):
+        summary["exercise"] = {k: _clean(result["exercise"].get(k)) for k in EXERCISE_SUMMARY_KEYS}
+    return summary
 
 
 def target_from_value(key, value):
@@ -61,6 +70,9 @@ class Profile:
         self.formant_ceiling = None
         self.vowel_baseline = None
         self.mode = "speak"
+        self.takes_dir = None          # folder takes are saved to and loaded from
+        self.takes_dir_asked = False   # offered to pick one on first launch
+        self.input_device = None       # mic name; None = system default
         self.load()
 
     def load(self):
@@ -76,12 +88,16 @@ class Profile:
         self.formant_ceiling = data.get("formant_ceiling")
         self.vowel_baseline = data.get("vowel_baseline")
         self.mode = data.get("mode", "speak")
+        self.takes_dir = data.get("takes_dir")
+        self.takes_dir_asked = data.get("takes_dir_asked", False)
+        self.input_device = data.get("input_device")
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         data = {"baseline": self.baseline, "targets": self.targets,
                 "formant_ceiling": self.formant_ceiling, "vowel_baseline": self.vowel_baseline,
-                "mode": self.mode}
+                "mode": self.mode, "takes_dir": self.takes_dir,
+                "takes_dir_asked": self.takes_dir_asked, "input_device": self.input_device}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -160,6 +176,15 @@ class Profile:
         self.mode = mode
         self.save()
 
+    def set_takes_dir(self, path):
+        self.takes_dir = str(path) if path else None
+        self.takes_dir_asked = True
+        self.save()
+
+    def set_input_device(self, name):
+        self.input_device = name
+        self.save()
+
     @property
     def voice_map_path(self):
         return self.directory / "voicemap.npz"
@@ -181,6 +206,28 @@ class Profile:
         entry["time"] = datetime.now().isoformat(timespec="seconds")
         with self.history_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
+    def read_history(self):
+        """All logged entries, skipping unreadable lines."""
+        if not self.history_path.exists():
+            return []
+        entries = []
+        for line in self.history_path.read_text(encoding="utf-8").splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries
+
+    def forget_takes(self, uids):
+        """Drop takes from the history log, e.g. once a takes folder holds them."""
+        uids = set(uids)
+        if not uids or not self.history_path.exists():
+            return
+        kept = [e for e in self.read_history() if e.get("uid") not in uids]
+        tmp = self.history_path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(e) + "\n" for e in kept), encoding="utf-8")
+        tmp.replace(self.history_path)
 
 
 def _vowel_summary(vowel_result):

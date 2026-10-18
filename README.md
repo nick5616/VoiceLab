@@ -71,6 +71,39 @@ python main.py
 4. Compare takes as you experiment with different placements, vowel shapes, or resonance strategies.
 5. Click **Play** on any card to hear it back alongside its metrics.
 
+On a wide window the live panel and your takes sit side by side; narrower, they stack, with the live panel kept compact. Drag the divider to give either more room. The mouse wheel scrolls the takes wherever the pointer is; a Shift slider only takes the wheel after you click it.
+
+**Mic** (bottom right) picks the input device and is remembered. Only devices of the system's default audio API are listed, so each mic appears once.
+
+### Takes folder
+
+On first launch VoiceLab offers to save takes to a folder you choose; the folder button at the bottom chooses or changes it any time. Each take is saved there as a WAV file plus a JSON file with the same name holding its analysis, so the folder loads instantly next session:
+
+```
+2026-10-18 10-32-05.wav            recorded take
+2026-10-18 10-32-05.json           its analysis
+2026-10-18 10-40-11 bright ee.wav  after naming it "bright ee"
+```
+
+- **Name** a take by clicking its title on the card; its files are renamed to match.
+- **Delete** (trash button) removes the take and both its files, after asking.
+- **Add** recordings by copying audio files (WAV, FLAC, OGG, MP3, AIFF) into the folder. They're analysed when the folder loads and get a JSON file then; they're treated like imported files.
+- **Reload** (↻) picks up files added, renamed or deleted outside VoiceLab.
+- The newest 20 takes are shown; **Show older takes** pages in the rest.
+- Choosing a folder saves the current session's unsaved takes into it.
+
+Without a folder, takes last only for the session (their summaries still go to the progress log).
+
+### Progress
+
+**Progress** opens a chart per measurement over time: a dot per take, a yellow weekly median, your baseline (dashed) and target (green band), and a headline such as `this week 1094 Hz · +66 Hz since week of Sep 14`. Pitch changes are given in semitones.
+
+It covers pitch, resonance, the vowel check's vowel-balanced ΔF, Fold Contact, Clarity, Ring, intonation range, and for singing, exercise accuracy (share of notes in tune and average error) and vibrato rate and extent. Filter by Speak or Sing and by period. Imported files are left out unless **Include imported files** is ticked, since they may be someone else's voice. Weekly medians matter more than any single take: one tired evening shouldn't look like a setback.
+
+### Clipping
+
+If the input overloads, a red **CLIPPING** badge appears in the live panel, and the take card says how many times it happened. Clipping squares off the waveform, adding harshness that inflates Ring and lowers Clarity, so lower the mic gain or move back a little.
+
 ### Noise check
 
 The badge in the live panel's header shows your **voice-to-noise ratio (SNR)** over the last 10 s. It's measured in the voice band (0–4 kHz), where VoiceLab measures, from the pauses between phrases, so it shows "SNR —" until you've paused. Below 30 dB it turns orange: Clarity, Fold Contact and Ring become unreliable in noise, while pitch and resonance hold up better ([review](https://pmc.ncbi.nlm.nih.gov/articles/PMC11673399)). Takes recorded below 30 dB carry the same warning.
@@ -157,7 +190,7 @@ Progress is measured against your own voice, which also cancels out most mic and
 - **Use as target** on a take you liked. Each metric gets a range around that take: ±1.5 semitones for pitch, ±30 Hz for resonance, ±3 dB for the voice-quality metrics. Meters show the range as a green band and turn green when you're inside it. The pitch view and the Pitch × Resonance plane show it too, and the live note turns green inside the pitch target.
 - **Targets** (top of the live panel) opens a dialog for setting ranges by hand, turning targets off one by one, and clearing the baseline. Keep only one or two targets on while practising, since watching many at once makes feedback harder to use.
 
-The profile is stored in `~/.voicelab/profile.json` (override the folder with the `VOICELAB_HOME` environment variable). It also remembers the last formant calibration, so live resonance is calibrated from launch. A summary of every take (no audio) is appended to `~/.voicelab/history.jsonl` for tracking progress over time.
+The profile is stored in `~/.voicelab/profile.json` (override the folder with the `VOICELAB_HOME` environment variable). It also remembers the last formant calibration, the takes folder and the mic, so live resonance is calibrated from launch. Vowel checks, and takes recorded without a takes folder, are summarized (no audio) in `~/.voicelab/history.jsonl`; with a takes folder, the folder is the record of your takes, so deleting a take there also removes it from Progress.
 
 ## Tips
 
@@ -172,4 +205,4 @@ The profile is stored in `~/.voicelab/profile.json` (override the folder with th
 python -m pytest tests
 ```
 
-The tests synthesize vowels with known pitch, formants, glottal source shape and noise, then check that each metric recovers them.
+The tests synthesize vowels with known pitch, formants, glottal source shape and noise, then check that each metric recovers them. `tests/test_app.py` drives the whole app window headless (no mic or speakers needed): live meters, recording, the takes folder, exercises, the vowel check, shifting and Progress.

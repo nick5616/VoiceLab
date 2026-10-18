@@ -1,5 +1,8 @@
 import sys
+import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -8,21 +11,25 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QScrollArea,
                              QFrame, QSizePolicy, QTabWidget, QDialog, QGridLayout,
                              QCheckBox, QDoubleSpinBox, QDialogButtonBox, QButtonGroup,
-                             QFileDialog, QMessageBox)
-from PyQt6.QtCore import Qt, QSize, QRectF, pyqtSignal
-from PyQt6.QtGui import QFont, QPainter, QColor, QPen
+                             QFileDialog, QMessageBox, QLineEdit, QComboBox, QSplitter)
+from PyQt6.QtCore import Qt, QSize, QRectF, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont, QFontMetrics, QPainter, QColor, QPen
 import qtawesome as qta
 
 from analysis import (IN_TUNE_CENTS, MIN_RELIABLE_SNR, SAMPLE_RATE, VOICE_BAND_HZ, NoiseMonitor, analyze_take,
                       hz_to_midi, hz_to_note, pitch_range_st, vibrato_stats, vocal_tract_length_cm)
-from engine import AnalysisWorker, LiveEngine, take_analysis_worker, UPDATE_INTERVAL
+from engine import (AnalysisWorker, LiveEngine, device_index, input_devices, take_analysis_worker,
+                    UPDATE_INTERVAL)
 from exercise import ExerciseView, midi_name
 import isolation
+from progress import ProgressDialog, collect_entries
 from shift_panel import ShiftPanel
 from live_views import PitchView, SpectrumView, PitchResonancePlane, pitch_label
 from profile_store import Profile, TARGET_KEYS, target_from_value
 from speech import ReadingPrompt, VowelCheck
+from take_store import IMPORT_MAX_SECONDS, TakeStore, load_audio, new_uid
 from voice_map import VoiceMapView
+from widgets import ResponsiveGrid
 
 # --- METRIC DISPLAY ---
 # key: (label, min, max, low label, high label, value format, scale)
@@ -51,7 +58,11 @@ VIBRATO_WINDOW_SECONDS = 1.2
 NOISE_WINDOW_SECONDS = 10
 HISS_GAP_DB = 6                 # band SNR this much above full-band SNR = noise is mostly hiss
 NOISE_BADGE_EVERY = 10          # live frames between SNR badge updates
-IMPORT_MAX_SECONDS = 90         # imported files are trimmed to keep analysis quick
+LIVE_TEXT_SECONDS = 0.2         # live numbers change at most this often, so they can be read
+NOTE_WINDOW_SECONDS = 0.25      # the note readout shows the median pitch over this
+NOTE_HOLD_SECONDS = 0.5         # ...and keeps the last note this long through gaps
+CLIP_BADGE_SECONDS = 1.0        # the clipping badge stays up this long after a clip
+TAKES_PAGE = 20                 # take cards shown at first; older ones on request
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 # Targets dialog: key -> (spinbox min, max, decimals, unit)
 TARGET_EDIT = {
@@ -63,6 +74,9 @@ TARGET_EDIT = {
     "pitch_range": (0, 24, 1, "st"),
 }
 LIVE_VIEW_HEIGHT = 220
+METER_MIN_WIDTH = 300           # meters and take bars go two-up when this fits twice
+WIDE_LAYOUT_WIDTH = 1100        # from this window width, live and takes sit side by side...
+TAKES_COLUMN_WIDTH = 480        # ...if the takes still get about this much
 # Exponential smoothing for live meters (~200 ms time constant).
 METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
 
@@ -72,21 +86,6 @@ OFF_TARGET_COLOR = "#e67e22"
 DISABLED_COLOR = "#555"
 TARGET_BAND_COLOR = QColor(46, 204, 113, 70)
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
-
-
-def load_audio(path):
-    """Mono audio at SAMPLE_RATE, trimmed to IMPORT_MAX_SECONDS; returns (audio, trimmed)."""
-    import soundfile as sf
-    from math import gcd
-    from scipy.signal import resample_poly
-    audio, sr = sf.read(path, dtype="float64", always_2d=True)
-    audio = audio.mean(axis=1)
-    trimmed = len(audio) > IMPORT_MAX_SECONDS * sr
-    audio = audio[:int(IMPORT_MAX_SECONDS * sr)]
-    if sr != SAMPLE_RATE:
-        g = gcd(SAMPLE_RATE, sr)
-        audio = resample_poly(audio, SAMPLE_RATE // g, sr // g)
-    return audio, trimmed
 
 
 def import_and_analyze(path, isolate):
@@ -108,6 +107,28 @@ def hiss_note(snr, snr_full):
         return None
     return (f"Most of the noise is high-pitched hiss above {VOICE_BAND_HZ // 1000} kHz "
             f"(full-band SNR {snr_full:.0f} dB). Measurements ignore that range.")
+
+
+def load_folder(store):
+    takes, problems = store.load_all()
+    return {"takes": takes, "problems": problems}
+
+
+def take_date(data):
+    try:
+        return datetime.fromisoformat(data["time"]).strftime("%a %b %d · %H:%M").replace(" 0", " ")
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def fix_text_height(label, sample):
+    """Pin a label's height to what `sample` needs, so changing text never
+    changes its size."""
+    text = label.text()
+    label.ensurePolished()
+    label.setText(sample)
+    label.setFixedHeight(label.sizeHint().height())
+    label.setText(text)
 
 
 def bar_color(position, on_target):
@@ -168,7 +189,7 @@ class RangeBar(QWidget):
 class MetricBar(QWidget):
     """Labelled RangeBar for one metric, aware of baseline and target."""
 
-    def __init__(self, key, centered=False):
+    def __init__(self, key, centered=False, live=False):
         super().__init__()
         self.key = key
         self.modes = BOTH_MODES
@@ -181,6 +202,17 @@ class MetricBar(QWidget):
 
         self.title = QLabel(self.label)
         self.title.setStyleSheet("font-size: 11px; color: #aaa;")
+        if live:
+            # One line that never changes the meter's size: live text changes
+            # every frame, and resizing would shake the whole window. The height
+            # is measured with the symbols used (≈ ✓ ¢ come from a taller
+            # fallback font) so it doesn't change with the text either.
+            self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            fix_text_height(self.title, "Hz ≈ ✓ ¢ ± — ·")
+        else:
+            self.title.setWordWrap(True)   # wraps rather than widening the card
+        self.text_interval = LIVE_TEXT_SECONDS if live else 0
+        self._text_shown_at = 0.0
         vbox.addWidget(self.title)
 
         bar_row = QHBoxLayout()
@@ -205,11 +237,20 @@ class MetricBar(QWidget):
         self.bar.band = tuple(self._fraction(v) for v in target) if target else None
         self.bar.update()
 
+    def _set_title(self, text):
+        """Live meters change their text at most every LIVE_TEXT_SECONDS, so
+        numbers stay readable; the bar itself still moves every frame."""
+        now = time.monotonic()
+        if self.text_interval and now - self._text_shown_at < self.text_interval:
+            return
+        self._text_shown_at = now
+        self.title.setText(text)
+
     def set_value(self, value, profile, note=None, display=None, on_target=None):
         """`note` marks the reading as unavailable and explains why; `display`
         overrides the value text; `on_target` overrides the profile's verdict."""
         if note or value is None or np.isnan(value):
-            self.title.setText(f"{self.label} — {note or 'no reading'}")
+            self._set_title(f"{self.label} — {note or 'no reading'}")
             self.bar.position, self.bar.color = None, DISABLED_COLOR
             self.bar.update()
             return
@@ -222,7 +263,7 @@ class MetricBar(QWidget):
         title = f"{self.label} ({' · '.join(parts)})"
         if on_target is not None:
             title += "  ✓ on target" if on_target else "  off target"
-        self.title.setText(title)
+        self._set_title(title)
         self.bar.position = self._fraction(value)
         self.bar.color = bar_color(self.bar.position, on_target)
         self.bar.update()
@@ -262,19 +303,39 @@ class LivePanel(QFrame):
         self.read_btn = QPushButton(qta.icon("fa5s.book-open", color="white"), " Read aloud")
         self.read_btn.setCheckable(True)
         self.read_btn.setStyleSheet(toggle_style)
+        # Header readouts have fixed widths: text changing size would resize the
+        # panel, and with it everything beside it.
         self.note_label = QLabel("—")
-        self.note_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        self.note_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        self.note_label.setFixedWidth(QFontMetrics(self.note_label.font()).horizontalAdvance(
+            "C#5 -50¢ · 1200 Hz") + 6)
+        self.note_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fix_text_height(self.note_label, "C#5 -50¢ · 1200 Hz —")
+        self.note_shown_at = 0.0
+        self.last_voiced_at = 0.0
         self.snr_badge = QLabel("SNR —")
         self.snr_badge.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.snr_badge.setFixedWidth(80)
+        self.snr_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.snr_badge.setToolTip("Voice-to-noise ratio. Pause briefly so the room noise can be measured.")
         self.noise = NoiseMonitor(int(NOISE_WINDOW_SECONDS / UPDATE_INTERVAL))
         self.frames_seen = 0
+        self.clip_badge = QLabel("CLIPPING")
+        self.clip_badge.setStyleSheet("color: white; background-color: #e74c3c; font-size: 11px; "
+                                      "font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+        self.clip_badge.setToolTip("The input is overloading. Lower the mic gain or move back a little: "
+                                   "clipping adds harshness that inflates Ring and lowers Clarity.")
+        policy = self.clip_badge.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)    # appearing doesn't shift the header
+        self.clip_badge.setSizePolicy(policy)
+        self.clip_badge.hide()
+        self.clip_frames_left = 0
         header.addSpacing(8)
         header.addWidget(targets_btn)
         header.addWidget(self.read_btn)
         header.addStretch()
+        header.addWidget(self.clip_badge)
         header.addWidget(self.snr_badge)
-        header.addSpacing(10)
         header.addWidget(self.note_label)
         layout.addLayout(header)
 
@@ -287,7 +348,8 @@ class LivePanel(QFrame):
         self.spectrum_view = SpectrumView(spectrum_freqs)
         self.plane = PitchResonancePlane()
         self.tabs = QTabWidget()
-        self.tabs.setFixedHeight(LIVE_VIEW_HEIGHT + 30)
+        # Grows when the window gives the live panel more room (side-by-side layout).
+        self.tabs.setMinimumHeight(LIVE_VIEW_HEIGHT + 30)
         self.tabs.setStyleSheet("""
             QTabWidget::pane { border: none; }
             QTabBar::tab { background: #333; color: #aaa; padding: 5px 14px; border-radius: 4px; margin-right: 4px; }
@@ -298,14 +360,16 @@ class LivePanel(QFrame):
         self.add_tab(self.pitch_view, "Pitch", BOTH_MODES, default_for="speak")
         self.add_tab(self.spectrum_view, "Spectrum", BOTH_MODES)
         self.add_tab(self.plane, "Pitch × Resonance", {"speak"})
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
         self.meters = {}
+        self.meter_grid = ResponsiveGrid(METER_MIN_WIDTH)
         for key, modes in LIVE_METERS:
-            meter = MetricBar(key, centered=(key == "tuning"))
+            meter = MetricBar(key, centered=(key == "tuning"), live=True)
             meter.modes = modes
             self.meters[key] = meter
-            layout.addWidget(meter)
+            self.meter_grid.addWidget(meter)
+        layout.addWidget(self.meter_grid)
         self.meters["pitch_range"].label = f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)"
         self.meters["level"].label = "Input Level"
         # In-tune zone: ±IN_TUNE_CENTS on a ±50 cent bar.
@@ -330,6 +394,7 @@ class LivePanel(QFrame):
             self.tabs.setTabVisible(self.tabs.indexOf(widget), mode in modes)
         for meter in self.meters.values():
             meter.setVisible(mode in meter.modes)
+        self.meter_grid.relayout()
         self.read_btn.setVisible(mode == "speak")
         if mode != "speak":
             self.read_btn.setChecked(False)
@@ -357,22 +422,19 @@ class LivePanel(QFrame):
         self.spectrum_view.update_frame(frame)
         self.meters["level"].set_value(frame["level"], self.profile)
         self.noise.add(frame)
+        self._update_clip_badge(frame.get("clipped", False))
         self.frames_seen += 1
         if self.frames_seen % NOISE_BADGE_EVERY == 0:
             self._update_snr_badge()
         self.recent_f0.append(f0)
         self.meters["pitch_range"].set_value(pitch_range_st(self.recent_f0), self.profile)
         self._update_vibrato()
+        self._update_note_label(f0)
 
         if np.isnan(f0):
-            self.note_label.setText("—")
-            self.note_label.setStyleSheet("color: white;")
             self.meters["tuning"].set_value(None, self.profile, note="—")
             self.plane.update_point(np.nan, np.nan)
             return
-        on_target = self.profile.in_target("pitch", f0)
-        self.note_label.setText(pitch_label(f0))
-        self.note_label.setStyleSheet(f"color: {ON_TARGET_COLOR if on_target else 'white'};")
         self._update_tuning(f0)
         self.smoothed_log_f0 = self._smooth(self.smoothed_log_f0, np.log2(f0))
         for key in SMOOTHED_KEYS:
@@ -387,6 +449,36 @@ class LivePanel(QFrame):
         resonance = self.smoothed["delta_f"] if frame["resonance_reliable"] else np.nan
         self.plane.update_point(2 ** self.smoothed_log_f0, resonance)
 
+    def _update_note_label(self, f0):
+        """The note readout: median pitch of the last ~quarter second, changing
+        at most every LIVE_TEXT_SECONDS and held briefly through gaps, so it
+        can be read rather than flickering."""
+        now = time.monotonic()
+        if not np.isnan(f0):
+            self.last_voiced_at = now
+        if now - self.note_shown_at < LIVE_TEXT_SECONDS:
+            return
+        recent = np.array(list(self.recent_f0)[-int(NOTE_WINDOW_SECONDS / UPDATE_INTERVAL):])
+        recent = recent[~np.isnan(recent)]
+        if len(recent):
+            pitch = float(np.median(recent))
+            on_target = self.profile.in_target("pitch", pitch)
+            self.note_label.setText(pitch_label(pitch))
+            self.note_label.setStyleSheet(f"color: {ON_TARGET_COLOR if on_target else 'white'};")
+        elif now - self.last_voiced_at >= NOTE_HOLD_SECONDS:
+            self.note_label.setText("—")
+            self.note_label.setStyleSheet("color: white;")
+        else:
+            return
+        self.note_shown_at = now
+
+    def _update_clip_badge(self, clipped):
+        if clipped:
+            self.clip_frames_left = int(CLIP_BADGE_SECONDS / UPDATE_INTERVAL)
+        elif self.clip_frames_left:
+            self.clip_frames_left -= 1
+        self.clip_badge.setVisible(self.clip_frames_left > 0)
+
     def _update_snr_badge(self):
         snr, snr_full = self.noise.snr()
         if snr is None:
@@ -394,7 +486,7 @@ class LivePanel(QFrame):
             self.snr_badge.setStyleSheet("color: #aaa; font-size: 11px;")
             return
         ok = snr >= MIN_RELIABLE_SNR
-        self.snr_badge.setText(f"SNR {snr:.0f} dB" + ("" if ok else " · noisy"))
+        self.snr_badge.setText(f"SNR {snr:.0f} dB")      # orange when noisy; the tooltip says why
         self.snr_badge.setStyleSheet(f"color: {ON_TARGET_COLOR if ok else OFF_TARGET_COLOR}; "
                                      "font-size: 11px; font-weight: bold;")
         tip = [f"Voice-to-noise ratio in the voice band (0–{VOICE_BAND_HZ // 1000} kHz), where "
@@ -648,21 +740,38 @@ def singing_summary(singing):
 
 
 class TakeCard(QFrame):
-    def __init__(self, data, count, profile, on_set_baseline, on_set_target):
+    """One take's report. `audio` returns its samples (loaded on demand for
+    saved takes); `on_rename(card, title)` and `on_delete(card)` manage it."""
+
+    def __init__(self, data, count, profile, on_set_baseline, on_set_target,
+                 on_rename=None, on_delete=None, audio=None):
         super().__init__()
-        self.data, self.profile = data, profile
+        self.data, self.profile, self.number = data, profile, count
+        self.audio = audio or (lambda: data["audio"])
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
         # Scoped to the card: a bare QFrame rule would also hit every QLabel inside.
         self.setStyleSheet("""
             TakeCard { background-color: #2b2b2b; border-radius: 10px; margin-bottom: 10px; }
             QLabel { color: #ffffff; background: transparent; }
+            QLineEdit { color: white; background: transparent; border: 1px solid transparent;
+                        border-radius: 4px; padding: 1px 3px; }
+            QLineEdit:hover, QLineEdit:focus { border: 1px solid #555; background: #1e1e1e; }
         """)
         layout = QVBoxLayout()
 
         # Header
         header = QHBoxLayout()
-        title = QLabel(f"Take #{count}")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.title = QLineEdit(data.get("title") or "")
+        self.title.setPlaceholderText(f"Take #{count}")
+        self.title.setToolTip("Click to name this take" + (" (renames its files)" if data.get("file") else ""))
+        self.title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.title.setMinimumWidth(110)
+        self.title.setCursorPosition(0)       # long names show their start, not their end
+        self.on_rename = on_rename
+        self.title.editingFinished.connect(self._title_edited)
+        self.date = QLabel()
+        self.date.setStyleSheet("color: #888; font-size: 11px;")
+        self.update_saved_state()
         baseline_btn = QPushButton(qta.icon("fa5s.flag", color="white"), " Baseline")
         baseline_btn.setToolTip("Set as baseline")
         baseline_btn.clicked.connect(lambda: on_set_baseline(data))
@@ -679,12 +788,17 @@ class TakeCard(QFrame):
         shift_btn.setStyleSheet(f"QPushButton {{ {BUTTON_STYLE} }} "
                                 "QPushButton:checked { background-color: #3498db; }")
         play_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px 10px; border-radius: 5px;")
-        header.addWidget(title)
-        header.addStretch()
+        delete_btn = QPushButton(qta.icon("fa5s.trash-alt", color="#ccc"), "")
+        delete_btn.setToolTip("Delete this take")
+        delete_btn.setStyleSheet(BUTTON_STYLE)
+        delete_btn.clicked.connect(lambda: on_delete and on_delete(self))
+        header.addWidget(self.title, 1)
+        header.addWidget(self.date)
         header.addWidget(baseline_btn)
         header.addWidget(target_btn)
         header.addWidget(shift_btn)
         header.addWidget(play_btn)
+        header.addWidget(delete_btn)
         layout.addLayout(header)
 
         if data.get("source"):
@@ -704,8 +818,15 @@ class TakeCard(QFrame):
             info.setWordWrap(True)
             info.setStyleSheet("color: #aaa; font-size: 11px;")
             layout.addWidget(info)
+        clips = data.get("clip_events") or 0
+        if clips:
+            warning = QLabel(f"⚠ Clipping: the input overloaded {clips} time{'s' if clips > 1 else ''}. "
+                             "Lower the mic gain; clipping inflates Ring and lowers Clarity.")
+            warning.setWordWrap(True)
+            warning.setStyleSheet(f"color: {OFF_TARGET_COLOR}; font-size: 12px;")
+            layout.addWidget(warning)
 
-        self.shift_panel = ShiftPanel(data, on_set_target)
+        self.shift_panel = ShiftPanel(data, on_set_target, audio=self.audio)
         self.shift_panel.hide()
         shift_btn.toggled.connect(self.shift_panel.setVisible)
         # While shifting, the card's Play button plays the shifted version.
@@ -742,8 +863,10 @@ class TakeCard(QFrame):
 
         # --- METRIC BARS ---
         self.bars = {key: MetricBar(key) for key in TAKE_BAR_KEYS}
+        bar_grid = ResponsiveGrid(METER_MIN_WIDTH)
         for bar in self.bars.values():
-            layout.addWidget(bar)
+            bar_grid.addWidget(bar)
+        layout.addWidget(bar_grid)
         self.setLayout(layout)
         self.refresh_profile()
 
@@ -763,18 +886,29 @@ class TakeCard(QFrame):
             else:
                 bar.set_value(self.data[key], self.profile)
 
+    def _title_edited(self):
+        title = self.title.text().strip()
+        if self.on_rename and title != (self.data.get("title") or ""):
+            self.on_rename(self, title)
+
+    def update_saved_state(self):
+        """Date, and where the take is stored."""
+        self.date.setText(take_date(self.data) + ("" if self.data.get("file") else " · not saved"))
+        self.date.setToolTip(self.data.get("file") or "Choose a takes folder to keep takes between sessions.")
+
     def play_audio(self):
         if self.shift_panel.isVisible():
             self.shift_panel.play_shifted()
         else:
-            sd.play(self.data['audio'], SAMPLE_RATE)
+            sd.play(self.audio(), SAMPLE_RATE)
 
 
 class MainWindow(QMainWindow):
     def __init__(self, engine, profile):
         super().__init__()
         self.setWindowTitle("Voice Lab")
-        self.resize(700, 1000)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1400, int(screen.width() * 0.9)), min(950, int(screen.height() * 0.9)))
         self.setStyleSheet("background-color: #1e1e1e;")
 
         self.take_count = 0
@@ -783,7 +917,12 @@ class MainWindow(QMainWindow):
         self.engine = engine
         self.profile = profile
         self.analysis_worker = None
+        self.load_worker = None
         self.cards = []
+        self.older_takes = []       # loaded takes not yet shown as cards, oldest first
+        self.progress_dialog = None
+        self.wide_layout = None
+        self.store =TakeStore(profile.takes_dir) if profile.takes_dir else None
         if profile.formant_ceiling:
             engine.analyzer.formant_ceiling = profile.formant_ceiling
 
@@ -793,12 +932,12 @@ class MainWindow(QMainWindow):
 
         self.live_panel = LivePanel(engine.analyzer.spectrum_freqs, profile, self.edit_targets)
         self.engine.frame_ready.connect(self.live_panel.update_frame)
-        main_layout.addWidget(self.live_panel)
         self.vowel_check = VowelCheck(engine, profile)
         self.vowel_check.running_changed.connect(self.update_record_enabled)
         self.exercise_view = ExerciseView(engine)
         self.exercise_view.running_changed.connect(self.update_record_enabled)
         self.exercise_view.take_ready.connect(self.process_results)
+        self.vowel_check.completed.connect(self.refresh_progress)
         self.voice_map = VoiceMapView(engine, profile.voice_map_path)
         self.live_panel.add_tab(self.vowel_check, "Vowels", {"speak"})
         self.live_panel.add_tab(self.exercise_view, "Exercise", {"sing"}, default_for="sing")
@@ -809,10 +948,16 @@ class MainWindow(QMainWindow):
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.more_btn = QPushButton()
+        self.more_btn.setStyleSheet(BUTTON_STYLE)
+        self.more_btn.clicked.connect(self.show_older_takes)
+        self.more_btn.hide()
+        self.scroll_layout.addWidget(self.more_btn)
         self.scroll_layout.addStretch()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self.scroll_content)
         scroll.setStyleSheet("border: none;")
 
@@ -825,8 +970,8 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #888; font-size: 14px;")
 
         self.record_btn = QPushButton()
-        self.record_btn.setFixedSize(80, 80)
-        self.record_btn.setIconSize(QSize(40, 40))
+        self.record_btn.setFixedSize(64, 64)
+        self.record_btn.setIconSize(QSize(30, 30))
         self.update_record_button_style(recording=False)
         self.record_btn.clicked.connect(self.toggle_recording)
 
@@ -834,23 +979,97 @@ class MainWindow(QMainWindow):
         self.import_btn.setStyleSheet(BUTTON_STYLE)
         self.import_btn.setToolTip("Analyse a recording: your own, or a reference singer or speaker.")
         self.import_btn.clicked.connect(self.import_audio)
-        button_row = QHBoxLayout()
-        button_row.addWidget(self.import_btn, 1, Qt.AlignmentFlag.AlignLeft)
-        button_row.addWidget(self.record_btn)
-        button_row.addStretch(1)
+        progress_btn = QPushButton(qta.icon("fa5s.chart-line", color="white"), " Progress")
+        progress_btn.setStyleSheet(BUTTON_STYLE)
+        progress_btn.setToolTip("Your measurements over weeks.")
+        progress_btn.clicked.connect(self.show_progress)
+        self.folder_btn = QPushButton(qta.icon("fa5s.folder-open", color="white"), "")
+        self.folder_btn.setStyleSheet(BUTTON_STYLE)
+        self.folder_btn.clicked.connect(self.choose_takes_folder)
+        self.reload_btn = QPushButton(qta.icon("fa5s.sync-alt", color="white"), "")
+        self.reload_btn.setStyleSheet(BUTTON_STYLE)
+        self.reload_btn.setToolTip("Reload the takes folder, picking up files added, renamed or deleted there.")
+        self.reload_btn.clicked.connect(self.load_takes)
+        self.mic_choice = QComboBox()
+        self.mic_choice.setStyleSheet("QComboBox { background: #1e1e1e; color: white; padding: 3px; }")
+        self.mic_choice.setMaximumWidth(260)
+        self.mic_choice.addItem("System default mic", None)
+        for _, name in input_devices():
+            self.mic_choice.addItem(name, name)
+        self.mic_choice.setCurrentIndex(max(0, self.mic_choice.findData(profile.input_device)))
+        self.mic_choice.currentIndexChanged.connect(self.change_mic)
+        mic_label = QLabel("Mic")
+        mic_label.setStyleSheet("color: #aaa; border: none;")
+        self.update_folder_button()
 
+        # One row: files on the left, record in the middle, progress and mic on the right.
+        left, right = QHBoxLayout(), QHBoxLayout()
+        for w in (self.import_btn, self.folder_btn, self.reload_btn):
+            left.addWidget(w)
+        left.addStretch()
+        right.addStretch()
+        for w in (progress_btn, mic_label, self.mic_choice):
+            right.addWidget(w)
+        button_row = QHBoxLayout()
+        button_row.addLayout(left, 1)
+        button_row.addWidget(self.record_btn)
+        button_row.addLayout(right, 1)
+        controls_layout.setContentsMargins(10, 4, 10, 8)
+        controls_layout.setSpacing(4)
         controls_layout.addWidget(self.status_label)
         controls_layout.addLayout(button_row)
-        main_layout.addWidget(scroll)
+
+        # Live panel and takes: side by side on a wide window, stacked on a
+        # narrow one. The divider can be dragged either way.
+        self.splitter = QSplitter()
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(8)
+        self.splitter.addWidget(self.live_panel)
+        self.splitter.addWidget(scroll)
+        self.takes_scroll = scroll
+        scroll.setMinimumSize(320, 160)
+        self.update_layout()
+        main_layout.addWidget(self.splitter, 1)
         main_layout.addWidget(controls)
+        if self.store:
+            self.load_takes()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "splitter"):
+            self.update_layout()
+
+    def wheelEvent(self, event):
+        """A wheel turn nothing else used (over the live panel or the bottom
+        bar) scrolls the takes, so it works wherever the pointer is."""
+        QApplication.sendEvent(self.takes_scroll.verticalScrollBar(), event)
+
+    def update_layout(self):
+        # Side by side only when the takes still get a comfortable column; this
+        # also keeps the window able to shrink back into the stacked layout.
+        wide_from = max(WIDE_LAYOUT_WIDTH, self.live_panel.minimumSizeHint().width() + TAKES_COLUMN_WIDTH)
+        wide = self.width() >= wide_from
+        if wide == self.wide_layout:
+            return
+        self.wide_layout = wide
+        self.splitter.setOrientation(Qt.Orientation.Horizontal if wide else Qt.Orientation.Vertical)
+        if wide:     # even split
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 1)
+            self.splitter.setSizes([self.width() // 2] * 2)
+        else:        # live panel as compact as it goes, takes get the rest
+            self.splitter.setStretchFactor(0, 0)
+            self.splitter.setStretchFactor(1, 1)
+            live = self.live_panel.minimumSizeHint().height()
+            self.splitter.setSizes([live, max(160, self.height() - live)])
 
     def update_record_button_style(self, recording):
         if recording:
             self.record_btn.setIcon(qta.icon('fa5s.stop', color='white'))
-            self.record_btn.setStyleSheet("QPushButton { background-color: #333; border-radius: 40px; border: 2px solid #555; }")
+            self.record_btn.setStyleSheet("QPushButton { background-color: #333; border-radius: 32px; border: 2px solid #555; }")
         else:
             self.record_btn.setIcon(qta.icon('fa5s.microphone', color='white'))
-            self.record_btn.setStyleSheet("QPushButton { background-color: #e74c3c; border-radius: 40px; border: 2px solid #c0392b; }")
+            self.record_btn.setStyleSheet("QPushButton { background-color: #e74c3c; border-radius: 32px; border: 2px solid #c0392b; }")
 
     def toggle_recording(self):
         if not self.is_recording:
@@ -901,8 +1120,11 @@ class MainWindow(QMainWindow):
         self.analysis_worker.start()
 
     def process_results(self, results):
-        self.analyzing = False
-        self.update_record_enabled()
+        # Exercise takes arrive here too; only our own worker finishing frees
+        # the record button, or a second take could replace a running worker.
+        if self.sender() is self.analysis_worker:
+            self.analyzing = False
+            self.update_record_enabled()
         if "error" in results:
             self.status_label.setText(results["error"])
             self.status_label.setStyleSheet("color: #e74c3c;")
@@ -912,15 +1134,216 @@ class MainWindow(QMainWindow):
         if not results.get("source"):
             self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
             self.profile.set_formant_ceiling(results["formant_ceiling"])
-        self.profile.log_take(results)
-        self.take_count += 1
-        if results["delta_f"] is not None:
-            self.live_panel.plane.add_take(self.take_count, results["pitch"], results["delta_f"])
-        card = TakeCard(results, self.take_count, self.profile, self.set_baseline, self.set_target)
+        results.update(uid=new_uid(), time=datetime.now().isoformat(timespec="seconds"),
+                       mode=self.profile.mode)
+        message = "Done"
+        # With a takes folder, the folder is the record of every take; without
+        # one, a summary goes to the history log so progress still builds up.
+        if self.store:
+            try:
+                self.store.save(results)
+                message = f"Saved {results['file']}"
+            except OSError as e:
+                message = f"Couldn't save the take: {e}"
+                self.profile.log_take(results)
+        else:
+            self.profile.log_take(results)
+        self.add_card(results)
+        self.set_status(message)
+        self.refresh_progress()
+
+    # --- TAKE CARDS ---
+
+    def set_status(self, text, color="#888"):
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color};")
+
+    def take_audio(self, data):
+        return self.store.audio(data) if data.get("file") and self.store else data["audio"]
+
+    def add_card(self, data, number=None, at_bottom=False):
+        if number is None:
+            self.take_count += 1
+            number = self.take_count
+        if data["delta_f"] is not None:
+            self.live_panel.plane.add_take(number, data["pitch"], data["delta_f"])
+        card = TakeCard(data, number, self.profile, self.set_baseline, self.set_target,
+                        on_rename=self.rename_take, on_delete=self.delete_take,
+                        audio=lambda: self.take_audio(data))
         self.cards.append(card)
-        self.scroll_layout.insertWidget(0, card)
-        self.status_label.setText("Done")
-        self.status_label.setStyleSheet("color: #888;")
+        self.scroll_layout.insertWidget(self.scroll_layout.indexOf(self.more_btn) if at_bottom else 0, card)
+        return card
+
+    def remove_card(self, card):
+        self.cards.remove(card)
+        self.live_panel.plane.remove_take(card.number)
+        card.setParent(None)
+        card.deleteLater()
+
+    def show_older_takes(self):
+        """Add the next page of older takes below the shown ones."""
+        page, self.older_takes = self.older_takes[-TAKES_PAGE:], self.older_takes[:-TAKES_PAGE]
+        for number, data in reversed(page):
+            self.add_card(data, number, at_bottom=True)
+        self.update_more_button()
+
+    def update_more_button(self):
+        self.more_btn.setText(f"Show older takes ({len(self.older_takes)} more)")
+        self.more_btn.setVisible(bool(self.older_takes))
+
+    # --- TAKES FOLDER ---
+
+    def update_folder_button(self):
+        if self.store:
+            self.folder_btn.setText(f" {self.store.folder.name}")
+            self.folder_btn.setToolTip(f"Takes are saved in {self.store.folder}. Click to change.")
+        else:
+            self.folder_btn.setText(" Choose takes folder…")
+            self.folder_btn.setToolTip("Pick a folder to save takes in and load them from, "
+                                       "so they're kept between sessions.")
+        self.reload_btn.setVisible(self.store is not None)
+
+    def ask_for_takes_folder(self):
+        """First launch: offer to pick a takes folder, once."""
+        if self.store or self.profile.takes_dir_asked:
+            return
+        answer = QMessageBox.question(
+            self, "Keep your takes?",
+            "Choose a folder to save takes in? Each take is saved there as a WAV file with its "
+            "analysis beside it, and loads again next time.\n\n"
+            "You can choose or change the folder any time with the folder button at the bottom.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.choose_takes_folder()
+        else:
+            self.profile.set_takes_dir(None)
+
+    def choose_takes_folder(self):
+        start = str(self.store.folder) if self.store else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Takes folder", start)
+        if folder:
+            self.set_takes_folder(folder)
+
+    def set_takes_folder(self, folder):
+        """Use `folder` for takes. This session's unsaved takes are saved into it."""
+        self.profile.set_takes_dir(folder)
+        self.store = TakeStore(folder)
+        unsaved = [c.data for c in self.cards if not c.data.get("file")]
+        for data in sorted(unsaved, key=lambda d: d["time"]):
+            try:
+                self.store.save(data)
+            except OSError as e:
+                self.set_status(f"Couldn't save a take: {e}", "#e74c3c")
+        # They're in the folder now, so the history log shouldn't count them again.
+        self.profile.forget_takes(d["uid"] for d in unsaved if d.get("file"))
+        self.update_folder_button()
+        self.load_takes()
+
+    def load_takes(self):
+        """(Re)load every take in the folder, in the background."""
+        if not self.store or (self.load_worker and self.load_worker.isRunning()):
+            return
+        self.set_status(f"Loading takes from {self.store.folder}…", "#f1c40f")
+        self.reload_btn.setEnabled(False)
+        self.load_worker = AnalysisWorker(load_folder, self.store)
+        self.load_worker.finished_analysis.connect(self._takes_loaded)
+        self.load_worker.start()
+
+    def _takes_loaded(self, result):
+        self.reload_btn.setEnabled(True)
+        if "error" in result:
+            self.set_status(result["error"], "#e74c3c")
+            return
+        # Keep takes that aren't in the folder, and any saved while it loaded;
+        # takes whose files were deleted outside VoiceLab go.
+        loaded = {d["uid"] for d in result["takes"]}
+        kept = [c.data for c in self.cards if c.data.get("uid") not in loaded and
+                (not c.data.get("file") or self.store.path(c.data).exists())]
+        for card in list(self.cards):
+            self.remove_card(card)
+        takes = sorted(result["takes"] + kept, key=lambda d: d["time"])
+        numbered = list(enumerate(takes, start=1))
+        self.take_count = len(takes)
+        self.older_takes, shown = numbered[:-TAKES_PAGE], numbered[-TAKES_PAGE:]
+        for number, data in shown:
+            self.add_card(data, number)
+        self.update_more_button()
+        message = f"Loaded {len(result['takes'])} take{'s' if len(result['takes']) != 1 else ''} " \
+                  f"from {self.store.folder.name}"
+        if result["problems"]:
+            message += f" · {len(result['problems'])} file(s) couldn't be read"
+            self.status_label.setToolTip("\n".join(result["problems"]))
+        self.set_status(message, "#e67e22" if result["problems"] else "#888")
+        self.refresh_progress()
+
+    def all_takes(self):
+        return [c.data for c in self.cards] + [d for _, d in self.older_takes]
+
+    def rename_take(self, card, title):
+        data = card.data
+        if data.get("file") and self.store:
+            try:
+                self.store.rename(data, title)
+            except OSError as e:
+                card.title.setText(data.get("title") or "")
+                self.set_status(f"Couldn't rename: {e}", "#e74c3c")
+                return
+            card.title.setText(data["title"])
+            self.set_status(f"Renamed to {data['file']}")
+        else:
+            data["title"] = title
+        card.update_saved_state()
+
+    def delete_take(self, card):
+        data = card.data
+        name = data.get("title") or f"Take #{card.number}"
+        if data.get("file"):
+            text = f"Delete “{name}”? Its files ({data['file']} and its .json) are removed from the takes folder."
+        else:
+            text = f"Delete “{name}”? It isn't saved anywhere, so it can't be recovered."
+        if QMessageBox.question(self, "Delete take", text) != QMessageBox.StandardButton.Yes:
+            return
+        if data.get("file") and self.store:
+            try:
+                self.store.delete(data)
+            except OSError as e:
+                self.set_status(f"Couldn't delete: {e}", "#e74c3c")
+                return
+        else:
+            self.profile.forget_takes([data.get("uid")])
+        self.remove_card(card)
+        self.set_status(f"Deleted {name}")
+        self.refresh_progress()
+
+    # --- MIC ---
+
+    def change_mic(self):
+        name = self.mic_choice.currentData()
+        try:
+            self.engine.open_stream(device_index(name))
+        except sd.PortAudioError as e:
+            self.set_status(f"Couldn't open {name or 'the default mic'}: {e}", "#e74c3c")
+            return
+        self.profile.set_input_device(name)
+        self.set_status(f"Listening on {name or 'the system default mic'}")
+        self.update_record_enabled()
+
+    # --- PROGRESS ---
+
+    def progress_entries(self):
+        folder_takes = [d for d in self.all_takes() if d.get("file")]
+        return collect_entries(self.profile.read_history(), folder_takes)
+
+    def show_progress(self):
+        if self.progress_dialog is None:
+            self.progress_dialog = ProgressDialog(self.profile, self.progress_entries, self)
+        else:
+            self.progress_dialog.refresh()
+        self.progress_dialog.show()
+        self.progress_dialog.raise_()
+
+    def refresh_progress(self, *_):
+        if self.progress_dialog is not None and self.progress_dialog.isVisible():
+            self.progress_dialog.refresh()
 
     def set_baseline(self, results):
         self.profile.set_baseline(results)
@@ -940,21 +1363,36 @@ class MainWindow(QMainWindow):
         self.vowel_check.refresh_profile()
         for card in self.cards:
             card.refresh_profile()
+        self.refresh_progress()
         if message:
-            self.status_label.setText(message)
-            self.status_label.setStyleSheet("color: #2ecc71;")
+            self.set_status(message, "#2ecc71")
 
     def closeEvent(self, event):
         self.engine.stop()
         self.voice_map.save()
+        for worker in (self.analysis_worker, self.load_worker):
+            if worker is not None:
+                worker.wait()
         super().closeEvent(event)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    # Dark throughout, so message boxes and other stock dialogs get light text.
+    app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     pg.setConfigOptions(antialias=True)
+    profile = Profile()
     engine = LiveEngine()
-    window = MainWindow(engine, Profile())
+    window = MainWindow(engine, profile)
     window.show()
-    engine.start()
+    try:
+        engine.start(device_index(profile.input_device))
+    except sd.PortAudioError as e:
+        # Still usable without a mic: imported files can be analysed and shifted.
+        window.record_btn.setEnabled(False)
+        window.status_label.setText("No microphone. Import audio still works.")
+        QMessageBox.warning(window, "No microphone",
+                            f"Couldn't open the microphone ({e}).\n"
+                            "Connect one and pick it under Mic, or restart VoiceLab.")
+    QTimer.singleShot(0, window.ask_for_takes_folder)
     sys.exit(app.exec())

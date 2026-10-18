@@ -4,11 +4,12 @@ import numpy as np
 import qtawesome as qta
 import sounddevice as sd
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout
+from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from analysis import SAMPLE_RATE, hz_to_note
 from engine import AnalysisWorker
 from shift import NEUTRAL, SHIFT_PARAMS, is_neutral, render_and_analyze
+from widgets import PageSlider
 
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
 RENDER_DELAY_MS = 400   # wait this long after the last slider move before rendering
@@ -25,9 +26,11 @@ HINTS = {
 
 
 class ShiftPanel(QFrame):
-    def __init__(self, data, on_use_as_target):
+    def __init__(self, data, on_use_as_target, audio=None):
         super().__init__()
         self.data = data
+        # Saved takes load their audio from disk only when it's first needed.
+        self.audio = audio or (lambda: data["audio"])
         self.on_use_as_target = on_use_as_target
         self.worker = None
         self.rendered = None
@@ -39,7 +42,7 @@ class ShiftPanel(QFrame):
         self.sliders, self.value_labels = {}, {}
         for row, (key, (label, lo, hi, neutral, unit)) in enumerate(SHIFT_PARAMS.items()):
             step = STEPS[key]
-            slider = QSlider(Qt.Orientation.Horizontal)
+            slider = PageSlider(Qt.Orientation.Horizontal)
             slider.setRange(int(lo / step), int(hi / step))
             slider.setValue(int(neutral / step))
             slider.valueChanged.connect(self._update_labels)
@@ -89,7 +92,9 @@ class ShiftPanel(QFrame):
             self.value_labels[key].setText(f"{sign}{value:g} {unit}".strip())
         neutral = is_neutral(self.params())
         self.shifted_btn.setEnabled(not neutral)
-        self.target_btn.setEnabled(not neutral and self._is_current())
+        # A shift that couldn't be measured has no values to target.
+        self.target_btn.setEnabled(not neutral and self._is_current()
+                                   and "error" not in self.rendered["analysis"])
         if neutral:
             self.result_label.setText("Move a slider: the shifted version renders and plays when you let go.")
         elif not self._is_current() and self.worker is None:
@@ -103,7 +108,7 @@ class ShiftPanel(QFrame):
             slider.setValue(int(NEUTRAL[key] / STEPS[key]))
 
     def play_original(self):
-        sd.play(self.data["audio"], SAMPLE_RATE)
+        sd.play(self.audio(), SAMPLE_RATE)
         self.result_label.setText("Playing original. " + self._summary_text())
 
     def play_shifted(self):
@@ -125,7 +130,7 @@ class ShiftPanel(QFrame):
             return
         self.pending_play = play
         self.result_label.setText(f"Rendering {self._params_text(params)}…")
-        self.worker = AnalysisWorker(render_and_analyze, self.data["audio"], params)
+        self.worker = AnalysisWorker(render_and_analyze, self.audio(), params)
         self.worker.finished_analysis.connect(self._rendered)
         self.worker.start()
 
@@ -175,5 +180,5 @@ class ShiftPanel(QFrame):
         return " · ".join(parts)
 
     def _use_as_target(self):
-        if self.rendered:
+        if self.rendered and "error" not in self.rendered["analysis"]:
             self.on_use_as_target(self.rendered["analysis"])

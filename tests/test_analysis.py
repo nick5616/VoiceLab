@@ -249,3 +249,45 @@ def test_live_frame_analyzer():
 def test_live_frame_silence():
     frame = analysis.FrameAnalyzer().analyze(np.zeros(int(0.12 * SR)))
     assert np.isnan(frame["f0"])
+    assert not frame["clipped"]
+
+
+def live_f0s(audio):
+    analyzer = analysis.FrameAnalyzer(SR, 0.025)
+    hop, win = int(0.025 * SR), int(analyzer.WINDOW_SECONDS * SR)
+    return np.array([analyzer.analyze(audio[end - win:end])["f0"] for end in range(win, len(audio), hop)])
+
+
+def mains_hum(seconds, level_dbfs=-52):
+    t = np.arange(int(seconds * SR)) / SR
+    hum = sum(a * np.sin(2 * np.pi * 60 * k * t + k) for k, a in ((1, 1), (2, 0.5), (3, 0.7), (5, 0.3)))
+    noise = np.random.default_rng(0).standard_normal(len(t))
+    return (hum / np.std(hum) + noise) * 10 ** (level_dbfs / 20)
+
+
+def test_live_ignores_mains_hum_and_noise():
+    """Hum is periodic (~60 Hz), so on a noisy mic it used to read as voice."""
+    background = mains_hum(3.0)
+    voice = synth_vowel(140, MALE_FORMANTS, seconds=1.5) * 0.5
+    f0 = live_f0s(np.concatenate([background, background[:len(voice)] + voice]))
+    n_background = int(3.0 / 0.025) - 5
+    warmup = int(analysis.NOISE_FLOOR_WARMUP_SECONDS / 0.025)
+    assert np.isnan(f0[warmup:n_background]).all()
+    assert np.mean(np.abs(f0[n_background + 10:] - 140) < 3) > 0.95
+
+
+def test_live_noise_floor_survives_a_long_note():
+    note = synth_vowel(220, MALE_FORMANTS, seconds=12.0) * 0.3
+    f0 = live_f0s(np.concatenate([mains_hum(1.0), mains_hum(12.0) + note]))
+    assert np.mean(~np.isnan(f0[-40:])) > 0.95       # still voiced after 12 s
+
+
+def test_clipping_is_counted():
+    audio = synth_vowel(150, MALE_FORMANTS, seconds=1.5)
+    assert analysis.analyze_take(audio)["clip_events"] == 0
+    overdriven = np.clip(audio * 4, -1, 1)          # peaks at 1.2 -> flattened tops
+    events = analysis.analyze_take(overdriven)["clip_events"]
+    assert events >= 150                              # roughly one per glottal cycle
+    assert analysis.clip_events([1.0, 1.0, 0.2, -1.0, 0.0, 1.0]) == 3
+    window = overdriven[-int(analysis.FrameAnalyzer.WINDOW_SECONDS * SR):]
+    assert analysis.FrameAnalyzer().analyze(window)["clipped"]
