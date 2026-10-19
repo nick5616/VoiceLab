@@ -12,6 +12,8 @@ A real-time vocal analysis tool for singers, voice actors, people doing gender-a
 | **Clarity (CPP)**          | Cepstral peak prominence over 0–4 kHz: how periodic the voice is (breathy/rough → clear)            | Yes  |
 | **Ring (2–4 kHz)**         | Harmonic energy in the singer's-formant region relative to 0–2 kHz (muffled → ringing)              | Yes  |
 | **Intonation Range**       | 5th–95th percentile pitch spread in semitones (flat → expressive). The live meter uses the last 6 s | Yes  |
+| **Register**               | Estimate of chest (M1) versus head (M2) voice, with a "mix" zone between and a "fry" flag. See [Register](#register) | Yes  |
+| **Contact quotient (CQ)**  | Share of each vocal-fold cycle the folds are in contact, from an EGG (light → pressed). Only with an EGG | Yes, with an EGG |
 | **Level**                  | Voiced level in dBFS. Uncalibrated, so compare takes on the same mic and gain only                  | Yes  |
 
 Each take also shows an interactive graph: pitch track on top, F1/F2/F3 formant tracks below. Hover to inspect values at any point in time.
@@ -19,7 +21,8 @@ Each take also shows an interactive graph: pitch track on top, F1/F2/F3 formant 
 ### Why these metrics
 
 - **Resonance** uses ΔF rather than individual formants because single formants mostly reflect which vowel you're saying. In a 2025 study a single speaker deliberately varied pitch, resonance and weight; ΔF tracked resonance with 94% ranking accuracy and stayed largely independent of the other two ([Netzorg et al., Interspeech 2025](https://www.isca-archive.org/interspeech_2025/netzorg25_interspeech.pdf)).
-- **Weight** has no reliable single acoustic measure. The same study found that only electroglottograph contact quotient and loudness tracked it, while spectral slope also moved with resonance. Fold Contact, Clarity and Level are proxies, and are best used to compare your own takes against each other.
+- **Weight** has no reliable acoustic-only measure. The same study found that only electroglottograph contact quotient and loudness tracked it, while spectral slope also moved with resonance. With an EGG connected, **contact quotient** covers weight directly (see [EGG](#egg)). Without one, Fold Contact, Clarity and Level are proxies, and are best used to compare your own takes against each other.
+- **Register** is an estimate, not a measurement. No validated, speaker-independent way exists to tell chest from head voice from a microphone alone, so VoiceLab combines a few noisy cues and says so ("estimate") until you calibrate it on your own labelled takes.
 - **Formant ceiling** (the frequency range Praat searches for formants) is chosen per take. VoiceLab tests several ceilings and rejects any that produce fake formants: ones with very wide bandwidths, or two sitting almost on top of each other. Of the rest it keeps the one with the smoothest tracks. The live meters then use that ceiling.
 - **High pitch**: above ~350 Hz the harmonics are too far apart for formant tracking, so resonance is greyed out rather than reporting a wrong number.
 
@@ -73,7 +76,7 @@ python main.py
 
 On a wide window the live panel and your takes sit side by side; narrower, they stack, with the live panel kept compact. Drag the divider to give either more room. The mouse wheel scrolls the takes wherever the pointer is; a Shift slider only takes the wheel after you click it.
 
-**Mic** (bottom right) picks the input device and is remembered. Only devices of the system's default audio API are listed, so each mic appears once.
+**Mic** (bottom right) picks the input device and is remembered. Only devices of the system's default audio API are listed, so each mic appears once. When the device has two or more inputs, an **EGG** choice appears next to it (see [EGG](#egg)).
 
 ### Takes folder
 
@@ -98,7 +101,7 @@ Without a folder, takes last only for the session (their summaries still go to t
 
 **Progress** opens a chart per measurement over time: a dot per take, a yellow weekly median, your baseline (dashed) and target (green band), and a headline such as `this week 1094 Hz · +66 Hz since week of Sep 14`. Pitch changes are given in semitones.
 
-It covers pitch, resonance, the vowel check's vowel-balanced ΔF, Fold Contact, Clarity, Ring, intonation range, and for singing, exercise accuracy (share of notes in tune and average error) and vibrato rate and extent. Filter by Speak or Sing and by period. Imported files are left out unless **Include imported files** is ticked, since they may be someone else's voice. Weekly medians matter more than any single take: one tired evening shouldn't look like a setback.
+It covers pitch, resonance, the vowel check's vowel-balanced ΔF, Fold Contact, Clarity, Ring, intonation range, head and chest share of the register estimate, contact quotient (with an EGG), and for singing, exercise accuracy (share of notes in tune and average error), vibrato rate and extent, and register breaks per minute. Filter by Speak or Sing and by period. Imported files are left out unless **Include imported files** is ticked, since they may be someone else's voice. Weekly medians matter more than any single take: one tired evening shouldn't look like a setback.
 
 ### Clipping
 
@@ -121,6 +124,39 @@ When most of the noise sits above 4 kHz, the badge tooltip and take cards say so
 
 VoiceLab deliberately doesn't run noise suppression on your voice. Denoisers remove breath noise and fine harmonic detail along with the room noise, which would make a breathy voice measure clearer than it is. Spectral subtraction of a learned noise profile was also tested, and it made Clarity less accurate, not more.
 
+### Register
+
+Singers and voice trainers talk about **chest** and **head** voice. In the voice-science terms, chest is laryngeal mechanism **M1** (thicker, shorter vocal-fold contact, the usual speaking voice) and head or falsetto is **M2** (thinner, lighter folds), with **fry** as a third, very slow, creaky mechanism (M0), and **mix** for the ambiguous zone between (Henrich 2006; Roubeau, Henrich & Castellengo 2009). People raising their pitch or lightening their voice for feminization often aim to sit more in M2.
+
+- **Live**: the **Register** meter runs from Chest to Head, with the mix zone marked on the bar, in both Speak and Sing modes. It reads "fry" when the pitch drops below about 70 Hz or tracks erratically.
+- **On each take**: a stacked bar of chest / mix / head / fry shares, the number of **breaks** (an abrupt chest-to-head or head-to-chest switch within 150 ms), and the pitch track on the graph dotted blue (chest), purple (mix), red (head) or grey (fry).
+- **How it's estimated**: from the first-minus-second harmonic level (H1\*–H2\*, higher in head voice), the spectral tilt from the first harmonic to the F3 peak, and Clarity, plus a weak prior from pitch (Kreiman, Gerratt, Garellek and colleagues; Henrich, d'Alessandro & Doval 2001). With an EGG it also uses contact quotient, which is much lower in M2 (Henrich, Smith & Wolfe 2011).
+- **It is an estimate.** The defaults were tuned on synthetic voices only. A high chest-voice note (say 450 Hz) can read as "mix", and a breathy chest voice can read as head. Treat the colours as a guide to compare your own takes, not a verdict. Until calibrated, the meter and cards say "estimate".
+- **Calibrating it to your voice**: on a take's card choose **Label register…** and pick **Chest** or **Head** (or **Clear label**). Label several takes of each, such as a spoken passage or a sung phrase in chest, and the same notes in head or falsetto. Once there are about 2 seconds of voiced audio on each side, VoiceLab fits the model to your labels, stores it in your profile, and the status bar says so. From then on it reads "calibrated to your voice", and shown takes are re-scored (older ones when you scroll to them). Labels live in each take's JSON file, so they need a takes folder; without one the calibration still sticks, but the labels are lost at the end of the session.
+- **Targets**: **Register (head share)** is a target like the others, the percentage of voiced time in head voice. Setting it to 70–100% means "mostly M2-leaning".
+- **Progress** charts head share, chest share and, for singing, register breaks per minute.
+
+The sources are the ones cited at the top of `register.py` and `egg.py`.
+
+### EGG
+
+An **electroglottograph** (EGG) measures vocal-fold contact directly through two electrodes on the neck, so it gives **contact quotient** (CQ), the share of each cycle the folds touch. A higher CQ is a more pressed, heavier phonation; a lower one is lighter. CQ is the measure that tracked vocal weight best in the Netzorg et al. study above, and it also separates chest from head voice (Henrich, Smith & Wolfe 2011).
+
+VoiceLab reads the EGG as a second audio input channel, the way FonaDyn and VoceVista do, so you need an EGG whose output reaches a **stereo interface**, with the EGG on one channel and the mic on the other.
+
+**Setup**
+
+1. Plug the EGG's output into one input of a stereo (2-input) audio interface, and the mic into the other. A device with two real line or mic inputs is better than a laptop's built-in jack.
+2. Pick that device under **Mic**. When it has two or more inputs, an **EGG** choice appears beside it: set it to the channel the EGG is on (**channel 1** or **channel 2**). The choice is remembered. If the stream can't open with two channels, the error is shown and VoiceLab goes back to the mic alone; it never silently drops the EGG.
+3. Set the gain so the EGG signal is **well above the noise but doesn't clip**.
+4. **Turn off AGC (automatic gain control), compressors, noise gates and any DC-block or "enhance" processing** for both channels. They distort the contact waveform the CQ is read from.
+
+**What you get.** While an EGG is on, an **EGG ●** badge shows in the live panel (grey when no usable signal arrives) with a **Contact quotient (EGG)** meter, and CQ feeds the register estimate. Takes are saved as stereo WAV files (mic first, EGG second), with the EGG channel noted in the take's JSON file, so they reload with the EGG intact. Each card shows its CQ, and the Voice Map offers CQ as a colour once an EGG has filled some cells. If the EGG channel looks flat or isn't picking up regular vocal-fold cycles, the status bar and card say so.
+
+**Importing a stereo file** asks whether one channel is an EGG, and which. If so it's analysed with the EGG; if not, it's mixed to mono as before.
+
+**Method.** Cycles are found from the peaks of the EGG's derivative (closing), and the contact phase ends where the signal falls to 3/7 of the cycle's height (the hybrid method of Howard 1995, after Rothenberg & Mahshie 1988 and Henrich et al. 2004). Compare CQ between sessions on the same set-up, not between devices or methods: electrode placement and the method itself shift the absolute number by a few hundredths.
+
 ### Shifting a take
 
 **Shift** on a take card opens sliders that re-render the take with your voice moved. Let go of a slider and the shifted version renders and plays. **▶ Original** and **▶ Shifted** switch between them, and while the panel is open the card's Play button plays the shifted version.
@@ -140,7 +176,7 @@ Treat a shift as a preview of a direction, not proof your voice can make that ex
 
 ### Importing recordings
 
-**Import audio…** analyses a file (WAV, FLAC, OGG, MP3, AIFF; mono-mixed, resampled, and trimmed to the first 90 s), such as a take recorded elsewhere or a reference singer or speaker. Imported files don't change your live formant calibration, since they may be someone else's voice.
+**Import audio…** analyses a file (WAV, FLAC, OGG, MP3, AIFF; mono-mixed unless you say one channel of a stereo file is an EGG, resampled, and trimmed to the first 90 s), such as a take recorded elsewhere or a reference singer or speaker. Imported files don't change your live formant calibration, since they may be someone else's voice.
 
 If the optional isolation extras are installed, you'll be asked whether there's music behind the voice. If so, **Demucs** (htdemucs) separates the vocals first. It runs on the CPU (roughly 10–15 s for a short clip) and downloads its model (~80 MB) on first use.
 
@@ -150,8 +186,10 @@ The **Speak / Sing** switch at the top of the live panel picks the tabs and mete
 
 | Mode  | Tabs                                         | Meters                                                              |
 | ----- | -------------------------------------------- | ------------------------------------------------------------------- |
-| Speak | Pitch, Spectrum, Pitch × Resonance, Vowels   | Resonance, Fold Contact, Clarity, Ring, Intonation Range, Level     |
-| Sing  | Exercise, Pitch, Spectrum, Voice Map         | Tuning, Vibrato, Fold Contact, Clarity, Ring, Level                 |
+| Speak | Pitch, Spectrum, Pitch × Resonance, Vowels   | Resonance, Fold Contact, Clarity, Ring, Register, Intonation Range, Level |
+| Sing  | Exercise, Pitch, Spectrum, Voice Map         | Tuning, Vibrato, Fold Contact, Clarity, Ring, Register, Level       |
+
+With an EGG connected, a Contact quotient meter joins both lists.
 
 ### Singing practice
 
@@ -217,4 +255,4 @@ Demucs vocal isolation isn't included in the build, since it needs PyTorch. The 
 python -m pytest tests
 ```
 
-The tests synthesize vowels with known pitch, formants, glottal source shape and noise, then check that each metric recovers them. `tests/test_app.py` drives the whole app window headless (no mic or speakers needed): live meters, recording, the takes folder, exercises, the vowel check, shifting and Progress.
+The tests synthesize vowels with known pitch, formants, glottal source shape and noise, then check that each metric recovers them. `tests/test_app.py` drives the whole app window headless (no mic or speakers needed): live meters, recording, the takes folder, exercises, the vowel check, shifting, Progress, register calibration, and a simulated two-channel input with a synthetic EGG.

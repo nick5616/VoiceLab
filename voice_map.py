@@ -12,12 +12,14 @@ MIDI_LO, MIDI_HI = 36, 96            # C2-C7
 LEVEL_LO, LEVEL_HI, LEVEL_STEP = -60, 0, 2   # dBFS
 MIN_FRAMES = 3                       # frames before a cell is shown
 REDRAW_EVERY = 10                    # live frames between redraws
-# key: (label, colour range)
+# key: (label, colour range, unit)
 MAP_METRICS = {
-    "cpp": ("Clarity (CPP)", (8, 30)),
-    "ring": ("Ring (2–4 kHz)", (-30, 0)),
-    "h1h2": ("Fold Contact (H1*–H2*)", (-5, 15)),
+    "cpp": ("Clarity (CPP)", (8, 30), " dB"),
+    "ring": ("Ring (2–4 kHz)", (-30, 0), " dB"),
+    "h1h2": ("Fold Contact (H1*–H2*)", (-5, 15), " dB"),
+    "cq": ("Contact quotient (EGG)", (0.2, 0.7), ""),
 }
+EGG_METRICS = {"cq"}                 # only offered once an EGG has filled some cells
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
 
 
@@ -51,6 +53,9 @@ class VoiceMapData:
         out[shown & (n > 0)] = self.sums[key][shown & (n > 0)] / n[shown & (n > 0)]
         return out
 
+    def has_data(self, key):
+        return bool(self.metric_counts[key].sum() > 0)
+
     def range_midi(self):
         cols = np.flatnonzero((self.counts >= MIN_FRAMES).any(axis=1))
         return (cols[0] + MIDI_LO, cols[-1] + MIDI_LO) if len(cols) else None
@@ -67,9 +72,10 @@ class VoiceMapData:
             with np.load(path) as f:
                 if f["counts"].shape == data.counts.shape:
                     data.counts = f["counts"]
-                    for k in MAP_METRICS:
-                        data.sums[k] = f[f"sum_{k}"]
-                        data.metric_counts[k] = f[f"n_{k}"]
+                    for k in MAP_METRICS:       # maps saved before a metric existed lack it
+                        if f"sum_{k}" in f:
+                            data.sums[k] = f[f"sum_{k}"]
+                            data.metric_counts[k] = f[f"n_{k}"]
         except (OSError, KeyError, ValueError):
             pass
         return data
@@ -90,8 +96,7 @@ class VoiceMapView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         left = QVBoxLayout()
         self.metric = QComboBox()
-        for key, (label, _) in MAP_METRICS.items():
-            self.metric.addItem(label, key)
+        self.update_metric_choices()
         self.metric.setStyleSheet("QComboBox { background: #1e1e1e; color: white; }")
         self.metric.currentIndexChanged.connect(self.redraw)
         self.range_label = QLabel()
@@ -133,14 +138,35 @@ class VoiceMapView(QWidget):
         self.redraw()
         engine.frame_ready.connect(self.on_frame)
 
+    def metric_keys(self):
+        """Metrics the picker offers: EGG ones only while the map holds EGG data."""
+        return [k for k in MAP_METRICS if k not in EGG_METRICS or self.data.has_data(k)]
+
+    def update_metric_choices(self):
+        """Refill the picker if the offered metrics changed, keeping the selection."""
+        keys = self.metric_keys()
+        if keys == [self.metric.itemData(i) for i in range(self.metric.count())]:
+            return
+        current = self.metric.currentData()
+        self.metric.blockSignals(True)
+        self.metric.clear()
+        for key in keys:
+            self.metric.addItem(MAP_METRICS[key][0], key)
+        self.metric.setCurrentIndex(max(0, self.metric.findData(current)))
+        self.metric.blockSignals(False)
+        if self.metric.currentData() != current and hasattr(self, "image"):
+            self.redraw()
+
     def on_frame(self, frame):
         if self.data.add(frame):
+            self.update_metric_choices()
             self.pending += 1
             if self.pending >= REDRAW_EVERY and self.isVisible():
                 self.redraw()
 
     def redraw(self):
         self.pending = 0
+        self.update_metric_choices()
         key = self.metric.currentData()
         lo, hi = MAP_METRICS[key][1]
         values = self.data.mean(key)
@@ -148,7 +174,7 @@ class VoiceMapView(QWidget):
         step = (hi - lo) / 254
         self.image.setImage(np.where(np.isnan(values), lo - 10 * step, values),
                             levels=(lo - step, hi), autoLevels=False)
-        self.scale_label.setText(f"Colour: purple {lo:g} → yellow {hi:g} dB")
+        self.scale_label.setText(f"Colour: purple {lo:g} → yellow {hi:g}{MAP_METRICS[key][2]}")
 
         rng = self.data.range_midi()
         if rng:

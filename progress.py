@@ -52,7 +52,12 @@ SERIES = {
     "exercise_error": ("Exercise average error", "¢", "take", _get("exercise", "mean_abs_cents"), None),
     "vibrato_rate": ("Vibrato rate", "Hz", "take", _get("singing", "vibrato_rate"), None),
     "vibrato_extent": ("Vibrato extent", "¢", "take", _get("singing", "vibrato_extent"), None),
+    "head_share": ("Head share (register estimate)", "%", "take", _get("register"), "register"),
+    "chest_share": ("Chest share (register estimate)", "%", "take", _get("chest_share"), None),
+    "register_breaks": ("Register breaks per minute", "/min", "take", _get("breaks_per_min"), None),
+    "cq": ("Contact quotient (EGG)", "", "take", _get("cq"), None),
 }
+SING_ONLY = {"register_breaks"}        # series that only mean something when singing
 
 
 def collect_entries(history, folder_takes=()):
@@ -81,6 +86,8 @@ def select(entries, key, mode=None, include_imported=False, days=None, now=None)
     points = []
     for e in entries:
         if e.get("kind", "take") != kind:
+            continue
+        if key in SING_ONLY and e.get("mode") != "sing":
             continue
         if kind == "take" and ((mode and e.get("mode") != mode) or
                                (e.get("source") and not include_imported)):
@@ -132,8 +139,8 @@ def change_text(key, times, values):
 
 def _format(value, unit, sign=False, scale=None):
     """Whole numbers for large-valued metrics (Hz), one decimal otherwise."""
-    decimals = 0 if abs(value if scale is None else scale) >= 100 else 1
-    space = "" if unit in ("%", "¢") else " "
+    decimals = 0 if abs(value if scale is None else scale) >= 100 else 2 if unit == "" else 1
+    space = "" if unit in ("%", "¢", "") else " "
     return f"{value:{'+' if sign else ''}.{decimals}f}{space}{unit}"
 
 
@@ -182,7 +189,7 @@ class ProgressChart(QWidget):
             self.band.setRegion(target)
         span = [*values, *([baseline] if baseline is not None else []), *(target or [])]
         lo, hi = min(span), max(span)
-        pad = max((hi - lo) * 0.15, 1e-3 * max(abs(hi), 1), 0.5)
+        pad = max((hi - lo) * 0.15, 1e-3 * max(abs(hi), 1), 0.05 if SERIES[self.key][1] == "" else 0.5)
         self.plot.setYRange(lo - pad, hi + pad, padding=0)
         t0, t1 = min(times[0], starts[0]), max(times[-1], starts[-1] + WEEK)
         self.plot.setXRange(t0 - DAY / 2, t1 + DAY / 2, padding=0)

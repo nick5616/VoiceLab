@@ -22,6 +22,7 @@ TARGET_EDIT = {
     "cpp": (0, 50, 1, "dB"),
     "ring": (-50, 10, 1, "dB"),
     "pitch_range": (0, 24, 1, "st"),
+    "register": (0, 100, 0, "%"),      # head share of voiced time
 }
 
 
@@ -44,6 +45,9 @@ class TargetsDialog(QDialog):
         for row, key in enumerate(TARGET_KEYS):
             lo_lim, hi_lim, decimals, unit = TARGET_EDIT[key]
             check = QCheckBox(METRIC_DEFS[key][0])
+            if key == "register":
+                check.setToolTip("Share of voiced time in head voice (M2). A target of 70-100% means "
+                                 "mostly head-leaning. The register is an estimate until you label takes.")
             spins = []
             for _ in range(2):
                 spin = QDoubleSpinBox()

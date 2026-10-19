@@ -11,12 +11,13 @@ from pathlib import Path
 
 import numpy as np
 
-TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"]
+TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "register"]
 # Half-width of a target created from a take. Pitch is in semitones, the rest
 # in each metric's own units.
-DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2}
+DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2,
+                       "register": 15}     # register target = head share of voiced time, in %
 SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
-                              "snr", "snr_full", "clip_events", "source", "mode", "uid"]
+                              "snr", "snr_full", "clip_events", "source", "mode", "uid", "cq"]
 # Scalar parts of a take's exercise score worth tracking over time.
 EXERCISE_SUMMARY_KEYS = ["name", "notes_total", "notes_sung", "notes_in_tune",
                          "mean_abs_cents", "time_in_tune"]
@@ -41,12 +42,27 @@ def _clean(value):
 def summarize(result):
     """The scalar metrics of an analyze_take result (plus its singing stats and
     exercise score, if any), ready to store."""
-    summary = {key: _clean(result.get(key)) for key in SUMMARY_KEYS}
+    summary = {key: _clean(result.get(key)) for key in SUMMARY_KEYS if key != "register"}
+    summary.update(register_summary(result.get("register")))
     if result.get("singing"):
         summary["singing"] = {k: _clean(v) for k, v in result["singing"].items()}
     if result.get("exercise"):
         summary["exercise"] = {k: _clean(result["exercise"].get(k)) for k in EXERCISE_SUMMARY_KEYS}
     return summary
+
+
+def register_summary(register):
+    """Scalar register figures of a take's register summary: head and chest share in %
+    (the 'register' target is the head share) and breaks per minute of voiced time."""
+    register = register or {}
+    return {"register": _percent(register.get("head_share")),
+            "chest_share": _percent(register.get("chest_share")),
+            "breaks_per_min": _clean(register.get("breaks_per_min"))}
+
+
+def _percent(share):
+    share = _clean(share)
+    return None if share is None else 100 * share
 
 
 def target_from_value(key, value):
@@ -55,6 +71,8 @@ def target_from_value(key, value):
     tol = DEFAULT_TOLERANCES[key]
     if key == "pitch":
         return [value * 2 ** (-tol / 12), value * 2 ** (tol / 12)]
+    if key == "register":
+        return [max(0.0, value - tol), min(100.0, value + tol)]
     if key in NONNEGATIVE_KEYS:
         return [max(0.0, value - tol), value + tol]
     return [value - tol, value + tol]
@@ -73,6 +91,9 @@ class Profile:
         self.takes_dir = None          # folder takes are saved to and loaded from
         self.takes_dir_asked = False   # offered to pick one on first launch
         self.input_device = None       # mic name; None = system default
+        self.egg_channel = None        # input channel (0 or 1) carrying an EGG; None = no EGG
+        self.register_model = None     # RegisterModel.to_dict() once calibrated to this voice
+        self.register_version = 0      # counts model changes, so takes know when to re-score
         self.load()
 
     def load(self):
@@ -91,13 +112,18 @@ class Profile:
         self.takes_dir = data.get("takes_dir")
         self.takes_dir_asked = data.get("takes_dir_asked", False)
         self.input_device = data.get("input_device")
+        self.egg_channel = data.get("egg_channel")
+        self.register_model = data.get("register_model")
+        self.register_version = data.get("register_version", 0)
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         data = {"baseline": self.baseline, "targets": self.targets,
                 "formant_ceiling": self.formant_ceiling, "vowel_baseline": self.vowel_baseline,
                 "mode": self.mode, "takes_dir": self.takes_dir,
-                "takes_dir_asked": self.takes_dir_asked, "input_device": self.input_device}
+                "takes_dir_asked": self.takes_dir_asked, "input_device": self.input_device,
+                "egg_channel": self.egg_channel, "register_model": self.register_model,
+                "register_version": self.register_version}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -124,7 +150,9 @@ class Profile:
             return f"{12 * np.log2(value / base):+.1f} st vs baseline"
         if key == "delta_f":
             return f"{value - base:+.0f} Hz vs baseline"
-        unit = "st" if key in NONNEGATIVE_KEYS else "dB"
+        if key == "cq":
+            return f"{value - base:+.2f} vs baseline"
+        unit = "st" if key in NONNEGATIVE_KEYS else "%" if key == "register" else "dB"
         return f"{value - base:+.1f} {unit} vs baseline"
 
     # --- TARGETS ---
@@ -183,6 +211,16 @@ class Profile:
 
     def set_input_device(self, name):
         self.input_device = name
+        self.save()
+
+    def set_egg_channel(self, channel):
+        self.egg_channel = channel
+        self.save()
+
+    def set_register_model(self, model):
+        """Store a calibrated RegisterModel.to_dict() (None resets to the default)."""
+        self.register_model = model
+        self.register_version += 1
         self.save()
 
     @property

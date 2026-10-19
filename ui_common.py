@@ -22,6 +22,9 @@ METRIC_DEFS = {
     "level": ("Level", -60, 0, "Quiet", "Loud", "{:.0f} dBFS, uncalibrated", None),
     "tuning": ("Tuning", -50, 50, "Flat", "Sharp", "{:+.0f}¢", None),
     "vibrato": ("Vibrato", 0, 100, "Straight", "Wide", "±{:.0f}¢", None),
+    # Head share of a take, in %. The live meter plots the 0-100 register score on the same bar.
+    "register": ("Register (head share)", 0, 100, "Chest", "Head", "{:.0f}%", None),
+    "cq": ("Contact quotient (EGG)", 0.2, 0.7, "Light", "Pressed", "{:.2f}", None),
 }
 
 BOTH_MODES = {"speak", "sing"}
@@ -35,6 +38,10 @@ ON_TARGET_COLOR = "#2ecc71"
 OFF_TARGET_COLOR = "#e67e22"
 DISABLED_COLOR = "#555"
 TARGET_BAND_COLOR = QColor(46, 204, 113, 70)
+MIX_BAND_COLOR = QColor(155, 89, 182, 70)
+MIX_EDGE_COLOR = "#9b59b6"
+# Register colours (chest = M1, head = M2), shared by the take card's bar and graph.
+REGISTER_COLORS = {"chest": "#3498db", "mix": "#9b59b6", "head": "#e74c3c", "fry": "#95a5a6"}
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
 
 
@@ -83,6 +90,7 @@ class RangeBar(QWidget):
         self.position = None
         self.color = DISABLED_COLOR
         self.band = None
+        self.band_color = (TARGET_BAND_COLOR, ON_TARGET_COLOR)     # fill, edge
         self.baseline = None
 
     def paintEvent(self, event):
@@ -102,8 +110,8 @@ class RangeBar(QWidget):
             p.drawRoundedRect(QRectF(0, 2, max(track.height(), w * self.position), h - 4), 4, 4)
         if self.band is not None:
             lo, hi = self.band
-            p.setBrush(TARGET_BAND_COLOR)
-            p.setPen(QPen(QColor(ON_TARGET_COLOR), 1))
+            p.setBrush(self.band_color[0])
+            p.setPen(QPen(QColor(self.band_color[1]), 1))
             p.drawRect(QRectF(w * lo, 0, max(2.0, w * (hi - lo)), h - 1))
         if self.baseline is not None:
             p.setPen(QPen(QColor("white"), 2))
@@ -111,12 +119,41 @@ class RangeBar(QWidget):
             p.drawLine(int(x), 0, int(x), h)
 
 
+class ShareBar(QWidget):
+    """A thin bar split into coloured segments, e.g. the share of a take in each register."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(12)
+        self.segments = []              # (fraction, colour)
+
+    def set_segments(self, segments):
+        self.segments = segments
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#444"))
+        p.drawRoundedRect(QRectF(0, 2, w, h - 4), 4, 4)
+        x = 0.0
+        for fraction, color in self.segments:
+            p.setBrush(QColor(color))
+            p.drawRect(QRectF(x, 2, w * fraction, h - 4))
+            x += w * fraction
+
+
 class MetricBar(QWidget):
     """Labelled RangeBar for one metric, aware of baseline and target."""
 
-    def __init__(self, key, centered=False, live=False):
+    def __init__(self, key, centered=False, live=False, tracked=True):
+        """`tracked` False keeps the profile's baseline, target and change text off this bar."""
         super().__init__()
         self.key = key
+        self.tracked = tracked
+        self.parens = True          # "Label (value)", or "Label: value" when False
         self.modes = BOTH_MODES
         self.label, lo, hi, low_label, high_label, self.fmt, scale = METRIC_DEFS[key]
         self.scale = scale or (lambda v: v)
@@ -156,6 +193,8 @@ class MetricBar(QWidget):
         return float(np.clip((self.scale(value) - self.lo) / (self.hi - self.lo), 0, 1))
 
     def set_reference(self, profile):
+        if not self.tracked:
+            return
         base = profile.baseline_value(self.key)
         target = profile.target(self.key)
         self.bar.baseline = self._fraction(base) if base is not None else None
@@ -180,12 +219,13 @@ class MetricBar(QWidget):
             self.bar.update()
             return
         parts = [display or format_value(self.key, value)]
-        change = profile.change_text(self.key, value)
+        change = profile.change_text(self.key, value) if self.tracked else None
         if change:
             parts.append(change)
-        if on_target is None:
+        if on_target is None and self.tracked:
             on_target = profile.in_target(self.key, value)
-        title = f"{self.label} ({' · '.join(parts)})"
+        joined = " · ".join(parts)
+        title = f"{self.label} ({joined})" if self.parens else f"{self.label}: {joined}"
         if on_target is not None:
             title += "  ✓ on target" if on_target else "  off target"
         self._set_title(title)

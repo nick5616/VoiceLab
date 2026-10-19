@@ -314,7 +314,7 @@ def test_layout_follows_window_width(make_window):
     assert window.live_panel.meter_grid.columns == 2          # meters two-up at 800 px
     window.live_panel.set_mode("sing", user=True)
     shown = [m for m in window.live_panel.meters.values() if not m.isHidden()]
-    assert len(shown) == 6 and window.live_panel.meter_grid.grid.count() == 6
+    assert len(shown) == 7 and window.live_panel.meter_grid.grid.count() == 7
 
 
 def test_layout_holds_still_while_the_readouts_change(make_window, tmp_path):
@@ -366,3 +366,247 @@ def test_mic_that_fails_to_open(make_window, monkeypatch):
     window.mic_choice.setCurrentIndex(window.mic_choice.count() - 1)
     assert "Couldn't open Broken mic" in window.status_label.text()
     assert window.profile.input_device is None           # not remembered
+
+
+# --- REGISTER AND EGG ---
+
+HEAD_VOICE = synth_vowel(140, MALE_FORMANTS, seconds=3.5, open_quotient=0.85, noise=0.05)
+CHEST_VOICE = synth_vowel(140, MALE_FORMANTS, seconds=3.5, open_quotient=0.4, noise=0.05)
+
+
+def save_scored(folder, audio, day):
+    """A take in the folder with its register scored, as a recording would have it."""
+    import analysis
+    from take_register import finish_take
+    from take_store import TakeStore
+    result = finish_take(analysis.analyze_take(audio))
+    TakeStore(folder).save(result | {"time": f"2026-09-{day:02d}T10:00:00"})
+
+
+def play_with_egg(window, audio, egg_samples):
+    """Like play(), but a two-channel input: each frame also carries the contact quotient."""
+    engine = window.engine
+    for i in range(0, len(audio) - HOP + 1, HOP):
+        engine.feed(audio[i:i + HOP], egg_samples[i:i + HOP])
+        engine.frame_ready.emit(engine._worker.frame())
+    QApplication.processEvents()
+
+
+@pytest.fixture
+def two_input_window(make_window, monkeypatch):
+    """A window whose mic has two inputs; opening the stream just records the EGG channel."""
+    import main
+    monkeypatch.setattr(main, "input_channels", lambda index: 2)
+    opened = []
+
+    def make(takes_dir=None):
+        window = make_window(takes_dir)
+
+        def open_stream(device=None, egg_channel=None):
+            opened.append(egg_channel)
+            window.engine.egg_channel = egg_channel
+        monkeypatch.setattr(window.engine, "open_stream", open_stream)
+        return window
+    make.opened = opened
+    return make
+
+
+def test_live_register_follows_open_quotient(make_window):
+    window = make_window()
+    meter = window.live_panel.meters["register"]
+    assert "(estimate)" in meter.label
+    play(window, np.concatenate([silence(1.0), CHEST_VOICE[:int(1.5 * SR)]]))
+    assert meter.bar.position < 0.35 and "chest" in meter.title.text() and "estimate" in meter.title.text()
+    play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.5 * SR)]]))
+    assert meter.bar.position > 0.65 and "head" in meter.title.text()
+    assert meter.bar.band == (0.35, 0.65)                 # the mix zone
+    window.live_panel.set_mode("sing", user=True)
+    assert not meter.isHidden()
+
+
+def test_recording_has_a_register_row_and_old_takes_still_load(make_window, tmp_path):
+    import analysis
+    from take_store import TakeStore
+    folder = tmp_path / "takes"
+    old = analysis.analyze_take(VOICE)                    # saved before the register existed
+    TakeStore(folder).save(old | {"time": "2026-09-01T10:00:00"})
+    window = make_window(folder)
+    assert len(window.cards) == 1
+    assert wait_for(lambda: window.cards[0].data.get("register")), "old take is scored lazily"
+    assert "register" in window.cards[0].data["tracks"]
+    assert '"register"' in (folder / window.cards[0].data["file"]).with_suffix(".json").read_text()
+
+    card = record(window, np.concatenate([silence(0.3), HEAD_VOICE[:int(2 * SR)], silence(0.5)]))
+    reg = card.data["register"]
+    assert reg["head_share"] > 0.7 and not reg["calibrated"]
+    assert len(card.data["tracks"]["register"]) == len(card.data["tracks"]["times"])
+    assert card.register_box.isVisibleTo(card) and "estimate" in card.register_title.text()
+    assert "head" in card.register_text.text()
+    assert window.profile.read_history() == []
+
+
+def test_labelled_takes_calibrate_the_register_and_persist(make_window, tmp_path):
+    folder = tmp_path / "takes"
+    save_scored(folder, CHEST_VOICE, 1)
+    save_scored(folder, HEAD_VOICE, 2)
+    window = make_window(folder)
+    cards = {c.data["time"][:10]: c for c in window.cards}
+    window.label_register(cards["2026-09-01"], "chest")
+    assert wait_for(lambda: "needs" in window.status_label.text().lower())
+    assert window.profile.register_model is None            # one side is not enough
+    window.label_register(cards["2026-09-02"], "head")
+    assert wait_for(lambda: window.profile.register_model is not None)
+    assert "calibrated to your voice" in window.status_label.text()
+    assert window.live_panel.register_model.is_calibrated()
+    assert window.live_panel.meters["register"].label == "Register"
+    version = window.profile.register_version
+    assert wait_for(lambda: all((c.data.get("register") or {}).get("model_version") == version
+                                for c in window.cards)), "shown cards are re-scored"
+    assert all(c.data["register"]["calibrated"] for c in window.cards)
+    assert "calibrated to your voice" in cards["2026-09-02"].register_title.text()
+    assert "labelled it head" in cards["2026-09-02"].register_title.text()
+    head_json = (folder / cards["2026-09-02"].data["file"]).with_suffix(".json")
+    assert '"register_label": "head"' in head_json.read_text()
+
+    again = make_window(folder)                             # a new window starts calibrated
+    assert again.live_panel.register_model.is_calibrated()
+    assert again.profile.register_model == window.profile.register_model
+    assert {c.data["register_label"] for c in again.cards} == {"chest", "head"}
+    window.label_register(cards["2026-09-02"], None)
+    assert "register_label" not in cards["2026-09-02"].data
+
+
+def test_without_an_egg_there_is_no_cq(make_window, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "input_channels", lambda index: 1)
+    window = make_window()
+    window.show()
+    window.update_egg_choice()
+    assert window.egg_choice.isHidden() and window.egg_label.isHidden()
+    play(window, VOICE)
+    live = window.live_panel
+    assert live.meters["cq"].isHidden() and live.egg_badge.isHidden()
+    keys = [window.voice_map.metric.itemData(i) for i in range(window.voice_map.metric.count())]
+    assert "cq" not in keys and "h1h2" in keys
+    card = record(window, VOICE)
+    assert "cq" not in card.bars and "egg" not in card.data
+
+
+def test_egg_session_records_stereo_and_shows_cq(two_input_window, tmp_path):
+    import soundfile as sf
+    from egg import synth_egg
+    folder = tmp_path / "takes"
+    window = two_input_window(folder)
+    assert not window.egg_choice.isHidden()
+    window.egg_choice.setCurrentIndex(window.egg_choice.findData(1))     # EGG on channel 2
+    assert two_input_window.opened[-1] == 1 and window.profile.egg_channel == 1
+    live = window.live_panel
+    assert live.egg_on and not live.egg_badge.isHidden() and not live.meters["cq"].isHidden()
+
+    voice = synth_vowel(140, MALE_FORMANTS, seconds=1.5, noise=0.05)
+    egg_samples = synth_egg(140, 1.5, 0.5)
+    window.toggle_recording()
+    play_with_egg(window, voice, egg_samples)
+    assert "Contact quotient" in live.meters["cq"].title.text()
+    assert abs(live.smoothed["cq"] - 0.5) < 0.05
+    keys = [window.voice_map.metric.itemData(i) for i in range(window.voice_map.metric.count())]
+    assert "cq" in keys
+    window.toggle_recording()
+    assert wait_for(lambda: window.cards), window.status_label.text()
+    card = window.cards[0]
+    assert abs(card.data["cq"] - 0.5) < 0.05 and "cq" in card.bars
+    assert "cq" in card.data["tracks"] and card.data["register"]["head_share"] is not None
+    wav = folder / card.data["file"]
+    assert sf.info(str(wav)).channels == 2
+    assert '"egg_channel": 1' in wav.with_suffix(".json").read_text()
+
+    again = two_input_window(folder)                        # reloads with the EGG intact
+    loaded = again.cards[0]
+    assert abs(loaded.data["cq"] - 0.5) < 0.05 and "cq" in loaded.bars
+    assert len(again.store.egg(loaded.data)) == len(loaded.audio())
+    assert np.max(np.abs(loaded.audio() - voice[:len(loaded.audio())])) < 1e-3     # mic, not a mix
+    assert window.profile.egg_channel == 1 and again.profile.egg_channel == 1
+
+
+def test_egg_that_fails_to_open_is_dropped_with_the_error(two_input_window):
+    window = two_input_window()
+    calls = []
+
+    def open_stream(device=None, egg_channel=None):
+        calls.append(egg_channel)
+        if egg_channel is not None:
+            raise sd.PortAudioError("Invalid number of channels")
+    window.engine.open_stream = open_stream
+    window.egg_choice.setCurrentIndex(window.egg_choice.findData(0))
+    assert "Invalid number of channels" in window.status_label.text()
+    assert window.egg_choice.currentData() is None and window.profile.egg_channel is None
+    assert not window.live_panel.egg_on and calls == [0, None]       # fell back to the mic alone
+
+
+def test_a_dead_egg_channel_is_explained(two_input_window):
+    window = two_input_window()
+    window.egg_choice.setCurrentIndex(window.egg_choice.findData(1))
+    window.toggle_recording()
+    play_with_egg(window, VOICE, np.zeros(len(VOICE)))
+    window.toggle_recording()
+    assert wait_for(lambda: window.cards), window.status_label.text()
+    assert "EGG" in window.status_label.text() and "flat" in window.status_label.text()
+    assert "cq" not in window.cards[0].bars and "cq" not in window.cards[0].data
+
+
+def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monkeypatch):
+    import isolation
+    import main
+    import soundfile as sf
+    from egg import synth_egg
+    from PyQt6.QtWidgets import QFileDialog
+    voice = synth_vowel(140, MALE_FORMANTS, seconds=1.5, noise=0.05)
+    path = str(tmp_path / "session.wav")
+    sf.write(path, np.column_stack([voice, synth_egg(140, 1.5, 0.5)]), SR, subtype="FLOAT")
+    monkeypatch.setattr(isolation, "available", lambda: False)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
+    window = make_window()
+    window.choose_egg_channel = lambda p: (True, 1)          # "channel 2 is EGG"
+    window.import_audio()
+    assert wait_for(lambda: window.cards), window.status_label.text()
+    card = window.cards[0]
+    assert abs(card.data["cq"] - 0.5) < 0.05 and "session.wav" in card.data["source"]
+    assert abs(card.data["pitch"] - 140) < 3
+
+    window.choose_egg_channel = lambda p: (True, None)       # declined: mixed to mono, no EGG
+    window.import_audio()
+    assert wait_for(lambda: len(window.cards) == 2)
+    assert "cq" not in window.cards[-1].data
+
+    mono = str(tmp_path / "mono.wav")
+    sf.write(mono, voice, SR)
+    assert main.MainWindow.choose_egg_channel(window, mono) == (True, None)    # no question for mono
+
+
+def test_live_register_reads_fry_when_the_pitch_says_so(make_window):
+    window = make_window()
+    live = window.live_panel
+    play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.0 * SR)]]))
+    engine = window.engine
+    for _ in range(8):                                    # frames at 50 Hz, below the fry limit
+        engine.feed(VOICE[:HOP])
+        frame = engine.analyzer.analyze(engine.latest_window())
+        live.update_frame(dict(frame, f0=50.0))
+    time.sleep(0.25)                                      # live text changes at most every 0.2 s
+    live.update_frame(dict(frame, f0=50.0))
+    assert "fry" in live.meters["register"].title.text()
+
+
+def test_old_voice_map_loads_and_gains_cq(tmp_path):
+    import voice_map
+    data = voice_map.VoiceMapData()
+    data.counts[5, 5] = 4
+    data.sums["cpp"][5, 5], data.metric_counts["cpp"][5, 5] = 80.0, 4
+    path = tmp_path / "voicemap.npz"
+    np.savez(path, counts=data.counts, **{f"sum_{k}": data.sums[k] for k in ("cpp", "ring", "h1h2")},
+             **{f"n_{k}": data.metric_counts[k] for k in ("cpp", "ring", "h1h2")})       # saved before CQ
+    loaded = voice_map.VoiceMapData.load(path)
+    assert loaded.counts[5, 5] == 4 and loaded.mean("cpp")[5, 5] == 20.0
+    assert not loaded.has_data("cq")
+    loaded.add({"f0": 220.0, "level": -30.0, "cq": 0.45, "cpp": 20.0, "ring": -10.0, "h1h2": 2.0})
+    assert loaded.has_data("cq")

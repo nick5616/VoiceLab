@@ -72,3 +72,14 @@ def test_collect_entries_counts_each_take_once():
     entries = collect_entries(history, [folder_take])
     assert sorted(select(entries, "pitch")[1]) == [180.0, 200.0]
     assert len(select(entries, "vowel_delta_f")[1]) == 1
+
+
+def test_register_and_cq_series():
+    entries = [entry(0, register=60.0, chest_share=30.0, breaks_per_min=4.0, cq=0.41, mode="sing"),
+               entry(1, register=40.0, chest_share=50.0, breaks_per_min=9.0, cq=0.43)]
+    assert list(select(entries, "head_share")[1]) == [60.0, 40.0]
+    assert list(select(entries, "chest_share")[1]) == [30.0, 50.0]
+    assert list(select(entries, "register_breaks")[1]) == [4.0]       # only singing
+    assert list(select(entries, "cq")[1]) == [0.41, 0.43]
+    assert select([entry(0)], "cq")[1].size == 0                      # no EGG, no series
+    assert "0.42" in change_text("cq", *select(entries, "cq"))

@@ -128,3 +128,31 @@ def test_missing_folder(tmp_path):
 def test_safe_title():
     assert safe_title(' a/b\\c:*?"<>|d  e. ') == "abcd e"
     assert len(safe_title("x" * 200)) == 60
+
+
+def test_take_with_egg_is_stereo_and_never_mixed_down(tmp_path, take):
+    from egg import synth_egg
+    store = TakeStore(tmp_path)
+    egg_samples = synth_egg(150, 1.5, 0.5)
+    data = fresh(take, time="2026-10-18T10:32:05", egg_samples=egg_samples, cq=0.5,
+                 egg={"signal_ok": True, "note": None, "cycles": 200, "polarity": 1})
+    store.save(data)
+    assert sf.info(str(tmp_path / data["file"])).channels == 2
+    assert data["egg_channel"] == 1 and "egg_samples" not in data
+    assert json.loads((tmp_path / data["file"]).with_suffix(".json").read_text())["egg_channel"] == 1
+
+    got = store.load_all()[0][0]
+    mic, egg_back = store.audio(got), store.egg(got)
+    # The mic comes back alone: averaging the two channels would bury the voice in the EGG.
+    assert len(mic) == len(VOICE) and np.max(np.abs(mic - VOICE)) < 1e-3
+    assert np.max(np.abs(egg_back - egg_samples)) < 1e-3
+    assert abs(got["cq"] - 0.5) < 1e-9 and got["egg"]["signal_ok"] is True
+
+
+def test_mono_take_has_no_egg(tmp_path, take):
+    store = TakeStore(tmp_path)
+    data = fresh(take, time="2026-10-18T10:32:05")
+    store.save(data)
+    got = store.load_all()[0][0]
+    assert store.egg(got) is None and "egg_channel" not in got
+    assert np.isnan(got.get("cq", np.nan))

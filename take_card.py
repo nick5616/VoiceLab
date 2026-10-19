@@ -4,18 +4,21 @@ from datetime import datetime
 import numpy as np
 import pyqtgraph as pg
 import sounddevice as sd
-from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame, QLineEdit
-from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame, QLineEdit, QMenu
+from PyQt6.QtGui import QFont, QAction
 import qtawesome as qta
 
+import register
 from analysis import IN_TUNE_CENTS, MIN_RELIABLE_SNR, SAMPLE_RATE
 from exercise import midi_name
 from shift_panel import ShiftPanel
 from live_views import pitch_label
 from widgets import ResponsiveGrid
-from ui_common import BUTTON_STYLE, METER_MIN_WIDTH, MetricBar, OFF_TARGET_COLOR, ON_TARGET_COLOR, hiss_note
+from ui_common import (BUTTON_STYLE, METER_MIN_WIDTH, REGISTER_COLORS, MetricBar, OFF_TARGET_COLOR,
+                       ON_TARGET_COLOR, ShareBar, hiss_note)
 
 TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "level"]
+REGISTER_DOT_SIZE = 5           # px, the register-coloured dots on the pitch track
 
 
 def take_date(data):
@@ -25,8 +28,27 @@ def take_date(data):
         return ""
 
 
+def register_colors(tracks):
+    """Per-frame colour of the register track (fry grey), or None if the take has none."""
+    scores = tracks.get("register")
+    if scores is None:
+        return None
+    fry = tracks.get("fry")
+    colors = []
+    for i, score in enumerate(scores):
+        if fry is not None and fry[i] > 0.5:
+            colors.append(REGISTER_COLORS["fry"])
+        elif np.isnan(score):
+            colors.append(None)
+        else:
+            colors.append(REGISTER_COLORS["chest" if score < register.MIX_BAND[0] else
+                                          "head" if score > register.MIX_BAND[1] else "mix"])
+    return colors
+
+
 class AnalysisGraph(pg.GraphicsLayoutWidget):
-    """Pitch track on top, F1-F3 below, with a hover readout."""
+    """Pitch track on top, F1-F3 below, with a hover readout. The pitch track is
+    dotted in the register's colour (chest blue, mix purple, head red, fry grey)."""
 
     def __init__(self, tracks):
         super().__init__()
@@ -47,6 +69,9 @@ class AnalysisGraph(pg.GraphicsLayoutWidget):
             ax.hideButtons()
 
         self.ax_pitch.plot(t, tracks["f0"], pen=pg.mkPen("#3498db", width=2), connect="finite")
+        self.register_dots = pg.ScatterPlotItem(size=REGISTER_DOT_SIZE, pen=None)
+        self.ax_pitch.addItem(self.register_dots)
+        self.set_register(tracks)
         # At least ~4 semitones of span so a steady note doesn't zoom into noise.
         lo, hi = np.nanmin(tracks["f0"]), np.nanmax(tracks["f0"])
         center = np.sqrt(lo * hi)
@@ -64,6 +89,18 @@ class AnalysisGraph(pg.GraphicsLayoutWidget):
         self.ax_pitch.addItem(self.text_p, ignoreBounds=True)
         self.ax_res.addItem(self.text_r, ignoreBounds=True)
         self.scene().sigMouseMoved.connect(self.on_hover)
+
+    def set_register(self, tracks):
+        """(Re)colour the pitch track by register; plain blue when the take has no register."""
+        self.tracks = tracks
+        colors = register_colors(tracks)
+        if colors is None:
+            self.register_dots.clear()
+            return
+        f0 = tracks["f0"]
+        keep = [i for i, c in enumerate(colors) if c is not None and not np.isnan(f0[i])]
+        self.register_dots.setData(x=tracks["times"][keep], y=f0[keep],
+                                   brush=[pg.mkBrush(colors[i]) for i in keep])
 
     def on_hover(self, pos):
         for ax in (self.ax_pitch, self.ax_res):
@@ -139,9 +176,10 @@ class TakeCard(QFrame):
     saved takes); `on_rename(card, title)` and `on_delete(card)` manage it."""
 
     def __init__(self, data, count, profile, on_set_baseline, on_set_target,
-                 on_rename=None, on_delete=None, audio=None):
+                 on_rename=None, on_delete=None, audio=None, on_label=None):
         super().__init__()
         self.data, self.profile, self.number = data, profile, count
+        self.on_label = on_label
         self.audio = audio or (lambda: data["audio"])
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
         # Scoped to the card: a bare QFrame rule would also hit every QLabel inside.
@@ -229,9 +267,9 @@ class TakeCard(QFrame):
         layout.addWidget(self.shift_panel)
 
         # --- GRAPH ---
-        graph = AnalysisGraph(data['tracks'])
-        graph.setFixedHeight(200)
-        layout.addWidget(graph)
+        self.graph = AnalysisGraph(data['tracks'])
+        self.graph.setFixedHeight(200)
+        layout.addWidget(self.graph)
 
         self.time_in_target = QLabel()
         self.time_in_target.setStyleSheet("color: #2ecc71; font-size: 12px;")
@@ -256,8 +294,19 @@ class TakeCard(QFrame):
             label.setStyleSheet("color: #ddd; font-size: 12px;")
             layout.addWidget(label)
 
+        # --- REGISTER ---
+        self.register_box = self._build_register_row()
+        layout.addWidget(self.register_box)
+        egg = data.get("egg")
+        if egg and not egg["signal_ok"]:
+            warning = QLabel("⚠ EGG: " + (egg.get("note") or "no usable signal"))
+            warning.setWordWrap(True)
+            warning.setStyleSheet(f"color: {OFF_TARGET_COLOR}; font-size: 12px;")
+            layout.addWidget(warning)
+
         # --- METRIC BARS ---
-        self.bars = {key: MetricBar(key) for key in TAKE_BAR_KEYS}
+        has_cq = egg is not None and egg["signal_ok"] and data.get("cq") is not None
+        self.bars = {key: MetricBar(key) for key in TAKE_BAR_KEYS + (["cq"] if has_cq else [])}
         bar_grid = ResponsiveGrid(METER_MIN_WIDTH)
         for bar in self.bars.values():
             bar_grid.addWidget(bar)
@@ -265,9 +314,67 @@ class TakeCard(QFrame):
         self.setLayout(layout)
         self.refresh_profile()
 
+    def _build_register_row(self):
+        box = QFrame()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 2, 0, 2)
+        left = QVBoxLayout()
+        self.register_title = QLabel("Register")
+        self.register_title.setWordWrap(True)
+        self.register_title.setStyleSheet("font-size: 11px; color: #aaa;")
+        self.register_bar = ShareBar()
+        self.register_text = QLabel()
+        self.register_text.setWordWrap(True)
+        self.register_text.setStyleSheet("font-size: 12px;")
+        for w in (self.register_title, self.register_bar, self.register_text):
+            left.addWidget(w)
+        row.addLayout(left, 1)
+        label_btn = QPushButton(qta.icon("fa5s.tag", color="white"), " Label register…")
+        label_btn.setStyleSheet(BUTTON_STYLE + " QPushButton::menu-indicator { image: none; }")
+        label_btn.setToolTip("Tell VoiceLab this take is chest or head voice. Once enough takes "
+                             "are labelled, the register estimate is calibrated to your voice.")
+        menu = QMenu(label_btn)
+        menu.setStyleSheet("QMenu { background: #2b2b2b; color: white; } "
+                           "QMenu::item:selected { background: #3498db; }")
+        self.label_actions = {}
+        for key, text in (("chest", "Chest"), ("head", "Head"), (None, "Clear label")):
+            action = QAction(text, menu)
+            action.triggered.connect(lambda _, k=key: self.on_label and self.on_label(self, k))
+            menu.addAction(action)
+            self.label_actions[key] = action
+        label_btn.setMenu(menu)
+        row.addWidget(label_btn, 0)
+        return box
+
+    def refresh_register(self):
+        """Show the register row and colour the graph. A take without a register result
+        (an older take, scored in the background) keeps the row's space, so the card doesn't jump."""
+        reg = self.data.get("register")
+        self.graph.set_register(self.data["tracks"])
+        if not reg or "chest_share" not in reg:
+            self.register_title.setText("Register — not scored yet")
+            self.register_bar.set_segments([])
+            self.register_text.setText('<span style="color:#888">estimating…</span>')
+            return
+        shares = [(reg[f"{name}_share"], name) for name in ("chest", "mix", "head", "fry")]
+        self.register_bar.set_segments([(share, REGISTER_COLORS[name]) for share, name in shares])
+        self.register_text.setText(" · ".join(
+            f'<span style="color:{REGISTER_COLORS[name]}">{name} {share:.0%}</span>'
+            for share, name in shares if share > 0 or name != "fry"))
+        breaks = len(reg.get("breaks") or [])
+        notes = [f"{breaks} break{'s' if breaks != 1 else ''}",
+                 "calibrated to your voice" if reg.get("calibrated") else "estimate"]
+        if self.data.get("register_label"):
+            notes.append(f"you labelled it {self.data['register_label']}")
+        on_target = self.profile.in_target("register", 100 * reg["head_share"])
+        if on_target is not None:
+            notes.append("head share ✓ on target" if on_target else "head share off target")
+        self.register_title.setText("Register — " + " · ".join(notes))
+
     def refresh_profile(self):
         # Share of voiced time inside each target: holding a voice across a whole
         # passage matters more than its median.
+        self.refresh_register()
         tracks = self.data["tracks"]
         shares = [(name, self.profile.time_in_target(key, tracks[track]))
                   for name, key, track in (("pitch", "pitch", "f0"), ("resonance", "delta_f", "delta_f"))]
