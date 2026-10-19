@@ -271,7 +271,7 @@ def wheel_over(widget, steps=-1):
 
 def test_wheel_scrolls_takes_from_anywhere(make_window, tmp_path):
     import analysis
-    from main import AnalysisGraph
+    from take_card import AnalysisGraph
     from take_store import TakeStore
     folder = tmp_path / "takes"
     store, base = TakeStore(folder), analysis.analyze_take(VOICE)
