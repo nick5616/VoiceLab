@@ -199,6 +199,18 @@ The profile is stored in `~/.voicelab/profile.json` (override the folder with th
 - Longer takes (3–5 seconds of voice) produce more stable values. For resonance, connected speech with several vowels works better than one held vowel.
 - Spectral metrics (Ring, Clarity, Fold Contact) depend on the mic and room. Compare takes recorded with the same setup.
 
+## Building a Windows app
+
+To get a folder you can run without Python installed, run this from the repo root with your venv's Python:
+
+```powershell
+.\packaging\build.ps1
+```
+
+Pass `-Python C:\path\to\python.exe` to use a different interpreter. The script installs PyInstaller, builds, and zips the result. You'll find `dist\VoiceLab\VoiceLab.exe` and `dist\VoiceLab-windows.zip` (about 255 MB unzipped, 105 MB zipped).
+
+Demucs vocal isolation isn't included in the build, since it needs PyTorch. The app runs without it, as it does when the extras aren't installed.
+
 ## Tests
 
 ```bash
