@@ -424,14 +424,16 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
     df_track[~reliable] = np.nan
 
     h1h2, cpps, rings, levels = [], [], [], []
+    h1h2_track, cpp_track = np.full(len(times), np.nan), np.full(len(times), np.nan)
     half = SPECTRAL_FRAME // 2
-    for t, f, fr, bw in zip(times[voiced], f0[voiced], freqs[voiced], bws[voiced]):
+    for i, t, f, fr, bw in zip(np.flatnonzero(voiced), times[voiced], f0[voiced], freqs[voiced], bws[voiced]):
         center = int(t * sample_rate)
         frame = audio[max(0, center - half):center + half]
         if len(frame) < SPECTRAL_FRAME:
             continue
         h1h2.append(h1_h2_corrected(frame, sample_rate, f, fr, bw))
         cpps.append(cpp(frame, sample_rate, f))
+        h1h2_track[i], cpp_track[i] = h1h2[-1], cpps[-1]
         rings.append(ring_db(frame, sample_rate, f))
         levels.append(level_dbfs(frame))
 
@@ -474,6 +476,8 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
             "f2": freqs[:, 1],
             "f3": freqs[:, 2],
             "delta_f": df_track,
+            "h1h2": h1h2_track,
+            "cpp": cpp_track,
         },
     }
 
