@@ -7,9 +7,10 @@ import tempfile
 os.environ.setdefault("VOICELAB_HOME", tempfile.mkdtemp(prefix="voicelab_smoke_"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-REQUIRED = ["analysis", "engine", "exercise", "isolation", "live_views", "main", "profile_store",
-            "progress", "shift", "shift_panel", "speech", "take_store", "voice_map", "widgets"]
-OPTIONAL = ["register", "egg", "live_panel", "take_card", "targets_dialog", "ui_common"]  # added in phase 8
+REQUIRED = ["analysis", "egg", "engine", "exercise", "isolation", "live_panel", "live_views", "main",
+            "profile_store", "progress", "register", "shift", "shift_panel", "speech", "take_card",
+            "take_register", "take_store", "targets_dialog", "ui_common", "voice_map", "widgets"]
+OPTIONAL = []
 
 
 def main():

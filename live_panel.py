@@ -8,7 +8,9 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics
 import qtawesome as qta
 
+import register
 from analysis import (IN_TUNE_CENTS,
+    SAMPLE_RATE,
     MIN_RELIABLE_SNR,
     VOICE_BAND_HZ,
     NoiseMonitor,
@@ -17,6 +19,7 @@ from analysis import (IN_TUNE_CENTS,
     pitch_range_st,
     vibrato_stats)
 from engine import UPDATE_INTERVAL
+from take_register import register_model
 from exercise import midi_name
 from live_views import PitchView, SpectrumView, PitchResonancePlane, pitch_label
 from speech import ReadingPrompt
@@ -25,6 +28,8 @@ from ui_common import (BOTH_MODES,
     BUTTON_STYLE,
     METER_MIN_WIDTH,
     MetricBar,
+    MIX_BAND_COLOR,
+    MIX_EDGE_COLOR,
     OFF_TARGET_COLOR,
     ON_TARGET_COLOR,
     fix_text_height,
@@ -33,8 +38,10 @@ from ui_common import (BOTH_MODES,
 # Live meters in display order, with the modes they appear in.
 LIVE_METERS = [
     ("tuning", {"sing"}), ("vibrato", {"sing"}), ("delta_f", {"speak"}), ("h1h2", BOTH_MODES),
-    ("cpp", BOTH_MODES), ("ring", BOTH_MODES), ("pitch_range", {"speak"}), ("level", BOTH_MODES),
+    ("cpp", BOTH_MODES), ("ring", BOTH_MODES), ("register", BOTH_MODES), ("cq", BOTH_MODES),
+    ("pitch_range", {"speak"}), ("level", BOTH_MODES),
 ]
+EGG_METERS = {"cq"}             # shown only while an EGG is configured
 SMOOTHED_KEYS = ["delta_f", "h1h2", "cpp", "ring"]   # per-frame metrics, smoothed for display
 
 INTONATION_WINDOW_SECONDS = 6
@@ -46,6 +53,8 @@ LIVE_TEXT_SECONDS = 0.2         # live numbers change at most this often, so the
 NOTE_WINDOW_SECONDS = 0.25      # the note readout shows the median pitch over this
 NOTE_HOLD_SECONDS = 0.5         # ...and keeps the last note this long through gaps
 CLIP_BADGE_SECONDS = 1.0        # the clipping badge stays up this long after a clip
+EGG_SIGNAL_SECONDS = 1.5        # the EGG badge stays green this long after the last contact quotient
+FRY_CHECK_FRAMES = 12           # recent pitch frames judged for vocal fry
 
 LIVE_VIEW_HEIGHT = 220
 
@@ -114,11 +123,17 @@ class LivePanel(QFrame):
         self.clip_badge.setSizePolicy(policy)
         self.clip_badge.hide()
         self.clip_frames_left = 0
+        self.egg_badge = QLabel("EGG ●")
+        self.egg_badge.setFixedWidth(52)
+        self.egg_on = False
+        self.egg_frame = -10 ** 9        # frame count when a contact quotient last came in
+        self.egg_badge.hide()
         header.addSpacing(8)
         header.addWidget(targets_btn)
         header.addWidget(self.read_btn)
         header.addStretch()
         header.addWidget(self.clip_badge)
+        header.addWidget(self.egg_badge)
         header.addWidget(self.snr_badge)
         header.addWidget(self.note_label)
         layout.addLayout(header)
@@ -149,7 +164,7 @@ class LivePanel(QFrame):
         self.meters = {}
         self.meter_grid = ResponsiveGrid(METER_MIN_WIDTH)
         for key, modes in LIVE_METERS:
-            meter = MetricBar(key, centered=(key == "tuning"), live=True)
+            meter = MetricBar(key, centered=(key == "tuning"), live=True, tracked=key != "register")
             meter.modes = modes
             self.meters[key] = meter
             self.meter_grid.addWidget(meter)
@@ -158,7 +173,14 @@ class LivePanel(QFrame):
         self.meters["level"].label = "Input Level"
         # In-tune zone: ±IN_TUNE_CENTS on a ±50 cent bar.
         self.meters["tuning"].bar.band = (0.5 - IN_TUNE_CENTS / 100, 0.5 + IN_TUNE_CENTS / 100)
-        self.smoothed = {key: np.nan for key in SMOOTHED_KEYS}
+        reg = self.meters["register"]
+        reg.parens = False
+        reg.bar.band = register.MIX_BAND         # the mix zone, shown on the bar
+        reg.bar.band_color = (MIX_BAND_COLOR, MIX_EDGE_COLOR)
+        # Where the live meter gets the audio window for features the frame doesn't carry.
+        self.window_provider = None
+        self.register_model = register_model(profile.register_model)
+        self.smoothed = {key: np.nan for key in SMOOTHED_KEYS + ["register", "cq"]}
         self.smoothed_log_f0 = np.nan
         self.recent_f0 = deque(maxlen=int(INTONATION_WINDOW_SECONDS / UPDATE_INTERVAL))
         self.refresh_profile()
@@ -176,8 +198,8 @@ class LivePanel(QFrame):
         self.mode_buttons[mode].setChecked(True)
         for widget, modes in self.tab_modes:
             self.tabs.setTabVisible(self.tabs.indexOf(widget), mode in modes)
-        for meter in self.meters.values():
-            meter.setVisible(mode in meter.modes)
+        for key, meter in self.meters.items():
+            meter.setVisible(mode in meter.modes and (self.egg_on or key not in EGG_METERS))
         self.meter_grid.relayout()
         self.read_btn.setVisible(mode == "speak")
         if mode != "speak":
@@ -187,8 +209,21 @@ class LivePanel(QFrame):
         if user:
             self.mode_changed.emit(mode)
 
+    def set_egg(self, on):
+        """Show the contact quotient meter and EGG badge while an EGG is configured."""
+        self.egg_on = bool(on)
+        self.egg_frame = -10 ** 9
+        self.egg_badge.setVisible(self.egg_on)
+        self._update_egg_badge()
+        self.smoothed["cq"] = np.nan
+        if self.mode:
+            self.set_mode(self.mode)
+
     def refresh_profile(self):
         p = self.profile
+        self.register_model = register_model(p.register_model)
+        self.meters["register"].label = "Register" if self.register_model.is_calibrated() \
+            else "Register (estimate)"
         for key, meter in self.meters.items():
             if key not in ("tuning", "vibrato"):   # fixed scales, no profile targets
                 meter.set_reference(p)
@@ -210,6 +245,8 @@ class LivePanel(QFrame):
         self.frames_seen += 1
         if self.frames_seen % NOISE_BADGE_EVERY == 0:
             self._update_snr_badge()
+        if self.egg_on:
+            self._update_egg(frame)
         self.recent_f0.append(f0)
         self.meters["pitch_range"].set_value(pitch_range_st(self.recent_f0), self.profile)
         self._update_vibrato()
@@ -232,6 +269,58 @@ class LivePanel(QFrame):
 
         resonance = self.smoothed["delta_f"] if frame["resonance_reliable"] else np.nan
         self.plane.update_point(2 ** self.smoothed_log_f0, resonance)
+        self._update_register(frame)
+
+    def _update_egg(self, frame):
+        """Contact quotient meter and badge; the badge goes grey when no EGG cycles come in."""
+        cq = frame.get("cq", np.nan)
+        if not np.isnan(cq):
+            self.egg_frame = self.frames_seen
+            self.smoothed["cq"] = self._smooth(self.smoothed["cq"], cq)
+        meter, value = self.meters["cq"], self.smoothed["cq"]
+        meter.set_value(None if np.isnan(value) else value, self.profile,
+                        note="no EGG signal" if np.isnan(value) else None)
+        self._update_egg_badge()
+
+    def _update_egg_badge(self):
+        ok = self.frames_seen - self.egg_frame <= EGG_SIGNAL_SECONDS / UPDATE_INTERVAL
+        self.egg_badge.setStyleSheet(f"color: {ON_TARGET_COLOR if ok else '#777'}; "
+                                     "font-size: 11px; font-weight: bold;")
+        self.egg_badge.setToolTip("EGG connected: contact quotient is being measured." if ok else
+                                  "No EGG signal. Check the electrodes, the cable, the channel choice "
+                                  "and the EGG's gain (and that voice is being made).")
+
+    def register_features(self, frame):
+        """Feature dict for the register score from a live frame (and the audio window, for H1-A3)."""
+        f0, cq = frame["f0"], frame.get("cq", np.nan)
+        window = self.window_provider() if self.window_provider else None
+        if window is not None and len(window) >= register.FRAME:
+            features = register.frame_features(window[-register.FRAME:], SAMPLE_RATE, f0, frame["formants"],
+                                               register.NOMINAL_BANDWIDTHS, cq)
+        else:
+            features = {"h1h2": np.nan, "h1a3": np.nan, "cpp": np.nan, "f0": f0,
+                        "cq": None if np.isnan(cq) else cq}
+        for key in ("h1h2", "cpp"):             # the live analyzer already measured these
+            if not np.isnan(frame[key]):
+                features[key] = frame[key]
+        return features
+
+    def _update_register(self, frame):
+        """Chest <-> head meter: the register model's M2 score, smoothed; "fry" when the pitch says so."""
+        meter = self.meters["register"]
+        score = self.register_model.score(self.register_features(frame))
+        recent = np.full(FRY_CHECK_FRAMES, np.nan)     # padded: is_fry needs at least 5 frames
+        tail = list(self.recent_f0)[-FRY_CHECK_FRAMES:]
+        recent[len(recent) - len(tail):] = tail
+        fry = bool(register.is_fry(recent, 1 / UPDATE_INTERVAL)[-1])
+        if not np.isnan(score) and not fry:
+            self.smoothed["register"] = self._smooth(self.smoothed["register"], score)
+        shown = self.smoothed["register"]
+        if fry:
+            meter.set_value(None if np.isnan(shown) else 100 * shown, self.profile,
+                            display="fry", note=None if not np.isnan(shown) else "fry")
+        elif not np.isnan(score):
+            meter.set_value(100 * shown, self.profile, display=self.register_model.label(shown))
 
     def _update_note_label(self, f0):
         """The note readout: median pitch of the last ~quarter second, changing

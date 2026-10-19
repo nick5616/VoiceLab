@@ -6,6 +6,10 @@ analysis, so the folder loads without re-analysing. Takes recorded in VoiceLab
 are named "<YYYY-MM-DD HH-MM-SS>[ <title>].wav". Audio files added to the folder
 by hand are analysed when the folder loads and get a sidecar then. Delete or
 rename a take in the folder (both files) and Reload picks it up.
+
+A take recorded with an EGG is a stereo WAV, mic in channel 0 and EGG in channel 1,
+and its sidecar says "egg_channel": 1. audio() gives the mic alone, egg() the EGG;
+only files without that note are mixed down to mono.
 """
 import json
 import re
@@ -17,17 +21,19 @@ from pathlib import Path
 import numpy as np
 
 from analysis import SAMPLE_RATE, analyze_take
+from egg import load_stereo_take
 from profile_store import _clean
 
 FORMAT_VERSION = 1
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
 IMPORT_MAX_SECONDS = 90         # longer files are trimmed to keep analysis quick
 # analyze_take reports these as NaN when unmeasured; JSON stores them as null.
-NAN_KEYS = ("h1h2", "cpp", "ring", "level", "contour", "pitch_range")
+NAN_KEYS = ("h1h2", "cpp", "ring", "level", "contour", "pitch_range", "cq")
 # In-memory only: never written to the sidecar.
-RUNTIME_KEYS = ("audio", "file")
+RUNTIME_KEYS = ("audio", "file", "egg_samples")
 STAMP_FORMAT = "%Y-%m-%d %H-%M-%S"
 MAX_TITLE_CHARS = 60
+EGG_CHANNEL = 1                 # channel of a saved take's EGG; the mic is the other one
 
 
 def load_audio(path, max_seconds=IMPORT_MAX_SECONDS):
@@ -97,7 +103,13 @@ class TakeStore:
         result["title"] = safe_title(title or result.get("title"))
         stem = self._free_stem(self._stem(result))
         result["file"] = stem + ".wav"
-        sf.write(str(self.path(result)), np.clip(result["audio"], -1, 1), SAMPLE_RATE, subtype="PCM_16")
+        samples = np.clip(result["audio"], -1, 1)
+        egg_samples = result.pop("egg_samples", None)
+        if egg_samples is not None:
+            n = min(len(samples), len(egg_samples))
+            samples = np.column_stack([samples[:n], np.clip(egg_samples[:n], -1, 1)])
+            result["egg_channel"] = EGG_CHANNEL
+        sf.write(str(self.path(result)), samples, SAMPLE_RATE, subtype="PCM_16")
         self.write_sidecar(result)
         return result["file"]
 
@@ -162,10 +174,24 @@ class TakeStore:
         return result
 
     def audio(self, data):
-        """The take's audio, loaded from its file the first time it's needed."""
+        """The take's audio (the mic, for a take with an EGG), loaded from its file the first time."""
         if data.get("audio") is None:
-            data["audio"] = load_audio(self.path(data))[0]
+            if data.get("egg_channel") is not None:
+                data["audio"] = self._stereo(data)[0]
+            else:
+                data["audio"] = load_audio(self.path(data))[0]
         return data["audio"]
+
+    def egg(self, data):
+        """The take's EGG samples, or None if it was recorded without one."""
+        if data.get("egg_channel") is None:
+            return None
+        return self._stereo(data)[1]
+
+    def _stereo(self, data):
+        mic, egg_samples = load_stereo_take(str(self.path(data)), data["egg_channel"])
+        limit = IMPORT_MAX_SECONDS * SAMPLE_RATE
+        return mic[:limit], egg_samples[:limit]
 
     # --- UPDATE ---
 

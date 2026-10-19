@@ -120,3 +120,32 @@ def test_corrupt_profile_is_ignored(tmp_path):
     (tmp_path / "profile.json").write_text("{not json")
     profile = Profile(tmp_path)
     assert profile.baseline is None and profile.targets == {}
+
+
+REGISTER = {"chest_share": 0.2, "mix_share": 0.1, "head_share": 0.7, "fry_share": 0.0,
+            "breaks": [1.0, 2.0], "breaks_per_min": 12.0, "calibrated": False}
+
+
+def test_register_summary_and_target(tmp_path):
+    profile = Profile(tmp_path)
+    take = TAKE | {"register": REGISTER, "cq": np.float64(0.45)}
+    profile.set_targets_from_take(take)
+    low, high = profile.targets["register"]
+    assert abs(low - 55) < 1e-9 and abs(high - 85) < 1e-9        # head share 70% +/- 15
+    profile.log_take(take)
+    entry = profile.read_history()[0]
+    assert abs(entry["register"] - 70) < 1e-9 and abs(entry["chest_share"] - 20) < 1e-9
+    assert entry["breaks_per_min"] == 12.0 and entry["cq"] == 0.45
+    profile.set_target("register", (0, 100))
+    assert profile.targets["register"] == [0.0, 100.0]
+    assert Profile(tmp_path).targets["register"] == [0.0, 100.0]
+    assert profile.change_text("register", 50) is None            # no baseline
+
+
+def test_register_model_and_egg_channel_persist(tmp_path):
+    profile = Profile(tmp_path)
+    assert profile.register_model is None and profile.register_version == 0 and profile.egg_channel is None
+    profile.set_register_model({"weights": [1.0], "bias": 0.1, "calibrated": True})
+    profile.set_egg_channel(1)
+    again = Profile(tmp_path)
+    assert again.register_model["calibrated"] and again.register_version == 1 and again.egg_channel == 1

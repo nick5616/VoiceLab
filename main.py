@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QSize, QTimer
 import qtawesome as qta
 
+import register
 from analysis import SAMPLE_RATE, analyze_take
-from engine import AnalysisWorker, LiveEngine, device_index, input_devices, take_analysis_worker
+from egg import load_stereo_take
+from engine import AnalysisWorker, LiveEngine, device_index, input_channels, input_devices
 from exercise import ExerciseView
 import isolation
 from live_panel import LivePanel
@@ -19,6 +21,8 @@ from progress import ProgressDialog, collect_entries
 from profile_store import Profile
 from speech import VowelCheck
 from take_card import TakeCard
+from take_register import (analyze_recording, finish_take, fit_labelled, is_stale, label_rows,
+                           register_model, score_register)
 from take_store import IMPORT_MAX_SECONDS, TakeStore, load_audio, new_uid
 from targets_dialog import TargetsDialog
 from ui_common import BUTTON_STYLE
@@ -26,15 +30,25 @@ from voice_map import VoiceMapView
 
 TAKES_PAGE = 20                 # take cards shown at first; older ones on request
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
+EGG_CHOICES = [("none", None), ("channel 1", 0), ("channel 2", 1)]    # the EGG input channel
 WIDE_LAYOUT_WIDTH = 1100        # from this window width, live and takes sit side by side...
 TAKES_COLUMN_WIDTH = 480        # ...if the takes still get about this much
 
 
-def import_and_analyze(path, isolate):
-    audio, trimmed = load_audio(path)
+def import_and_analyze(path, isolate, egg_channel=None, state=None, version=0):
+    """Analyse a file. With egg_channel (0 or 1) that channel of a stereo file is the EGG
+    and the other the mic; `state` and `version` are the profile's register model."""
+    if egg_channel is None:
+        audio, trimmed = load_audio(path)
+        egg_samples = None
+    else:
+        audio, egg_samples = load_stereo_take(path, egg_channel)
+        limit = IMPORT_MAX_SECONDS * SAMPLE_RATE
+        trimmed = len(audio) > limit
+        audio, egg_samples = audio[:limit], egg_samples[:limit]
     if isolate:
         audio = isolation.isolate_vocals(audio, SAMPLE_RATE)
-    result = analyze_take(audio)
+    result = finish_take(analyze_take(audio), egg_samples, state, version)
     if "error" not in result:
         name = path.replace("\\", "/").split("/")[-1]
         notes = [name] + (["vocals isolated with Demucs"] if isolate else []) + \
@@ -46,6 +60,36 @@ def import_and_analyze(path, isolate):
 def load_folder(store):
     takes, problems = store.load_all()
     return {"takes": takes, "problems": problems}
+
+
+def _take_audio(data, store):
+    return store.audio(data) if data.get("file") and store else data["audio"]
+
+
+def refit_register(takes, store, cache):
+    """Refit the register model to the labelled takes. `cache` holds each take's frame
+    features (uid -> rows), so a label change doesn't re-measure every take."""
+    labelled = []
+    for data in takes:
+        if data["uid"] not in cache:
+            cache[data["uid"]] = label_rows(_take_audio(data, store), data["tracks"])
+        labelled.append((data["register_label"], cache[data["uid"]]))
+    model, counts = fit_labelled(labelled)
+    return {"job": "refit", "model": model, "counts": counts}
+
+
+def rescore_register(takes, store, state, version):
+    """Score takes with the register model; a take whose audio can't be read is reported as failed."""
+    model, scored, failed = register_model(state), [], []
+    for data in takes:
+        try:
+            scores, fry, summary = score_register(_take_audio(data, store), data["tracks"], model)
+        except Exception:  # a missing or unreadable file shouldn't stop the others
+            failed.append(data["uid"])
+            continue
+        summary["model_version"] = version
+        scored.append((data["uid"], scores, fry, summary))
+    return {"job": "rescore", "scored": scored, "failed": failed}
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +107,11 @@ class MainWindow(QMainWindow):
         self.profile = profile
         self.analysis_worker = None
         self.load_worker = None
+        self.register_worker = None     # re-scores takes or refits the register model, one job at a time
+        self.register_again = False     # something changed while it ran
+        self.refit_needed = False
+        self.register_failed = set()    # uids that couldn't be scored, so they aren't retried
+        self.label_features = {}        # uid -> frame features of labelled takes
         self.cards = []
         self.older_takes = []       # loaded takes not yet shown as cards, oldest first
         self.progress_dialog = None
@@ -76,6 +125,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         self.live_panel = LivePanel(engine.analyzer.spectrum_freqs, profile, self.edit_targets)
+        self.live_panel.window_provider = engine.latest_window
         self.engine.frame_ready.connect(self.live_panel.update_frame)
         self.vowel_check = VowelCheck(engine, profile)
         self.vowel_check.running_changed.connect(self.update_record_enabled)
@@ -145,6 +195,17 @@ class MainWindow(QMainWindow):
         self.mic_choice.currentIndexChanged.connect(self.change_mic)
         mic_label = QLabel("Mic")
         mic_label.setStyleSheet("color: #aaa; border: none;")
+        # The EGG goes on one channel of a two-input device, the mic on the other.
+        self.egg_choice = QComboBox()
+        self.egg_choice.setStyleSheet("QComboBox { background: #1e1e1e; color: white; padding: 3px; }")
+        for text, channel in EGG_CHOICES:
+            self.egg_choice.addItem(text, channel)
+        self.egg_choice.setToolTip("An electroglottograph on one input channel, with the mic on the other. "
+                                   "Needs a device with two inputs.")
+        self.egg_choice.currentIndexChanged.connect(self.change_mic)
+        self.egg_label = QLabel("EGG")
+        self.egg_label.setStyleSheet("color: #aaa; border: none;")
+        self.update_egg_choice()
         self.update_folder_button()
 
         # One row: files on the left, record in the middle, progress and mic on the right.
@@ -153,7 +214,7 @@ class MainWindow(QMainWindow):
             left.addWidget(w)
         left.addStretch()
         right.addStretch()
-        for w in (progress_btn, mic_label, self.mic_choice):
+        for w in (progress_btn, mic_label, self.mic_choice, self.egg_label, self.egg_choice):
             right.addWidget(w)
         button_row = QHBoxLayout()
         button_row.addLayout(left, 1)
@@ -231,7 +292,9 @@ class MainWindow(QMainWindow):
             self.update_record_button_style(recording=False)
             self.analyzing = True
             self.record_btn.setEnabled(False)
-            self.analysis_worker = take_analysis_worker(self.engine.stop_take())
+            audio = self.engine.stop_take()
+            self.analysis_worker = AnalysisWorker(analyze_recording, audio, self.engine.last_take_egg,
+                                                  self.profile.register_model, self.profile.register_version)
             self.analysis_worker.finished_analysis.connect(self.process_results)
             self.analysis_worker.start()
 
@@ -244,6 +307,9 @@ class MainWindow(QMainWindow):
     def import_audio(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILE_FILTER)
         if not path:
+            return
+        proceed, egg_channel = self.choose_egg_channel(path)
+        if not proceed:
             return
         isolate = False
         if isolation.available():
@@ -260,9 +326,32 @@ class MainWindow(QMainWindow):
         self.update_record_enabled()
         self.status_label.setText("Isolating vocals and analyzing…" if isolate else "Analyzing file…")
         self.status_label.setStyleSheet("color: #f1c40f;")
-        self.analysis_worker = AnalysisWorker(import_and_analyze, path, isolate)
+        self.analysis_worker = AnalysisWorker(import_and_analyze, path, isolate, egg_channel,
+                                              self.profile.register_model, self.profile.register_version)
         self.analysis_worker.finished_analysis.connect(self.process_results)
         self.analysis_worker.start()
+
+    def choose_egg_channel(self, path):
+        """(proceed, channel): for a stereo file, asks whether one channel is an EGG.
+        channel is 0, 1 or None (no EGG: the file is mixed to mono)."""
+        import soundfile as sf
+        try:
+            channels = sf.info(path).channels
+        except Exception:  # unreadable here; the analysis reports the problem
+            return True, None
+        if channels != 2:
+            return True, None
+        box = QMessageBox(QMessageBox.Icon.Question, "EGG channel?",
+                          "This file has two channels. Is one of them an electroglottograph (EGG) "
+                          "signal, with the voice on the other?", parent=self)
+        buttons = [(box.addButton(text, QMessageBox.ButtonRole.AcceptRole), channel) for text, channel in
+                   (("Channel 1 is EGG", 0), ("Channel 2 is EGG", 1), ("No EGG: mix to mono", None))]
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        for button, channel in buttons:
+            if box.clickedButton() is button:
+                return True, channel
+        return False, None
 
     def process_results(self, results):
         # Exercise takes arrive here too; only our own worker finishing frees
@@ -281,7 +370,7 @@ class MainWindow(QMainWindow):
             self.profile.set_formant_ceiling(results["formant_ceiling"])
         results.update(uid=new_uid(), time=datetime.now().isoformat(timespec="seconds"),
                        mode=self.profile.mode)
-        message = "Done"
+        message, color = "Done", "#888"
         # With a takes folder, the folder is the record of every take; without
         # one, a summary goes to the history log so progress still builds up.
         if self.store:
@@ -294,8 +383,12 @@ class MainWindow(QMainWindow):
         else:
             self.profile.log_take(results)
         self.add_card(results)
-        self.set_status(message)
+        egg_info = results.get("egg")
+        if egg_info and not egg_info["signal_ok"]:      # say why there's no contact quotient
+            message, color = f"{message}. EGG: {egg_info['note']}", "#e67e22"
+        self.set_status(message, color)
         self.refresh_progress()
+        self.update_register()          # exercise takes arrive without a register result
 
     # --- TAKE CARDS ---
 
@@ -314,7 +407,7 @@ class MainWindow(QMainWindow):
             self.live_panel.plane.add_take(number, data["pitch"], data["delta_f"])
         card = TakeCard(data, number, self.profile, self.set_baseline, self.set_target,
                         on_rename=self.rename_take, on_delete=self.delete_take,
-                        audio=lambda: self.take_audio(data))
+                        audio=lambda: self.take_audio(data), on_label=self.label_register)
         self.cards.append(card)
         self.scroll_layout.insertWidget(self.scroll_layout.indexOf(self.more_btn) if at_bottom else 0, card)
         return card
@@ -331,6 +424,7 @@ class MainWindow(QMainWindow):
         for number, data in reversed(page):
             self.add_card(data, number, at_bottom=True)
         self.update_more_button()
+        self.update_register()
 
     def update_more_button(self):
         self.more_btn.setText(f"Show older takes ({len(self.older_takes)} more)")
@@ -419,6 +513,7 @@ class MainWindow(QMainWindow):
             self.status_label.setToolTip("\n".join(result["problems"]))
         self.set_status(message, "#e67e22" if result["problems"] else "#888")
         self.refresh_progress()
+        self.update_register()
 
     def all_takes(self):
         return [c.data for c in self.cards] + [d for _, d in self.older_takes]
@@ -459,18 +554,150 @@ class MainWindow(QMainWindow):
         self.set_status(f"Deleted {name}")
         self.refresh_progress()
 
+    # --- REGISTER ---
+
+    def label_register(self, card, label):
+        """Label a take chest or head (None clears it); labelled takes calibrate the model."""
+        data = card.data
+        if label:
+            data["register_label"] = label
+        else:
+            data.pop("register_label", None)
+        if data.get("file") and self.store:
+            try:
+                self.store.write_sidecar(data)
+            except OSError as e:
+                self.set_status(f"Couldn't save the label: {e}", "#e74c3c")
+        card.refresh_register()
+        self.set_status(f"Labelled as {label}" if label else "Label cleared")
+        self.refit_needed = True
+        self.update_register()
+
+    def update_register(self):
+        """Run the next background register job: refit after a label change, then score the
+        shown cards that lack a result from the current model. One job at a time."""
+        if self.register_worker is not None and self.register_worker.isRunning():
+            self.register_again = True
+            return
+        self.register_again = False
+        job = None
+        if self.refit_needed:
+            self.refit_needed = False
+            labelled = [d for d in self.all_takes() if d.get("register_label") and d.get("uid")]
+            if labelled:
+                job = AnalysisWorker(refit_register, labelled, self.store, self.label_features)
+        if job is None:
+            version = self.profile.register_version
+            stale = [c.data for c in self.cards if c.data.get("uid") not in self.register_failed
+                     and is_stale(c.data, version)]
+            if stale:
+                job = AnalysisWorker(rescore_register, stale, self.store, self.profile.register_model, version)
+        if job is None:
+            return
+        self.register_worker = job
+        job.finished_analysis.connect(self._register_job_done)
+        job.start()
+
+    def _register_job_done(self, result):
+        if "error" in result:
+            self.set_status(result["error"], "#e74c3c")
+            return
+        if result["job"] == "refit":
+            self._apply_refit(result)
+        else:
+            self._apply_scores(result)
+        self.update_register()
+
+    def _apply_refit(self, result):
+        counts = ", ".join(f"{n} {name}" for name, n in result["counts"].items())
+        if result["model"] is None:
+            need = register.MIN_CALIBRATION_FRAMES
+            self.set_status(f"Register labels so far: {counts} frames. Calibration needs {need} of each "
+                            "class (label a few more takes, or longer ones).")
+            return
+        first = not register_model(self.profile.register_model).is_calibrated()
+        self.profile.set_register_model(result["model"])
+        self.live_panel.refresh_profile()
+        self.set_status("Register calibrated to your voice (" + counts + " labelled frames)" if first else
+                        "Register model updated from your labels (" + counts + " frames)", "#2ecc71")
+
+    def _apply_scores(self, result):
+        by_uid = {c.data.get("uid"): c for c in self.cards}
+        self.register_failed.update(result["failed"])
+        for uid, scores, fry, summary in result["scored"]:
+            card = by_uid.get(uid)
+            if card is None:
+                continue
+            data = card.data
+            data["tracks"]["register"], data["tracks"]["fry"] = scores, fry.astype(float)
+            data["register"] = summary
+            if data.get("file") and self.store:
+                try:
+                    self.store.write_sidecar(data)
+                except OSError:
+                    pass
+            card.refresh_register()
+        self.refresh_progress()
+
     # --- MIC ---
 
-    def change_mic(self):
+    def update_egg_choice(self):
+        """Offer the EGG option only if the chosen mic has two or more inputs."""
         name = self.mic_choice.currentData()
+        two_inputs = input_channels(device_index(name)) >= 2
+        self.egg_label.setVisible(two_inputs)
+        self.egg_choice.setVisible(two_inputs)
+        if not two_inputs:
+            self._set_egg_choice(None)
+
+    def _set_egg_choice(self, channel):
+        self.egg_choice.blockSignals(True)
+        self.egg_choice.setCurrentIndex(max(0, self.egg_choice.findData(channel)))
+        self.egg_choice.blockSignals(False)
+
+    def restore_egg(self):
+        """At startup, once the mic is open: switch the remembered EGG channel on."""
+        if self.profile.egg_channel is not None and not self.egg_choice.isHidden():
+            self._set_egg_choice(self.profile.egg_channel)
+            self.change_mic()
+
+    def change_mic(self, *_):
+        name = self.mic_choice.currentData()
+        if self.sender() is self.mic_choice:
+            self.update_egg_choice()
+        channel = None if self.egg_choice.isHidden() else self.egg_choice.currentData()
+        try:
+            if channel is None:
+                self.engine.open_stream(device_index(name))
+            else:
+                self.engine.open_stream(device_index(name), channel)
+        except (sd.PortAudioError, ValueError) as e:
+            if channel is None:
+                self.set_status(f"Couldn't open {name or 'the default mic'}: {e}", "#e74c3c")
+                return
+            self.revert_egg(name, f"Couldn't open the EGG on channel {channel + 1} of "
+                                  f"{name or 'the default mic'}: {e}")
+            return
+        self.profile.set_input_device(name)
+        self.profile.set_egg_channel(channel)
+        self.live_panel.set_egg(channel is not None)
+        self.set_status(f"Listening on {name or 'the system default mic'}" +
+                        ("" if channel is None else f", EGG on channel {channel + 1}"))
+        self.update_record_enabled()
+
+    def revert_egg(self, name, message):
+        """The two-channel stream wouldn't open: show why and listen to the mic alone again."""
+        self._set_egg_choice(None)
+        self.profile.set_egg_channel(None)
+        self.live_panel.set_egg(False)
         try:
             self.engine.open_stream(device_index(name))
         except sd.PortAudioError as e:
-            self.set_status(f"Couldn't open {name or 'the default mic'}: {e}", "#e74c3c")
-            return
-        self.profile.set_input_device(name)
-        self.set_status(f"Listening on {name or 'the system default mic'}")
-        self.update_record_enabled()
+            message += f" (and the mic alone won't open either: {e})"
+        else:
+            self.profile.set_input_device(name)
+            message += ". Listening without the EGG."
+        self.set_status(message, "#e74c3c")
 
     # --- PROGRESS ---
 
@@ -515,7 +742,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.engine.stop()
         self.voice_map.save()
-        for worker in (self.analysis_worker, self.load_worker):
+        for worker in (self.analysis_worker, self.load_worker, self.register_worker):
             if worker is not None:
                 worker.wait()
         super().closeEvent(event)
@@ -539,5 +766,7 @@ if __name__ == "__main__":
         QMessageBox.warning(window, "No microphone",
                             f"Couldn't open the microphone ({e}).\n"
                             "Connect one and pick it under Mic, or restart VoiceLab.")
+    else:
+        window.restore_egg()
     QTimer.singleShot(0, window.ask_for_takes_folder)
     sys.exit(app.exec())
