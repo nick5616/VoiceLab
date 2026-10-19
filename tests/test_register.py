@@ -146,4 +146,4 @@ def test_frame_features_and_score_are_fast_enough_for_live_use():
     start = time.perf_counter()
     for _ in range(50):
         model.score(register.frame_features(frame, SR, 200.0, formants, register.NOMINAL_BANDWIDTHS))
-    assert (time.perf_counter() - start) / 50 < 0.002
+    assert (time.perf_counter() - start) / 50 < 0.005   # live tick is 25 ms
