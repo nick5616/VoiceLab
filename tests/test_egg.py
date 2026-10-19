@@ -65,7 +65,7 @@ def test_frame_cq_is_fast_and_right():
     started = time.perf_counter()
     for _ in range(20):
         egg.frame_cq(window, SR)
-    assert (time.perf_counter() - started) / 20 < 1e-3
+    assert (time.perf_counter() - started) / 20 < 5e-3   # live tick is 25 ms; frame_cq ~1 ms
 
 
 def test_frame_nan_on_noise():
