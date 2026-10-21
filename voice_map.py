@@ -6,11 +6,15 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QRectF
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from analysis import NOTE_NAMES, hz_to_midi
+from analysis import NOTE_NAMES, SAMPLE_RATE, frame_levels, hz_to_midi
 
 MIDI_LO, MIDI_HI = 36, 96            # C2-C7
 LEVEL_LO, LEVEL_HI, LEVEL_STEP = -60, 0, 2   # dBFS
-MIN_FRAMES = 3                       # frames before a cell is shown
+MIN_FRAMES = 12                      # frames before a cell is shown: 0.3 s of live frames (25 ms apart)
+# Plausible f0 (Hz) per mode; frames outside it are tracker ghosts (60-70 Hz rumble, the ~1 kHz
+# subharmonic of the mic's 4 kHz tone: phase 9 audits). Speech 70-500 and singing 70-1100 are
+# judgment calls (unverified); mode None uses the wider range.
+MODE_F0 = {"speak": (70.0, 500.0), "sing": (70.0, 1100.0)}
 REDRAW_EVERY = 10                    # live frames between redraws
 # key: (label, colour range, unit)
 MAP_METRICS = {
@@ -30,9 +34,12 @@ class VoiceMapData:
         self.sums = {k: np.zeros(shape) for k in MAP_METRICS}
         self.metric_counts = {k: np.zeros(shape) for k in MAP_METRICS}
 
-    def add(self, frame):
-        f0, level = frame["f0"], frame["level"]
-        if np.isnan(f0) or not LEVEL_LO <= level < LEVEL_HI:
+    def add(self, frame, mode=None):
+        """Count a live frame; False if it was skipped (unvoiced, f0 implausible for the mode, or
+        level off the map). Level is the voice-band one when the frame has it."""
+        f0, level = frame["f0"], frame.get("band_level", frame["level"])
+        low, high = MODE_F0.get(mode, (MODE_F0["speak"][0], MODE_F0["sing"][1]))
+        if np.isnan(f0) or not low <= f0 <= high or not LEVEL_LO <= level < LEVEL_HI:
             return False
         col = int(round(float(hz_to_midi(f0)))) - MIDI_LO
         if not 0 <= col < self.counts.shape[0]:
@@ -52,6 +59,10 @@ class VoiceMapData:
         shown = self.counts >= MIN_FRAMES
         out[shown & (n > 0)] = self.sums[key][shown & (n > 0)] / n[shown & (n > 0)]
         return out
+
+    def clear(self):
+        """Forget everything."""
+        self.__init__()
 
     def has_data(self, key):
         return bool(self.metric_counts[key].sum() > 0)
@@ -81,6 +92,25 @@ class VoiceMapData:
         return data
 
 
+def rebuild(takes, mode=None):
+    """A fresh VoiceMapData from saved takes (dicts with 'audio' and 'tracks'), so the map can be
+    rebuilt without the ghost frames older versions stored. Takes without a pitch track are skipped."""
+    data = VoiceMapData()
+    for take in takes:
+        tracks = take.get("tracks")
+        if not tracks or take.get("audio") is None:
+            continue
+        times, f0 = np.asarray(tracks["times"], dtype=float), np.asarray(tracks["f0"], dtype=float)
+        levels = frame_levels(np.asarray(take["audio"], dtype=float).flatten(), SAMPLE_RATE, times, band=True)
+        for i in np.flatnonzero(~np.isnan(f0)):
+            frame = {"f0": f0[i], "level": levels[i]}
+            for key in MAP_METRICS:
+                values = tracks.get(key)
+                frame[key] = np.nan if values is None else values[i]
+            data.add(frame, mode)
+    return data
+
+
 def midi_name(midi):
     return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
 
@@ -89,6 +119,7 @@ class VoiceMapView(QWidget):
     def __init__(self, engine, path):
         super().__init__()
         self.path = path
+        self.mode = None                  # "speak" | "sing": set by the host so f0 can be range-checked
         self.data = VoiceMapData.load(path) if path.exists() else VoiceMapData()
         self.pending = 0
 
@@ -158,7 +189,7 @@ class VoiceMapView(QWidget):
             self.redraw()
 
     def on_frame(self, frame):
-        if self.data.add(frame):
+        if self.data.add(frame, getattr(self, "mode", None)):
             self.update_metric_choices()
             self.pending += 1
             if self.pending >= REDRAW_EVERY and self.isVisible():
@@ -194,6 +225,13 @@ class VoiceMapView(QWidget):
     def clear(self):
         self.data = VoiceMapData()
         self.save()
+        self.redraw()
+
+    def rebuild(self, takes):
+        """Replace the map with one built from saved takes (see voice_map.rebuild)."""
+        self.data = rebuild(takes, self.mode)
+        self.save()
+        self.update_metric_choices()
         self.redraw()
 
     def save(self):

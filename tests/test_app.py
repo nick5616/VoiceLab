@@ -600,13 +600,13 @@ def test_live_register_reads_fry_when_the_pitch_says_so(make_window):
 def test_old_voice_map_loads_and_gains_cq(tmp_path):
     import voice_map
     data = voice_map.VoiceMapData()
-    data.counts[5, 5] = 4
-    data.sums["cpp"][5, 5], data.metric_counts["cpp"][5, 5] = 80.0, 4
+    data.counts[5, 5] = voice_map.MIN_FRAMES
+    data.sums["cpp"][5, 5], data.metric_counts["cpp"][5, 5] = 20.0 * voice_map.MIN_FRAMES, voice_map.MIN_FRAMES
     path = tmp_path / "voicemap.npz"
     np.savez(path, counts=data.counts, **{f"sum_{k}": data.sums[k] for k in ("cpp", "ring", "h1h2")},
              **{f"n_{k}": data.metric_counts[k] for k in ("cpp", "ring", "h1h2")})       # saved before CQ
     loaded = voice_map.VoiceMapData.load(path)
-    assert loaded.counts[5, 5] == 4 and loaded.mean("cpp")[5, 5] == 20.0
+    assert loaded.counts[5, 5] == voice_map.MIN_FRAMES and loaded.mean("cpp")[5, 5] == 20.0
     assert not loaded.has_data("cq")
     loaded.add({"f0": 220.0, "level": -30.0, "cq": 0.45, "cpp": 20.0, "ring": -10.0, "h1h2": 2.0})
     assert loaded.has_data("cq")

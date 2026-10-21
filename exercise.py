@@ -6,13 +6,13 @@ from collections import defaultdict
 import numpy as np
 import pyqtgraph as pg
 import sounddevice as sd
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
                              QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
-from analysis import (IN_TUNE_CENTS, NOTE_NAMES, SAMPLE_RATE, analyze_take, hz_to_midi,
-                      midi_to_hz, score_exercise)
+from analysis import (CLOSE_CENTS, IN_TUNE_CENTS, NOTE_NAMES, PERCEIVED_SECONDS, SAMPLE_RATE,
+                      analyze_take, hz_to_midi, midi_to_hz, perceived_cents, score_exercise)
 from engine import AnalysisWorker
 
 # Semitone patterns from the start note: (name, intervals, seconds per note).
@@ -28,6 +28,9 @@ LEAD_IN = COUNT_IN_BEATS * BEAT_SECONDS
 TAIL_SECONDS = 0.6                # keep recording briefly after the last note
 ROLL_BEFORE, ROLL_AFTER = 3, 5    # piano roll window around "now" (s)
 NOTE_RANGE = range(36, 85)        # C2-C6 start notes
+IN_TUNE_COLOR, CLOSE_COLOR, OFF_COLOR = "#2ecc71", "#f1c40f", "#e67e22"   # within 25 / 50 cents / beyond
+BAR_COLORS = {IN_TUNE_COLOR: (46, 204, 113, 200), CLOSE_COLOR: (241, 196, 15, 200), OFF_COLOR: (230, 126, 34, 200)}
+DEFAULT_BAR_COLOR = (52, 152, 219, 200)
 BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
 
 
@@ -94,11 +97,34 @@ def guide_audio(targets, sample_rate=SAMPLE_RATE):
     return out
 
 
-def analyze_exercise_take(audio, targets, name):
+def tuning_color(cents):
+    """Colour for a perceived error in cents: green within 25, yellow within 50, else orange; None if unknown."""
+    if cents is None or np.isnan(cents):
+        return None
+    if abs(cents) <= IN_TUNE_CENTS:
+        return IN_TUNE_COLOR
+    return CLOSE_COLOR if abs(cents) <= CLOSE_CENTS else OFF_COLOR
+
+
+def output_latency():
+    """Seconds between sd.play and the guide being heard, from the output stream (0 if unknown)."""
+    try:
+        latency = sd.get_stream().latency
+        return float(latency[1] if np.ndim(latency) else latency)
+    except Exception:
+        return 0.0
+
+
+def analyze_exercise_take(audio, targets, name, latency=0.0):
+    """analyze_take plus the exercise score. `latency` is the guide's output latency: the guide
+    sounded that much after the recording started, so the singer is scored against the targets
+    shifted by it (the reported timing is then reaction time, not device lag)."""
     result = analyze_take(audio)
     if "error" not in result:
         times, f0 = result["tracks"]["times"], result["tracks"]["f0"]
-        result["exercise"] = score_exercise(times, f0, targets) | {"name": name, "targets": targets}
+        heard = [(s + latency, d, m) for s, d, m in targets]
+        result["exercise"] = score_exercise(times, f0, heard) | {"name": name, "targets": targets,
+                                                                 "latency": latency}
     return result
 
 
@@ -114,7 +140,7 @@ class PianoRoll(pg.PlotWidget):
         self.getAxis("left").setWidth(45)
         self.getAxis("bottom").setLabel("seconds")
         self.bars = self.plot(pen=pg.mkPen((150, 150, 150, 140), width=12), connect="pairs")
-        self.current_bar = self.plot(pen=pg.mkPen((52, 152, 219, 200), width=12))
+        self.current_bar = self.plot(pen=pg.mkPen(DEFAULT_BAR_COLOR, width=12))
         self.trace = self.plot(pen=pg.mkPen("#f1c40f", width=2), connect="finite")
         self.playhead = pg.InfiniteLine(angle=90, pen=pg.mkPen("w", width=1))
         self.addItem(self.playhead)
@@ -138,7 +164,8 @@ class PianoRoll(pg.PlotWidget):
                                         if m in midis or m % 12 == 0]])
         self.update_view(0.0, np.nan)
 
-    def update_view(self, now, f0):
+    def update_view(self, now, f0, color=None):
+        """Move the roll to `now` with the latest f0; `color` (a tuning_color) tints the current bar."""
         if not np.isnan(f0):
             midi = float(hz_to_midi(f0))
             # Fold onto the target's octave so an octave-down singer stays on the bars.
@@ -153,6 +180,7 @@ class PianoRoll(pg.PlotWidget):
         self.trace.setData(self.trace_t, self.trace_m)
         self.playhead.setValue(now)
         self.setXRange(now - ROLL_BEFORE, now + ROLL_AFTER, padding=0)
+        self.current_bar.setPen(pg.mkPen(BAR_COLORS.get(color, DEFAULT_BAR_COLOR), width=12))
         for start, duration, midi in self.targets:
             if start <= now < start + duration:
                 self.current_bar.setData([start, start + duration - 0.02], [midi, midi])
@@ -180,6 +208,8 @@ class ExerciseView(QWidget):
         self.running = False
         self.targets, self.midi_targets, self.midi_name = [], None, None
         self.t0 = None
+        self.latency = 0.0               # guide output latency, s
+        self.recent = []                 # (time, cents from target) over the last PERCEIVED_SECONDS
         self.worker = None
 
         layout = QHBoxLayout(self)
@@ -280,8 +310,11 @@ class ExerciseView(QWidget):
         self.targets = self.build_targets()
         self.roll.set_targets(self.targets)
         self.engine.start_take()
+        self.latency = 0.0
+        self.recent = []
         if self.guide.isChecked():
             sd.play(guide_audio(self.targets), SAMPLE_RATE)
+            self.latency = output_latency()
         self.t0 = time.perf_counter()
         self._set_running(True)
         self.status.setText("Count-in…")
@@ -294,7 +327,8 @@ class ExerciseView(QWidget):
             self.status.setText("Stopped.")
             return
         self.status.setText("Scoring…")
-        self.worker = AnalysisWorker(analyze_exercise_take, audio, self.targets, self.exercise_name())
+        self.worker = AnalysisWorker(analyze_exercise_take, audio, self.targets, self.exercise_name(),
+                                     self.latency)
         self.worker.finished_analysis.connect(self._scored)
         self.worker.start()
 
@@ -312,19 +346,28 @@ class ExerciseView(QWidget):
         """MIDI note the singer should be on right now, or None."""
         return current_target(self.targets, self.now()) if self.running else None
 
+    def perceived_error(self, now, f0, target):
+        """Perceived cents from `target` (octave-folded) over the last PERCEIVED_SECONDS, or NaN."""
+        cents = np.nan
+        if target is not None and not np.isnan(f0):
+            cents = 100 * (float(hz_to_midi(f0)) - target)
+            cents -= 1200 * np.round(cents / 1200)
+        self.recent = [(t, c) for t, c in self.recent if now - t <= PERCEIVED_SECONDS] + [(now, cents)]
+        return perceived_cents([c for _, c in self.recent])
+
     def on_frame(self, frame):
         if not self.running:
             return
         now = self.now()
         f0 = frame["f0"]
-        self.roll.update_view(now, f0)
-        target = current_target(self.targets, now)
-        if target is not None and not np.isnan(f0):
-            cents = 100 * (hz_to_midi(f0) - target)
-            cents -= 1200 * np.round(cents / 1200)
-            ok = abs(cents) <= IN_TUNE_CENTS
+        # The singer follows what they hear, which the output device delays.
+        target = current_target(self.targets, now - self.latency)
+        cents = self.perceived_error(now, f0, target)
+        color = tuning_color(cents)
+        self.roll.update_view(now, f0, color)
+        if target is not None and color is not None:
             self.cents_label.setText(f"{midi_name(target)} {cents:+.0f}¢")
-            self.cents_label.setStyleSheet(f"color: {'#2ecc71' if ok else '#e67e22'};")
+            self.cents_label.setStyleSheet(f"color: {color};")
         elif target is not None:
             self.cents_label.setText(midi_name(target))
             self.cents_label.setStyleSheet("color: white;")
@@ -342,7 +385,8 @@ class ExerciseView(QWidget):
         score = result["exercise"]
         if score["notes_sung"]:
             self.status.setText(f"{score['notes_in_tune']}/{score['notes_total']} notes in tune "
-                                f"(±{IN_TUNE_CENTS}¢), average error {score['mean_abs_cents']:.0f}¢.")
+                                f"(±{IN_TUNE_CENTS}¢), {score['notes_close']} close (±{CLOSE_CENTS}¢), "
+                                f"average error {score['mean_abs_cents']:.0f}¢ · {score['timing']}.")
         else:
             self.status.setText("No sung notes detected.")
         self.cents_label.setText("—")

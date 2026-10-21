@@ -14,6 +14,9 @@ LABELS = ("chest", "head")      # what a take can be labelled as, for calibratio
 # register.is_fry can also test pulse spacing in the audio, which is the only way to catch fry that
 # Praat tracks at the pulse ring's frequency. On clean synthetic vowels it flagged 14-94% of ordinary
 # frames as fry (pitch alone: 0%), so it stays off until it has been checked on real recordings.
+# Phase 9 re-measure on clean synthetic vowels at 100-250 Hz: still up to 97% false fry at 130 and
+# 160 Hz (15% at 200 Hz with the mic noise model), far over the 2% bar, so it stays off until the
+# pulse test is redone.
 FRY_FROM_AUDIO = False
 
 
