@@ -30,7 +30,7 @@ def test_targets_from_take(tmp_path):
     profile = Profile(tmp_path)
     profile.set_targets_from_take(TAKE | {"delta_f": None})
     low, high = profile.targets["pitch"]
-    assert abs(12 * np.log2(high / low) - 3) < 1e-9  # +/- 1.5 semitones
+    assert abs(12 * np.log2(high / low) - 4) < 1e-9  # +/- 2 semitones (the floor)
     assert profile.targets["h1h2"] == [1.0, 7.0]
     assert "delta_f" not in profile.targets
 
