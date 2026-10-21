@@ -1,16 +1,68 @@
 """Always-on microphone stream feeding both the live meters and take recording."""
+import math
 import threading
 import time
 
 import numpy as np
 import sounddevice as sd
+from scipy import signal
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 import egg
 from analysis import SAMPLE_RATE, FrameAnalyzer, analyze_take
 
 UPDATE_INTERVAL = 0.025   # live meter refresh (s)
-BLOCK_SIZE = 512
+BLOCK_SIZE = 512          # frames per callback at the app rate; scaled for the device's native rate
+WASAPI = "Windows WASAPI"  # preferred host API: native rate, 3-10 ms latency (MME: 90 ms, audit)
+RESAMPLER_GUARD = 16      # input samples kept either side of an output sample (filter half-width is about 11)
+
+
+class StreamResampler:
+    """Block-wise rational resampler (polyphase, scipy.signal.resample_poly) with the state kept
+    between blocks, so the output has no seams. Output lags the input by RESAMPLER_GUARD input samples."""
+
+    def __init__(self, source_rate, target_rate):
+        divisor = math.gcd(int(source_rate), int(target_rate))
+        self.up, self.down = int(target_rate) // divisor, int(source_rate) // divisor
+        self._buffer = np.zeros(0)
+        self._emitted = 0   # outputs of the current buffer already returned
+
+    def process(self, block):
+        """Resampled samples that are now final for this input block (may be empty)."""
+        block = np.asarray(block, dtype=float)
+        if self.up == self.down:
+            return block
+        self._buffer = np.concatenate([self._buffer, block])
+        out = signal.resample_poly(self._buffer, self.up, self.down)
+        ready = max(0, (len(self._buffer) - 1 - RESAMPLER_GUARD) * self.up // self.down + 1)
+        result = out[self._emitted:ready]
+        # Drop input that no later output needs, in multiples of `down` so the output grid stays aligned.
+        cut = max(0, (ready * self.down // self.up - RESAMPLER_GUARD) // self.down * self.down)
+        self._buffer = self._buffer[cut:]
+        self._emitted = ready - cut * self.up // self.down
+        return result
+
+
+def _find_wasapi(device):
+    """(index, info) of the WASAPI input matching `device` (None: the default input), or None.
+    Windows lists a mic once per host API, and MME truncates the name, hence the prefix match."""
+    try:
+        apis = sd.query_hostapis()
+        wasapi = next(i for i, api in enumerate(apis) if api["name"] == WASAPI)
+        if device is None:
+            device = sd.default.device[0]
+            if device is None or device < 0:
+                return None
+        wanted = sd.query_devices(device)
+        if wanted["hostapi"] == wasapi:
+            return device, wanted
+        for i, info in enumerate(sd.query_devices()):
+            if (info["hostapi"] == wasapi and info["max_input_channels"] > 0
+                    and info["name"].startswith(wanted["name"])):
+                return i, info
+    except (StopIteration, sd.PortAudioError, ValueError, KeyError, IndexError):
+        pass
+    return None
 
 
 class LiveEngine(QObject):
@@ -28,6 +80,8 @@ class LiveEngine(QObject):
         self.last_take_egg = None   # EGG samples of the last take (None without an EGG)
         self.egg_channel = None
         self._stream = None
+        self._resamplers = None     # (mic, egg) when the stream runs at another rate than sample_rate
+        self.capture_info = {}      # how the stream was opened: host_api, native_rate, latency, ...
         self._worker = _LiveWorker(self)
         self._worker.frame_ready.connect(self.frame_ready)
 
@@ -48,14 +102,44 @@ class LiveEngine(QObject):
         self.egg_channel = None
         with self._lock:
             self._ring_egg = None
-        stream = sd.InputStream(samplerate=self.sample_rate, channels=1 if egg_channel is None else 2,
-                                device=device, blocksize=BLOCK_SIZE, callback=self._on_audio)
-        stream.start()
+        channels = 1 if egg_channel is None else 2
+        stream, info = self._open_wasapi(device, channels)
+        if stream is None:
+            stream = sd.InputStream(samplerate=self.sample_rate, channels=channels,
+                                    device=device, blocksize=BLOCK_SIZE, callback=self._on_audio)
+            stream.start()
+            info.update(path="default", host_api=_host_api_name(device), native_rate=self.sample_rate,
+                        latency=_stream_latency(stream))
+            self._resamplers = None
+        self.capture_info = info
         self._stream = stream
         self.egg_channel = egg_channel
         if egg_channel is not None:
             with self._lock:
                 self._ring_egg = np.zeros(len(self._ring))
+
+    def _open_wasapi(self, device, channels):
+        """Try WASAPI at the device's native rate, resampling to sample_rate. (stream, info);
+        stream is None when that is unavailable or fails, and info then says why."""
+        match = _find_wasapi(device)
+        if match is None:
+            return None, {"reason": "no WASAPI device"}
+        index, details = match
+        rate = int(details["default_samplerate"])
+        if details["max_input_channels"] < channels:
+            return None, {"reason": "WASAPI device has too few channels"}
+        self._resamplers = (StreamResampler(rate, self.sample_rate), StreamResampler(rate, self.sample_rate))
+        try:
+            stream = sd.InputStream(samplerate=rate, channels=channels, device=index, latency="low",
+                                    blocksize=max(1, round(BLOCK_SIZE * rate / self.sample_rate)),
+                                    callback=self._on_audio)
+            stream.start()
+        except Exception as e:     # exclusive-mode owner, rate refused, driver quirks: use the old path
+            self._resamplers = None
+            return None, {"reason": f"WASAPI failed: {e}"}
+        delay = RESAMPLER_GUARD / rate if rate != self.sample_rate else 0.0
+        return stream, {"path": "wasapi", "host_api": WASAPI, "native_rate": rate, "device": index,
+                        "latency": _stream_latency(stream), "resampler_delay": delay}
 
     def _close_stream(self):
         if self._stream is not None:
@@ -70,9 +154,14 @@ class LiveEngine(QObject):
 
     def _on_audio(self, indata, frames, time_info, status):
         if self.egg_channel is None:
-            self.feed(indata[:, 0])
+            mic, egg_samples = indata[:, 0], None
         else:
-            self.feed(indata[:, 1 - self.egg_channel], indata[:, self.egg_channel])
+            mic, egg_samples = indata[:, 1 - self.egg_channel], indata[:, self.egg_channel]
+        if self._resamplers is not None:
+            mic = self._resamplers[0].process(mic)
+            if egg_samples is not None:
+                egg_samples = self._resamplers[1].process(egg_samples)
+        self.feed(mic, egg_samples)
 
     def feed(self, samples, egg=None):
         """Append mic samples (and the matching EGG samples, if any) to the buffers."""
@@ -119,6 +208,22 @@ class LiveEngine(QObject):
             egg_chunks, self._take_egg = self._take_egg, None
         self.last_take_egg = np.concatenate(egg_chunks) if egg_chunks else None
         return np.concatenate(chunks) if chunks else np.zeros(0)
+
+
+def _host_api_name(device):
+    try:
+        return sd.query_hostapis(sd.query_devices(device, "input")["hostapi"])["name"]
+    except (sd.PortAudioError, ValueError, KeyError, TypeError):
+        return "unknown"
+
+
+def _stream_latency(stream):
+    """Input latency (s) the stream reports, or None."""
+    try:
+        latency = stream.latency
+        return float(latency[0] if np.ndim(latency) else latency)
+    except (AttributeError, TypeError, IndexError):
+        return None
 
 
 def input_devices():
