@@ -29,6 +29,8 @@ All numeric thresholds and weights are marked "(lit.)" when set from the
 figures above, otherwise "(synthetic)" = chosen empirically on the synthetic
 vowels of tests/test_analysis.py::synth_vowel. None is validated on real voices.
 """
+import warnings
+
 import numpy as np
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import find_peaks, hilbert
@@ -53,6 +55,13 @@ HIGH_F0 = analysis.FORMANT_RELIABLE_MAX_F0       # above this, formant correctio
 HIGH_F0_H1H2_TRUST = 0.3                         # h1h2 weight multiplier above HIGH_F0 (synthetic)
 H1A3_F0_SLOPE = 30.0                             # dB per octave above HIGH_F0 added to the h1a3 centre:
                                                  # uncorrected H1 rises with F1 proximity (synthetic)
+H1A3_SLOPE_MAX_F0 = 500.0                        # Hz; the centre stops rising here, so it cannot run away
+                                                 # and pin every high note to "chest" (synthetic)
+HEAD_PRIOR_F0 = 500.0                            # Hz; above this the prior shifts toward head: M1 rarely
+                                                 # exceeds ~500-700 Hz (Henrich 2006; unverified for any one voice)
+HEAD_PRIOR_LOGIT = 3.0                           # logit added per octave above HEAD_PRIOR_F0 (synthetic)
+HEAD_PRIOR_MAX_OCTAVES = 1.5                     # prior stops growing here
+HIGH_MIX_BAND = (0.2, 0.8)                       # wider mix band above HEAD_PRIOR_F0: less certain (synthetic)
 MIN_CALIBRATION_FRAMES = 200                     # voiced frames per class (~2 s at 10 ms)
 PRIOR_STRENGTH = 30.0                            # ridge pull toward default weights, in frame-equivalents
 FIT_ITERATIONS = 200
@@ -61,9 +70,10 @@ FIT_RATE = 0.5
 NOMINAL_BANDWIDTHS = (80.0, 100.0, 120.0)        # tracks hold no bandwidths; typical Hz (old-take fallback)
 FRAME = analysis.SPECTRAL_FRAME
 
-BREAK_LOW, BREAK_HIGH = 0.3, 0.7                 # score levels for an M1<->M2 switch (spec)
+BREAK_SWING = 0.4                                # score change that counts as an M1<->M2 switch (spec)
 BREAK_WINDOW = 0.15                              # s: the switch must complete within this
 BREAK_SMOOTH = 0.05                              # s: smoothing before detection
+BREAK_MIN_GAP = 0.3                              # s: two breaks closer than this are one
 
 FRY_MAX_F0 = 70.0                                # Hz (Blomgren et al. 1998, lit.)
 FRY_MIN_FRAMES = 3                               # shortest fry run kept
@@ -124,7 +134,7 @@ def _z(features):
         x = np.nan if x is None else float(x)
         centre = DEFAULT_CENTRES[name]
         if name == "h1a3" and high:
-            centre += H1A3_F0_SLOPE * np.log2(f0 / HIGH_F0)
+            centre += H1A3_F0_SLOPE * np.log2(min(f0, H1A3_SLOPE_MAX_F0) / HIGH_F0)
         v = (x - centre) / DEFAULT_SCALES[name] if not np.isnan(x) else np.nan
         if name == "h1h2" and high and not np.isnan(v):
             v *= HIGH_F0_H1H2_TRUST
@@ -137,6 +147,18 @@ def _vector(features):
     z = _z(features)
     measurable = any(not np.isnan(z[n]) for n in ("h1h2", "h1a3", "cq"))
     return np.array([0.0 if np.isnan(z[n]) else z[n] for n in FEATURES]), measurable
+
+
+def head_prior(f0):
+    """Logit added toward head at high f0 (0 at or below HEAD_PRIOR_F0, or when f0 is unknown)."""
+    if f0 is None or np.isnan(f0) or f0 <= HEAD_PRIOR_F0:
+        return 0.0
+    return HEAD_PRIOR_LOGIT * min(np.log2(f0 / HEAD_PRIOR_F0), HEAD_PRIOR_MAX_OCTAVES)
+
+
+def mix_band(f0=None):
+    """(low, high) m2 scores bounding "mix": wider above HEAD_PRIOR_F0, where the evidence is thinner."""
+    return HIGH_MIX_BAND if f0 is not None and not np.isnan(f0) and f0 > HEAD_PRIOR_F0 else MIX_BAND
 
 
 def _sigmoid(x):
@@ -156,7 +178,7 @@ class RegisterModel:
         x, measurable = _vector(features)
         if not measurable:
             return np.nan
-        return float(_sigmoid(self.bias + self.weights @ x))
+        return float(_sigmoid(self.bias + self.weights @ x + head_prior(features.get("f0"))))
 
     def confidence(self, features):
         """0..1: low near a score of 0.5 or when features are missing."""
@@ -167,31 +189,35 @@ class RegisterModel:
         have = np.mean([not np.isnan(z[n]) for n in ("h1h2", "h1a3", "cpp")]) if features.get("cq") is None else 1.0
         return float(abs(s - 0.5) * 2 * (0.5 + 0.5 * have))
 
-    def label(self, score):
-        """"chest" | "mix" | "head" (fry is decided by is_fry); None for NaN."""
+    def label(self, score, f0=None):
+        """"chest" | "mix" | "head" (fry is decided by is_fry); None for NaN.
+        Pass f0 to use the wider mix band that applies above HEAD_PRIOR_F0."""
         if score is None or np.isnan(score):
             return None
-        if score < MIX_BAND[0]:
+        low, high = mix_band(f0)
+        if score < low:
             return "chest"
-        return "head" if score > MIX_BAND[1] else "mix"
+        return "head" if score > high else "mix"
 
     def fit(self, labelled):
         """labelled: list of (features, "chest"|"head"); returns self. Ridge toward the default weights."""
-        rows, ys = [], []
+        rows, ys, shifts = [], [], []
         for features, name in labelled:
             x, measurable = _vector(features)
             if measurable and name in ("chest", "head"):
                 rows.append(x)
                 ys.append(1.0 if name == "head" else 0.0)
+                shifts.append(head_prior(features.get("f0")))
         ys = np.array(ys)
         if len(ys) == 0 or min(ys.sum(), len(ys) - ys.sum()) < MIN_CALIBRATION_FRAMES:
             return self
         x = np.array(rows)
         x = np.hstack([x, np.ones((len(x), 1))])
+        shifts = np.array(shifts)
         prior = np.append([DEFAULT_WEIGHTS[n] for n in FEATURES], DEFAULT_BIAS)
         w = prior.copy()
         for _ in range(FIT_ITERATIONS):
-            p = _sigmoid(x @ w)
+            p = _sigmoid(x @ w + shifts)
             grad = x.T @ (p - ys) + PRIOR_STRENGTH * (w - prior)
             hess = (x.T * (p * (1 - p))) @ x + PRIOR_STRENGTH * np.eye(len(w))
             step = np.linalg.solve(hess, grad)
@@ -272,13 +298,15 @@ def is_fry(f0_track, frame_rate, audio=None, sample_rate=None, times=None):
     each pulse, so f0 is weak evidence of fry; pass `audio`, `sample_rate` and
     the frame `times` to also test pulse spacing (slow and irregular)."""
     f0 = np.asarray(f0_track, dtype=float)
+    if len(f0) == 0:
+        return np.zeros(0, dtype=bool)
     low = np.zeros(len(f0), dtype=bool)
     valid = ~np.isnan(f0)
     low[valid] = f0[valid] < FRY_MAX_F0
     st = 12 * np.log2(np.where(valid, f0, 1.0))
     jump = np.zeros(len(f0), dtype=bool)
     jump[1:] = valid[1:] & valid[:-1] & (np.abs(np.diff(st)) > FRY_JUMP_ST)
-    erratic = np.convolve(jump, np.ones(5), mode="same") >= FRY_JUMPS_IN_5
+    erratic = np.convolve(jump, np.ones(5))[2:2 + len(f0)] >= FRY_JUMPS_IN_5   # not mode="same": that is wrong for len < 5
     flag = low | erratic
     if audio is not None and sample_rate is not None and times is not None:
         flag |= _audio_fry(np.asarray(times, dtype=float), audio, sample_rate)
@@ -329,20 +357,25 @@ def _smooth(scores, frame_rate):
 
 
 def find_breaks(times, scores):
-    """Times (s) where the smoothed score goes from <0.3 to >0.7 (or back) within 150 ms."""
+    """Times (s) of abrupt M1<->M2 switches: where the smoothed score's mean over the next
+    BREAK_WINDOW differs from that over the last BREAK_WINDOW by BREAK_SWING or more,
+    whatever the absolute levels. One break per switch."""
     times = np.asarray(times, dtype=float)
     if len(times) < 2:
         return []
-    smooth = _smooth(np.asarray(scores, dtype=float), 1 / np.median(np.diff(times)))
-    breaks, last_state, last_time = [], None, None
-    for t, s in zip(times, smooth):
-        if np.isnan(s) or BREAK_LOW <= s <= BREAK_HIGH:
-            continue
-        state = "low" if s < BREAK_LOW else "high"
-        if last_state is not None and state != last_state and t - last_time <= BREAK_WINDOW:
-            breaks.append(float((t + last_time) / 2))
-        last_state, last_time = state, t
-    return breaks
+    rate = 1 / np.median(np.diff(times))
+    smooth = _smooth(np.asarray(scores, dtype=float), rate)
+    n = max(2, int(round(BREAK_WINDOW * rate)))
+    padded = np.concatenate([np.full(n, np.nan), smooth, np.full(n, np.nan)])
+    swing = np.zeros(len(smooth))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for i in range(len(smooth)):
+            before, after = padded[i:i + n], padded[i + n:i + 2 * n]
+            if np.isnan(before).sum() <= n // 2 and np.isnan(after).sum() <= n // 2:
+                swing[i] = abs(np.nanmean(after) - np.nanmean(before))
+    peaks, _ = find_peaks(swing, height=BREAK_SWING, distance=max(1, int(round(BREAK_MIN_GAP * rate))))
+    return [float(times[i]) for i in peaks]
 
 
 def take_register_summary(tracks, scores, fry, model=None):
@@ -361,8 +394,10 @@ def take_register_summary(tracks, scores, fry, model=None):
     breathy = counted & ~fry
     s = scores[breathy]
     summary["fry_share"] = float((counted & fry).sum() / n)
-    summary["chest_share"] = float((s < MIX_BAND[0]).sum() / n)
-    summary["head_share"] = float((s > MIX_BAND[1]).sum() / n)
+    low = np.array([mix_band(f)[0] for f in f0[breathy]])
+    high = np.array([mix_band(f)[1] for f in f0[breathy]])
+    summary["chest_share"] = float((s < low).sum() / n)
+    summary["head_share"] = float((s > high).sum() / n)
     summary["mix_share"] = 1.0 - summary["fry_share"] - summary["chest_share"] - summary["head_share"]
     summary["median_score"] = float(np.median(s)) if len(s) else float("nan")
     summary["breaks"] = find_breaks(tracks["times"], np.where(fry, np.nan, scores))

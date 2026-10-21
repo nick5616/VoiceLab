@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import analysis  # noqa: E402
+import mic_noise  # noqa: E402
 import register  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
 
@@ -149,3 +150,62 @@ def test_frame_features_and_score_are_fast_enough_for_live_use():
         model.score(register.frame_features(frame, SR, 200.0, formants, register.NOMINAL_BANDWIDTHS))
         timings.append(time.perf_counter() - start)
     assert min(timings) < 0.005   # best run, so a busy machine doesn't flake it; live tick is 25 ms
+
+
+# --- phase 9: high notes, score-swing breaks, short arrays ---
+
+def soprano(f0):
+    """Formants with F1 tuned up toward f0, as sopranos do (the singing audit's vowel)."""
+    f1 = max(750, 1.05 * f0) if f0 > 450 else 750
+    return [(f1, 90), (1150 if f0 < 800 else 1500, 110), (2700, 140), (3600, 180), (4600, 250)]
+
+
+def on_mic(voice, level=-42, seed=0):
+    return mic_noise.at_level(voice, level) + mic_noise.mic_noise(len(voice), seed)
+
+
+def test_light_phonation_at_high_pitch_is_not_called_chest():
+    for f0 in (784, 1000):
+        voice = synth_vowel(f0, soprano(f0), seconds=1.2, open_quotient=0.9)
+        for audio in (voice, on_mic(voice)):
+            tracks, scores = take(audio)
+            assert np.nanmedian(scores) > 0.5, f0
+            assert register.RegisterModel().label(np.nanmedian(scores), f0) == "head"
+
+
+def test_head_prior_starts_above_500_and_widens_the_mix_band():
+    assert register.head_prior(450.0) == 0.0 and register.head_prior(np.nan) == 0.0
+    assert register.head_prior(1000.0) > register.head_prior(600.0) > 0
+    assert register.mix_band(400.0) == register.MIX_BAND
+    low, high = register.mix_band(800.0)
+    assert low < register.MIX_BAND[0] and high > register.MIX_BAND[1]
+    model = register.RegisterModel()
+    assert model.label(0.3) == "chest" and model.label(0.3, 400.0) == "chest"
+    assert model.label(0.22, 800.0) == "mix" and model.label(0.85, 800.0) == "head"
+
+
+def test_abrupt_switch_at_330_hz_is_exactly_one_break():
+    audio = np.concatenate([synth_vowel(330, soprano(330), seconds=1.0, open_quotient=HEAVY),
+                            synth_vowel(330, soprano(330), seconds=1.0, open_quotient=0.9)])
+    for signal in (audio, on_mic(audio)):
+        tracks, scores = take(signal)
+        breaks = register.find_breaks(tracks["times"], scores)
+        assert len(breaks) == 1 and abs(breaks[0] - 1.0) < 0.2, breaks
+
+
+def test_breaks_use_score_swings_not_absolute_levels():
+    times = np.arange(200) / 100
+    step = np.where(times < 1.0, 0.14, 0.65)
+    assert len(register.find_breaks(times, step)) == 1
+    assert len(register.find_breaks(times, np.where(times < 1.0, 0.45, 0.9))) == 1      # never crosses 0.3/0.7
+    assert register.find_breaks(times, 0.14 + 0.5 * times / 2) == []                    # a slow glide is no break
+    assert register.find_breaks(times, np.where(times < 1.0, 0.4, 0.55)) == []          # small step
+    assert register.find_breaks(times[:1], step[:1]) == []
+
+
+def test_is_fry_handles_short_arrays():
+    for n in range(0, 5):
+        assert register.is_fry(np.full(n, 110.0), 100).shape == (n,)
+        assert register.is_fry(np.full(n, 110.0), 100).sum() == 0
+        assert register.is_fry(np.full(n, np.nan), 100).shape == (n,)
+    assert register.is_fry(np.array([55.0, 56.0, 57.0, 55.0]), 100).all()

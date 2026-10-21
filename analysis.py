@@ -7,11 +7,13 @@ Metric choices follow the research summary in the README:
   formant-corrected H1*-H2* (Iseli & Alwan), cepstral peak prominence and level.
 - Pitch variation is measured in semitones so it is comparable across registers.
 """
+import warnings
 from collections import deque
 
 import numpy as np
 import parselmouth
 from parselmouth.praat import call
+from scipy.ndimage import median_filter
 
 SAMPLE_RATE = 44100
 
@@ -484,14 +486,31 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
 
 # --- SINGING ---
 
-NOTE_MIN_SECONDS = 0.4
+NOTE_MIN_SECONDS = 0.15       # shortest sung note kept: a 0.25 s legato note must count
 HELD_NOTE_SECONDS = 0.6
 NOTE_CHANGE_CENTS = 80        # smoothed pitch moving this far starts a new note
+NOTE_SMOOTH_SECONDS = 0.1     # smoothing for segmentation: short enough to keep 0.25 s notes apart
+NOTE_GAP_SECONDS = 0.03       # unvoiced gaps this short don't end a note
 VIBRATO_BAND = (3.5, 9.0)     # Hz; typical vibrato rates are ~4.5-7 Hz
-MIN_VIBRATO_CENTS = 10
-TREND_SECONDS = 0.3           # averaging window separating slow drift from vibrato
+TREMOLO_BAND = (9.0, 12.0)    # Hz; faster than vibrato: a tremolo or "wobble"
+MIN_VIBRATO_CENTS = 15        # smallest +/- extent called vibrato
+MIN_VIBRATO_CYCLES = 4        # cycles needed in the note to call it
+MIN_VIBRATO_SHARE = 0.6       # share of 1.5-15 Hz power inside the vibrato (or tremolo) band
+MIN_VIBRATO_FIT = 0.4         # share of the note's variance the fitted sinusoid explains (own measurement)
+MAX_GAP_SECONDS = 0.06        # tracker dropouts up to this long are interpolated
+TREND_SECONDS = 0.3           # averaging window for slow drift once vibrato is removed
+PERCEIVED_SECONDS = 0.2       # median window for perceived pitch: at least one vibrato period
 EXERCISE_SETTLE_SECONDS = 0.15
-IN_TUNE_CENTS = 25
+IN_TUNE_CENTS = 25            # strict "in tune"
+CLOSE_CENTS = 50              # "close"; the usual note-accuracy criterion (Pfordresher & Demorest 2021)
+LAG_RANGE = (-0.2, 0.6)       # s; singer early .. late relative to the targets
+LAG_WRONG_CENTS = 200         # error charged to a missing or far-off frame when estimating lag
+LAG_TIE_CENTS = 2             # lags this close to the best are ties: the smallest |lag| wins
+LAG_ON_TIME_SECONDS = 0.03    # inside this a singer is "on time"
+MIN_SUNG_SECONDS = 0.6        # a take has singing if it holds a steady note this long
+SUNG_SPREAD_CENTS = 100       # ... whose pitch std is under this
+SUNG_MIN_HZ = 75              # ... and above desk rumble (judgment, unverified)
+INTERVAL_GAP_SECONDS = 0.5    # notes further apart than this don't form an interval
 
 
 def hz_to_midi(f0):
@@ -520,15 +539,48 @@ def _voiced_runs(f0):
     return runs
 
 
+def _fill_gaps(x, max_gap):
+    """Copy of x with NaN gaps of at most max_gap frames (not at the ends) interpolated."""
+    x = np.array(x, dtype=float)
+    for start, end in _voiced_runs(np.where(np.isnan(x), 0.0, np.nan)):
+        if 0 < start and end < len(x) and end - start <= max_gap:
+            x[start:end] = np.interp(np.arange(start, end), [start - 1, end], [x[start - 1], x[end]])
+    return x
+
+
+def perceived_cents(cents_window):
+    """Perceived pitch of a short window of pitch values (cents): their median, which follows the
+    vibrato mean rather than each swing (NaN if fewer than 3 are voiced). The live UI keeps about
+    PERCEIVED_SECONDS of frames and colours by this, not by the raw f0."""
+    values = np.asarray(cents_window, dtype=float)
+    values = values[~np.isnan(values)]
+    return float(np.median(values)) if len(values) >= 3 else np.nan
+
+
+def perceived_track(cents, frame_rate, seconds=PERCEIVED_SECONDS):
+    """perceived_cents at every frame, over a centred window (shorter at the edges)."""
+    cents = np.asarray(cents, dtype=float)
+    half = max(1, int(round(seconds * frame_rate / 2)))
+    padded = np.pad(cents, half, constant_values=np.nan)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+    enough = (~np.isnan(windows)).sum(axis=1) >= 3
+    out = np.full(len(cents), np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out[enough] = np.nanmedian(windows[enough], axis=1)
+    return out
+
+
 def segment_notes(f0, frame_rate, min_seconds=NOTE_MIN_SECONDS):
     """(start, end) frame ranges of sung notes: voiced runs, split wherever the
     smoothed pitch moves more than NOTE_CHANGE_CENTS from the note so far.
-    The ~0.2 s smoothing averages vibrato away so it doesn't split notes."""
+    A short median and average smooth tracker glitches and most of the vibrato."""
     notes = []
     min_frames = min_seconds * frame_rate
-    for run_start, run_end in _voiced_runs(f0):
-        cents = 100 * hz_to_midi(f0[run_start:run_end])
-        smooth = _moving_average(cents, 0.2 * frame_rate)
+    cents = _fill_gaps(100 * hz_to_midi(f0), NOTE_GAP_SECONDS * frame_rate)
+    for run_start, run_end in _voiced_runs(cents):
+        run = median_filter(cents[run_start:run_end], size=5, mode="nearest")
+        smooth = _moving_average(run, NOTE_SMOOTH_SECONDS * frame_rate)
         start, total = 0, smooth[0]
         for i in range(1, len(smooth)):
             if abs(smooth[i] - total / (i - start)) > NOTE_CHANGE_CENTS:
@@ -541,56 +593,117 @@ def segment_notes(f0, frame_rate, min_seconds=NOTE_MIN_SECONDS):
     return notes
 
 
+def _sinusoid_fit(t, y, freq):
+    """Least-squares mean + linear drift + sinusoid at freq: (amplitude, fitted sinusoid, residual)."""
+    basis = np.column_stack([np.ones_like(t), t, np.sin(2 * np.pi * freq * t), np.cos(2 * np.pi * freq * t)])
+    coef = np.linalg.lstsq(basis, y, rcond=None)[0]
+    wave = basis[:, 2:] @ coef[2:]
+    return float(np.hypot(coef[2], coef[3])), wave, y - basis @ coef
+
+
+def _drift(y, frame_rate):
+    """Std of the slow trend of y (cents), the part left after a TREND_SECONDS average."""
+    trend = _moving_average(y, TREND_SECONDS * frame_rate)
+    trim = int(TREND_SECONDS * frame_rate / 2)
+    trend = trend[trim:len(y) - trim]
+    return float(np.std(trend)) if len(trend) else np.nan
+
+
 def vibrato_stats(cents, frame_rate):
     """Vibrato in a held note's pitch (in cents): rate (Hz), extent (+/- cents),
-    regularity (cycle-length variation, lower = steadier) and drift (slow
-    wandering, std in cents). Vibrato fields are None when there is none."""
-    trend = _moving_average(cents, TREND_SECONDS * frame_rate)
-    trim = int(TREND_SECONDS * frame_rate / 2)
-    detrended = (cents - trend)[trim:len(cents) - trim]
-    trend = trend[trim:len(cents) - trim]
-    result = {"rate": None, "extent": None, "regularity": None,
-              "drift": float(np.std(trend)) if len(trend) else np.nan}
-    if len(detrended) < frame_rate * 0.5:
+    regularity (cycle-length variation, lower = steadier), drift (slow wandering,
+    std in cents) and tremolo (rate in Hz of a 9-12 Hz wobble, else None).
+    Rate is the zero-padded FFT peak in 3.5-9 Hz; extent is a least-squares sinusoid fit with
+    mean and linear drift. It needs >= 4 cycles, extent >= 15 cents and most of the pitch
+    movement in the band. Short tracker dropouts are interpolated. Vibrato fields are None
+    when there is none."""
+    result = {"rate": None, "extent": None, "regularity": None, "drift": np.nan, "tremolo": None}
+    y = _fill_gaps(cents, MAX_GAP_SECONDS * frame_rate)
+    runs = _voiced_runs(y)
+    if not runs:
         return result
+    a, b = max(runs, key=lambda r: r[1] - r[0])        # longest unbroken stretch
+    y = y[a:b]
+    n = len(y)
+    if n < frame_rate * 0.5:
+        return result
+    t = np.arange(n) / frame_rate
+    detrended = y - np.polyval(np.polyfit(t, y, 1), t)
+    result["drift"] = _drift(y, frame_rate)
 
-    nfft = 4096
-    spec = np.abs(np.fft.rfft(detrended * np.hanning(len(detrended)), nfft)) ** 2
+    nfft = 1 << int(np.ceil(np.log2(n * 16)))
+    spec = np.abs(np.fft.rfft(detrended * np.hanning(n), nfft)) ** 2
     freqs = np.fft.rfftfreq(nfft, 1 / frame_rate)
-    band = (freqs >= VIBRATO_BAND[0]) & (freqs <= VIBRATO_BAND[1])
-    in_band = spec[band].sum() / (spec[freqs >= 1.0].sum() + 1e-12)
-    extent = float(np.sqrt(2) * np.std(detrended))   # amplitude of a sinusoid
-    if in_band < 0.5 or extent < MIN_VIBRATO_CENTS:
+    search = np.flatnonzero((freqs >= VIBRATO_BAND[0]) & (freqs <= TREMOLO_BAND[1]))
+    peak = search[np.argmax(spec[search])]
+    rate = freqs[peak]
+    if search[0] < peak < search[-1]:                  # parabolic interpolation on the log spectrum
+        left, mid, right = np.log(spec[peak - 1:peak + 2] + 1e-12)
+        denom = left - 2 * mid + right
+        if denom < 0:
+            rate += 0.5 * (left - right) / denom * (freqs[1] - freqs[0])
+    # Refine on the fit itself: the FFT bin is coarse for a note of only a few cycles.
+    trial = rate + np.linspace(-0.3, 0.3, 25)
+    rate = float(trial[np.argmin([np.sum(_sinusoid_fit(t, y, f)[2] ** 2) for f in trial])])
+    extent, wave, residual = _sinusoid_fit(t, y, rate)
+
+    tremolo = rate > VIBRATO_BAND[1]
+    lo, hi = TREMOLO_BAND if tremolo else VIBRATO_BAND
+    whole = (freqs >= 1.5) & (freqs <= min(15.0, frame_rate / 2))
+    share = spec[(freqs >= lo) & (freqs <= hi)].sum() / (spec[whole].sum() + 1e-12)
+    fit = 1 - np.sum(residual ** 2) / (np.sum(detrended ** 2) + 1e-12)
+    if (rate * n / frame_rate < MIN_VIBRATO_CYCLES or extent < MIN_VIBRATO_CENTS
+            or share < MIN_VIBRATO_SHARE or fit < MIN_VIBRATO_FIT):
+        return result
+    result["drift"] = _drift(y - wave, frame_rate)
+    if tremolo:
+        result["tremolo"] = rate
         return result
 
-    # Upward zero crossings give individual cycle lengths.
-    s = detrended
+    # Cycle lengths from upward zero crossings of the band-passed contour.
+    spectrum = np.fft.rfft(detrended)
+    f = np.fft.rfftfreq(n, 1 / frame_rate)
+    spectrum[(f < 0.6 * rate) | (f > 1.6 * rate)] = 0
+    s = np.fft.irfft(spectrum, n)
     idx = np.flatnonzero((s[:-1] < 0) & (s[1:] >= 0))
     crossings = idx + s[idx] / (s[idx] - s[idx + 1])
     periods = np.diff(crossings) / frame_rate
-    if len(periods) >= 2:
-        rate = 1 / np.mean(periods)
-        regularity = float(np.std(periods) / np.mean(periods))
-    else:
-        rate, regularity = freqs[band][np.argmax(spec[band])], None
-    result.update(rate=float(rate), extent=extent, regularity=regularity)
+    regularity = float(np.std(periods) / np.mean(periods)) if len(periods) >= 2 else None
+    result.update(rate=rate, extent=extent, regularity=regularity)
     return result
 
 
+def _wrap_cents(x):
+    """Fold cents into [-50, 50): the offset from the nearest semitone."""
+    return (np.asarray(x, dtype=float) + 50) % 100 - 50
+
+
+def _has_singing(f0, notes, frame_rate):
+    """True if some note is a steady pitch held MIN_SUNG_SECONDS above the rumble range."""
+    for a, b in notes:
+        if (b - a) / frame_rate < MIN_SUNG_SECONDS:
+            continue
+        if np.nanmedian(f0[a:b]) >= SUNG_MIN_HZ and np.nanstd(100 * hz_to_midi(f0[a:b])) < SUNG_SPREAD_CENTS:
+            return True
+    return False
+
+
 def singing_stats(times, f0):
-    """Summary of sung notes in a take: note count, vibrato on held notes,
-    sustain drift and tuning relative to A440 equal temperament."""
+    """Summary of sung notes in a take, or None when it holds no sung material (a steady note
+    of 0.6 s): note count, vibrato and tremolo on held notes, sustain drift and tuning judged
+    from the singer's own tonic: tonic_offset (signed, vs A440), tuning_spread (how far notes
+    sit from that tonic) and interval_error (consecutive notes vs equal-tempered steps)."""
+    times, f0 = np.asarray(times, dtype=float), np.asarray(f0, dtype=float)
     if len(times) < 2:
         return None
-    frame_rate = 1 / (times[1] - times[0])
+    frame_rate = 1 / float(np.median(np.diff(times)))
     notes = segment_notes(f0, frame_rate)
-    if not notes:
+    if not notes or not _has_singing(f0, notes, frame_rate):
         return None
-    offsets, held = [], []
+    midis, held = [], []
     for a, b in notes:
         midi = hz_to_midi(f0[a:b])
-        median = np.median(midi)
-        offsets.append(100 * (median - np.round(median)))
+        midis.append(float(np.nanmedian(midi)))
         if (b - a) / frame_rate >= HELD_NOTE_SECONDS:
             held.append(vibrato_stats(100 * midi, frame_rate))
 
@@ -598,43 +711,108 @@ def singing_stats(times, f0):
         values = [h[key] for h in held if h[key] is not None and not np.isnan(h[key])]
         return float(np.median(values)) if values else None
 
+    offsets = 100 * (np.array(midis) - np.round(midis))
+    angle = 2 * np.pi * offsets / 100                  # offsets repeat every semitone
+    tonic = np.degrees(np.arctan2(np.sin(angle).mean(), np.cos(angle).mean())) / 360 * 100
+    tonic += float(np.median(_wrap_cents(offsets - tonic)))
+    tonic = float(_wrap_cents(tonic))
+    spread = float(np.median(np.abs(_wrap_cents(offsets - tonic))))
+    errors = [abs(float(_wrap_cents(100 * (midis[i + 1] - midis[i]))))
+              for i in range(len(notes) - 1)
+              if (notes[i + 1][0] - notes[i][1]) / frame_rate <= INTERVAL_GAP_SECONDS]
     return {
         "notes": len(notes),
         "held_notes": len(held),
         "vibrato_notes": sum(h["rate"] is not None for h in held),
+        "tremolo_notes": sum(h["tremolo"] is not None for h in held),
         "vibrato_rate": median_of("rate"),
         "vibrato_extent": median_of("extent"),
         "vibrato_regularity": median_of("regularity"),
         "drift": median_of("drift"),
-        "tuning_offset": float(np.median(np.abs(offsets))),
+        "tonic_offset": tonic,
+        "tuning_spread": spread,
+        "tuning_offset": spread,           # old key, now the spread about the singer's own tonic
+        "interval_error": float(np.median(errors)) if errors else None,
     }
 
 
-def score_exercise(times, f0, targets):
+def estimate_lag(times, f0, targets):
+    """Seconds the singer is late (negative: early) against the targets [(start_s, duration_s, midi)],
+    one value for the whole run: the lag in LAG_RANGE where perceived pitch best matches the target
+    contour (octave-folded, missing frames charged LAG_WRONG_CENTS). 0 when too little is sung."""
+    times, f0 = np.asarray(times, dtype=float), np.asarray(f0, dtype=float)
+    if len(times) < 2 or not targets or (~np.isnan(f0)).sum() < 10:
+        return 0.0
+    step = float(np.median(np.diff(times)))
+    sung = perceived_track(100 * hz_to_midi(f0), 1 / step)
+    grid = np.arange(min(s for s, _, _ in targets), max(s + d for s, d, _ in targets), step)
+    wanted = np.full(len(grid), np.nan)
+    for start, duration, midi in targets:
+        wanted[(grid >= start) & (grid < start + duration)] = 100 * midi
+    scored = ~np.isnan(wanted)
+    if not scored.any():
+        return 0.0
+    lags = np.arange(LAG_RANGE[0], LAG_RANGE[1] + step / 2, step)
+    errors = []
+    for lag in lags:
+        idx = np.round((grid + lag - times[0]) / step).astype(int)
+        inside = (idx >= 0) & (idx < len(times))
+        diff = np.full(len(grid), np.nan)
+        diff[inside] = sung[idx[inside]] - wanted[inside]
+        diff = np.abs(diff - 1200 * np.round(diff / 1200))
+        errors.append(np.where(np.isnan(diff), LAG_WRONG_CENTS, np.minimum(diff, LAG_WRONG_CENTS))[scored].mean())
+    errors = np.array(errors)
+    ties = np.flatnonzero(errors <= errors.min() + LAG_TIE_CENTS)
+    return float(lags[ties[np.argmin(np.abs(lags[ties]))]])
+
+
+def timing_text(lag):
+    """"timing: 120 ms late" for a lag in seconds (negative = early)."""
+    if abs(lag) < LAG_ON_TIME_SECONDS:
+        return "timing: on time"
+    return f"timing: {abs(lag) * 1000:.0f} ms {'late' if lag > 0 else 'early'}"
+
+
+def score_exercise(times, f0, targets, lag=None):
     """Score a take against target notes [(start_s, duration_s, midi), ...].
 
-    Each note is judged after a short settle time. Errors are folded to the
-    nearest octave, so singing the melody an octave down still scores."""
+    One global lag (estimate_lag unless given) shifts the targets onto the singing first, so a
+    steady 0.4 s lateness isn't charged as wrong notes. Each note is then judged after a short
+    settle time on perceived pitch (median over PERCEIVED_SECONDS), so vibrato around the
+    note counts as in tune: `in_tune` is the share within +/-25 cents, `close` within +/-50.
+    Errors are folded to the nearest octave, so singing the melody an octave down still scores."""
+    times, f0 = np.asarray(times, dtype=float), np.asarray(f0, dtype=float)
+    if lag is None:
+        lag = estimate_lag(times, f0, targets)
+    frame_rate = 1 / float(np.median(np.diff(times))) if len(times) > 1 else 100.0
     notes = []
     for start, duration, midi in targets:
-        window = ((times >= start + EXERCISE_SETTLE_SECONDS) & (times < start + duration)
-                  & ~np.isnan(f0))
-        if window.sum() < 3:
-            notes.append({"midi": int(midi), "cents": None, "in_tune": 0.0, "octave": 0})
-            continue
+        settle = min(EXERCISE_SETTLE_SECONDS, 0.3 * duration)
+        window = ((times >= start + lag + settle) & (times < start + lag + duration))
         cents = 100 * (hz_to_midi(f0[window]) - midi)
-        octave = int(np.round(np.median(cents) / 1200))
+        if (~np.isnan(cents)).sum() < 3:
+            notes.append({"midi": int(midi), "cents": None, "in_tune": 0.0, "close": 0.0, "octave": 0})
+            continue
+        octave = int(np.round(np.nanmedian(cents) / 1200))
         cents = cents - 1200 * octave
-        notes.append({"midi": int(midi), "cents": float(np.median(cents)), "octave": octave,
-                      "in_tune": float(np.mean(np.abs(cents) <= IN_TUNE_CENTS))})
+        felt = perceived_track(cents, frame_rate)[~np.isnan(cents)]
+        notes.append({"midi": int(midi), "cents": float(np.nanmedian(cents)), "octave": octave,
+                      "in_tune": float(np.mean(np.abs(felt) <= IN_TUNE_CENTS)),
+                      "close": float(np.mean(np.abs(felt) <= CLOSE_CENTS))})
     sung = [n for n in notes if n["cents"] is not None]
     return {
         "notes": notes,
         "notes_total": len(notes),
         "notes_sung": len(sung),
         "notes_in_tune": sum(abs(n["cents"]) <= IN_TUNE_CENTS for n in sung),
+        "notes_close": sum(abs(n["cents"]) <= CLOSE_CENTS for n in sung),
         "mean_abs_cents": float(np.mean([abs(n["cents"]) for n in sung])) if sung else None,
         "time_in_tune": float(np.mean([n["in_tune"] for n in notes])) if notes else None,
+        "time_close": float(np.mean([n["close"] for n in notes])) if notes else None,
+        "mean_signed_cents": float(np.median([n["cents"] for n in sung])) if sung else None,   # negative = flat
+        "lag": float(lag),
+        "lag_ms": float(lag) * 1000,        # positive = late
+        "timing": timing_text(lag),
     }
 
 
