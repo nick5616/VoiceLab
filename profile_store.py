@@ -12,10 +12,26 @@ from pathlib import Path
 import numpy as np
 
 TARGET_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "register"]
-# Half-width of a target created from a take. Pitch is in semitones, the rest
-# in each metric's own units.
-DEFAULT_TOLERANCES = {"pitch": 1.5, "delta_f": 30, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2,
+# Smallest half-width of a target created from a take. Pitch is in semitones, the rest
+# in each metric's own units. Frame-level spreads in real takes are far wider than the old
+# +/-30 Hz and +/-1.5 st (phase 9 audit: 16-36% and 2-42% of frames inside), so deltaF is
+# +/-100 Hz (frame IQR is 70-180 Hz) and pitch +/-2 st.
+DEFAULT_TOLERANCES = {"pitch": 2, "delta_f": 100, "h1h2": 3, "cpp": 3, "ring": 3, "pitch_range": 2,
                        "register": 15}     # register target = head share of voiced time, in %
+# Widest half-width taken from a take's own frame spread: beyond this a "target" says nothing.
+MAX_TOLERANCES = {"pitch": 4, "delta_f": 200, "h1h2": 6, "cpp": 5}   # own judgement
+SPREAD_PERCENTILES = (15, 85)   # central 70% of frames: a take scores ~70% against itself
+MIN_SPREAD_FRAMES = 20          # 0.2 s of measured frames
+# result["tracks"] entry holding the per-frame values of each target metric.
+TARGET_TRACKS = {"pitch": "f0", "delta_f": "delta_f", "h1h2": "h1h2", "cpp": "cpp"}
+# Typical cis-female speech, as a starting point only (the dialog labels it so). f0 and deltaF
+# ranges are from memory of Hillenbrand et al. 1995 (women's mean f0 about 220 Hz), Gelfer & Bennett
+# 2013 and Leung, Oates & Chan 2018 (f0 about 40% of the variance in perceived gender);
+# deltaF 1100+ Hz follows from a ~14.5 cm tract (c / 2L = 1200 Hz). All UNVERIFIED figures.
+TARGET_PRESETS = {
+    "speak": {"label": "Typical cis-female speech - yours may differ",
+              "targets": {"pitch": [165.0, 255.0], "delta_f": [1100.0, 1300.0]}},
+}
 SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
                               "snr", "snr_full", "clip_events", "source", "mode", "uid", "cq"]
 # Scalar parts of a take's exercise score worth tracking over time.
@@ -65,10 +81,27 @@ def _percent(share):
     return None if share is None else 100 * share
 
 
-def target_from_value(key, value):
+def frame_tolerance(key, frames):
+    """Half-width from the spread of a take's frames (central 70%, pitch in semitones), at least
+    the floor and at most MAX_TOLERANCES. None without enough frames or for untracked metrics."""
+    if frames is None or key not in MAX_TOLERANCES:
+        return None
+    x = np.asarray(frames, dtype=float)
+    x = x[~np.isnan(x)]
+    if key == "pitch":
+        x = 12 * np.log2(x[x > 0])
+    if len(x) < MIN_SPREAD_FRAMES:
+        return None
+    low, high = np.percentile(x, SPREAD_PERCENTILES)
+    return float(min(max((high - low) / 2, DEFAULT_TOLERANCES[key]), MAX_TOLERANCES[key]))
+
+
+def target_from_value(key, value, frames=None):
+    """[low, high] around `value`; half-width from `frames` (the take's per-frame values) when
+    given, otherwise the floor in DEFAULT_TOLERANCES."""
     if value is None:
         return None
-    tol = DEFAULT_TOLERANCES[key]
+    tol = frame_tolerance(key, frames) or DEFAULT_TOLERANCES[key]
     if key == "pitch":
         return [value * 2 ** (-tol / 12), value * 2 ** (tol / 12)]
     if key == "register":
@@ -76,6 +109,40 @@ def target_from_value(key, value):
     if key in NONNEGATIVE_KEYS:
         return [max(0.0, value - tol), value + tol]
     return [value - tol, value + tol]
+
+
+def _inside(target, values):
+    return (values >= target[0]) & (values <= target[1])
+
+
+def joint_in_target(targets, pitch, delta_f):
+    """True only when pitch AND resonance are both on target, so a readout goes green for
+    neither alone. False when either is off, None when nothing can be judged (no target set,
+    or a needed value is missing: unknown is not on target). A metric with no target is skipped."""
+    verdicts = []
+    for key, value in (("pitch", pitch), ("delta_f", delta_f)):
+        target = targets.get(key)
+        if target is None:
+            continue
+        if value is None or np.isnan(value):
+            return None if all(verdicts) else False
+        verdicts.append(bool(target[0] <= value <= target[1]))
+    return all(verdicts) if verdicts else None
+
+
+def joint_time_in_target(targets, f0_track, delta_f_track):
+    """Fraction of frames where both measured values are inside their targets. Only frames with
+    every needed value count; None if there is no target or no such frame."""
+    keyed = [(targets.get(k), np.asarray(t, dtype=float))
+             for k, t in (("pitch", f0_track), ("delta_f", delta_f_track)) if targets.get(k)]
+    if not keyed:
+        return None
+    ok = np.ones(len(keyed[0][1]), dtype=bool)
+    hit = np.ones(len(ok), dtype=bool)
+    for target, values in keyed:
+        ok &= ~np.isnan(values)
+        hit &= _inside(target, values)
+    return float(np.mean(hit[ok])) if ok.any() else None
 
 
 class Profile:
@@ -170,9 +237,10 @@ class Profile:
 
     def set_targets_from_take(self, result):
         summary = summarize(result)
+        tracks = result.get("tracks") or {}
         self.targets = {}
         for key in TARGET_KEYS:
-            target = target_from_value(key, summary[key])
+            target = target_from_value(key, summary[key], tracks.get(TARGET_TRACKS.get(key)))
             if target is not None:
                 self.targets[key] = target
         self.save()
@@ -192,6 +260,20 @@ class Profile:
         if target is None or len(values) == 0:
             return None
         return float(np.mean((values >= target[0]) & (values <= target[1])))
+
+    def set_targets_from_preset(self, name="speak"):
+        """Start from a TARGET_PRESETS entry (replaces pitch and deltaF targets only)."""
+        for key, target in TARGET_PRESETS[name]["targets"].items():
+            self.targets[key] = list(target)
+        self.save()
+
+    def in_both(self, pitch, delta_f):
+        """Joint pitch-and-resonance verdict, see joint_in_target."""
+        return joint_in_target(self.targets, pitch, delta_f)
+
+    def time_in_both(self, f0_track, delta_f_track):
+        """Fraction of frames with pitch and resonance both on target, or None."""
+        return joint_time_in_target(self.targets, f0_track, delta_f_track)
 
     # --- VOWEL CHECK ---
 
