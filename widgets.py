@@ -3,7 +3,23 @@
 Charts don't need wheel handling: with zoom and pan off, pyqtgraph passes the
 wheel on to the scrolling page."""
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QGridLayout, QSlider, QWidget
+from PyQt6.QtGui import QPainter
+from PyQt6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QSlider, QWidget
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that shows "..." where its text doesn't fit, instead of cutting it off or
+    widening its parent. Keep the full text in the tooltip."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width())
+        painter.setPen(self.palette().windowText().color())
+        painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
 
 
 class PageSlider(QSlider):

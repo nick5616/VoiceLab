@@ -96,7 +96,7 @@ def test_live_meters(make_window):
     live = window.live_panel
     assert "Hz" in live.meters["delta_f"].title.text()
     assert "dB" in live.meters["cpp"].title.text()
-    assert live.snr_badge.text().startswith("SNR ") and live.snr_badge.text() != "SNR —"
+    assert live.noise_badge.text() != "SNR —"                  # the badge has read the pauses
     assert live.clip_badge.isHidden()
     play(window, np.clip(VOICE * 4, -1, 1)[:int(0.3 * SR)])
     assert not live.clip_badge.isHidden()

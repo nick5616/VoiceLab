@@ -14,6 +14,7 @@ from analysis import SAMPLE_RATE, FrameAnalyzer, analyze_take
 UPDATE_INTERVAL = 0.025   # live meter refresh (s)
 BLOCK_SIZE = 512          # frames per callback at the app rate; scaled for the device's native rate
 WASAPI = "Windows WASAPI"  # preferred host API: native rate, 3-10 ms latency (MME: 90 ms, audit)
+HISTORY_SECONDS = 6       # recent audio kept for the noise badge (a few seconds of pauses and voice)
 RESAMPLER_GUARD = 16      # input samples kept either side of an output sample (filter half-width is about 11)
 
 
@@ -73,6 +74,9 @@ class LiveEngine(QObject):
         self.sample_rate = sample_rate
         self.analyzer = FrameAnalyzer(sample_rate, UPDATE_INTERVAL)
         self._ring = np.zeros(int(sample_rate * FrameAnalyzer.WINDOW_SECONDS))
+        self._history = np.zeros(int(sample_rate * HISTORY_SECONDS))   # circular, written at _history_pos
+        self._history_pos = 0
+        self._history_filled = 0
         self._lock = threading.Lock()
         self._take = None
         self._ring_egg = None       # allocated when an EGG is configured or fed
@@ -85,19 +89,31 @@ class LiveEngine(QObject):
         self._worker = _LiveWorker(self)
         self._worker.frame_ready.connect(self.frame_ready)
 
-    def start(self, device=None):
+    def start(self, device=None, noise_floor=None):
         """Open the mic (device index, or None for the system default) and
         start the live analysis. The analysis starts even if the mic fails, so
         picking another device later brings the meters to life."""
         self._worker.start()
-        self.open_stream(device)
+        self.open_stream(device, noise_floor=noise_floor)
 
-    def open_stream(self, device=None, egg_channel=None):
+    def set_mode(self, mode):
+        """Tell the pitch tracker whether this is speech or singing ("speak" or "sing")."""
+        self.analyzer.mode = mode
+
+    def noise_floor(self):
+        """The live analyzer's voice-band noise floor (dBFS), or None until a pause was heard.
+        Save it and pass it back to open_stream next session."""
+        return self.analyzer.noise_floor
+
+    def open_stream(self, device=None, egg_channel=None, noise_floor=None):
         """(Re)open the input stream, e.g. after choosing another mic.
         With egg_channel 0 or 1 the stream has two channels: that one carries the
-        EGG, the other the mic. Failing to open it raises (no silent mono fallback)."""
+        EGG, the other the mic. Failing to open it raises (no silent mono fallback).
+        `noise_floor` (dBFS) seeds the analyzer's floor, e.g. from the last session."""
         if egg_channel not in (None, 0, 1):
             raise ValueError("egg_channel must be None, 0 or 1")
+        if noise_floor is not None:
+            self.analyzer.noise_floor = float(noise_floor)
         self._close_stream()
         self.egg_channel = None
         with self._lock:
@@ -172,6 +188,7 @@ class LiveEngine(QObject):
             n = min(len(samples), len(self._ring))
             self._ring = np.roll(self._ring, -n)
             self._ring[-n:] = samples[-n:]
+            self._append_history(samples[-n:])
             if egg is not None:
                 if self._ring_egg is None:
                     self._ring_egg = np.zeros(len(self._ring))
@@ -182,6 +199,22 @@ class LiveEngine(QObject):
                 self._take.append(samples.copy())
                 if egg is not None:
                     self._take_egg.append(egg.copy())
+
+    def _append_history(self, samples):
+        """Add samples to the circular history (the caller holds the lock)."""
+        size = len(self._history)
+        first = min(len(samples), size - self._history_pos)
+        self._history[self._history_pos:self._history_pos + first] = samples[:first]
+        self._history[:len(samples) - first] = samples[first:]
+        self._history_pos = (self._history_pos + len(samples)) % size
+        self._history_filled = min(size, self._history_filled + len(samples))
+
+    def recent_audio(self, seconds=HISTORY_SECONDS):
+        """The last `seconds` of mic audio (at most HISTORY_SECONDS; less just after start), oldest first."""
+        with self._lock:
+            count = min(self._history_filled, int(seconds * self.sample_rate))
+            ordered = np.roll(self._history, -self._history_pos)
+            return ordered[len(ordered) - count:].copy()
 
     def latest_window(self):
         with self._lock:
