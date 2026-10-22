@@ -19,7 +19,7 @@ LIGHT, HEAVY = 0.8, 0.35
 
 
 def take(audio):
-    result = analysis.analyze_take(audio)
+    result = analysis.analyze_take(audio, mode="sing")   # register is a singing measure
     return result["tracks"], register.register_track(audio, SR, result["tracks"])
 
 

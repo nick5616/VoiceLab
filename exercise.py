@@ -119,7 +119,7 @@ def analyze_exercise_take(audio, targets, name, latency=0.0):
     """analyze_take plus the exercise score. `latency` is the guide's output latency: the guide
     sounded that much after the recording started, so the singer is scored against the targets
     shifted by it (the reported timing is then reaction time, not device lag)."""
-    result = analyze_take(audio)
+    result = analyze_take(audio, mode="sing")
     if "error" not in result:
         times, f0 = result["tracks"]["times"], result["tracks"]["f0"]
         heard = [(s + latency, d, m) for s, d, m in targets]
