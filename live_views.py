@@ -14,7 +14,8 @@ from engine import UPDATE_INTERVAL
 HISTORY_SECONDS = 8
 HISTORY_LEN = int(HISTORY_SECONDS / UPDATE_INTERVAL)
 HISTORY_TIMES = np.linspace(-HISTORY_SECONDS, 0, HISTORY_LEN)
-MIN_PITCH, MAX_PITCH = 60, 1200
+MIN_PITCH, MAX_PITCH = 60, 1500
+SPEECH_PITCH_LIMITS = (70, 500)   # Hz; the speech tracker's range (spec 01: floor 75, ceiling 500)
 BACKGROUND = "#1e1e1e"
 
 FORMANT_COLORS = ("#2ecc71", "#f1c40f", "#e74c3c", "#ecf0f1")  # F1-F4
@@ -93,6 +94,12 @@ class PitchView(pg.PlotWidget):
         self.baseline_line.hide()
         self.addItem(self.baseline_line)
         self.reference_hz = []
+        self.limits = (MIN_PITCH, MAX_PITCH)
+
+    def set_mode(self, mode):
+        """Speech keeps the axis inside 70-500 Hz (above it is overtones or noise), singing uses the full range."""
+        self.limits = SPEECH_PITCH_LIMITS if mode == "speak" else (MIN_PITCH, MAX_PITCH)
+        self._follow_pitch()
 
     def set_reference(self, baseline_hz, target_hz):
         """Show the baseline pitch and target pitch range (Hz); None hides them."""
@@ -123,7 +130,7 @@ class PitchView(pg.PlotWidget):
             lo, hi = min(lo, *self.reference_hz), max(hi, *self.reference_hz)
         center = np.sqrt(lo * hi)
         span = max(hi / lo, 2.0) * 1.3
-        lo, hi = max(MIN_PITCH, center / np.sqrt(span)), min(MAX_PITCH, center * np.sqrt(span))
+        lo, hi = max(self.limits[0], center / np.sqrt(span)), min(self.limits[1], center * np.sqrt(span))
         self.setYRange(np.log2(lo), np.log2(hi), padding=0)
         self.getAxis("left").setTicks(note_ticks(lo, hi))
 
