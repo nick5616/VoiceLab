@@ -77,13 +77,14 @@ def semitone_std(f0_values):
 
 
 def pitch_range_st(f0_values, min_voiced=20):
-    """Intonation range: 5th-95th percentile pitch spread in semitones.
-    Percentiles keep a single octave error or creak from inflating it."""
+    """Intonation range: 10th-90th percentile pitch spread in semitones of the
+    gated track. Percentiles keep a stray octave error or creak from inflating
+    it; real speech spans 4-28 st this way (audit), ghosts made it 44-49."""
     f0 = np.asarray(f0_values, dtype=float)
     f0 = f0[~np.isnan(f0)]
     if len(f0) < min_voiced:
         return np.nan
-    lo, hi = np.percentile(f0, [5, 95])
+    lo, hi = np.percentile(f0, [10, 90])
     return float(12 * np.log2(hi / lo))
 
 
@@ -270,16 +271,42 @@ class NoiseMonitor:
 
 # --- PRAAT WRAPPERS ---
 
-def pitch_track(sound, time_step=0.01):
-    # Track pitch on the voice band only: high-pitched hiss otherwise weakens the
+# Per-mode tracker settings. Measured against a harvest + CREPE consensus on the
+# user's real speech takes (2169 reference frames, 3390 silent): floor 75 /
+# ceiling 500 / octave cost 0.1 halves 2.6% of frames and reads 0.2% of silence
+# as voiced, against 21.2% and 15.7% for 60 / 1200. Sing mode has no real-take
+# reference; its ceiling covers soprano notes above 1200 Hz that used to read an
+# octave low, and its higher octave cost resists sub-octave jumps on breathy lows.
+PITCH_MODES = {
+    "speak": {"floor": 75, "ceiling": 500, "octave_cost": 0.1, "voicing": 0.45},
+    "sing": {"floor": 60, "ceiling": 1500, "octave_cost": 0.12, "voicing": 0.45},
+}
+# Lower edge of the tracking band. Own measurement on the 7 real takes: 70 Hz
+# agrees with the harvest + CREPE consensus on 93.7% of frames vs 93.0% with none,
+# and halving on breathy synthetic voices is 0% either way.
+PITCH_HIGHPASS_HZ = 70
+
+
+def _praat_pitch(sound, time_step, mode):
+    """(times, f0 with NaN unvoiced, autocorrelation strength) from Praat."""
+    cfg = PITCH_MODES[mode]
+    # Track on the voice band only: high-pitched hiss otherwise weakens the
     # periodicity Praat sees, so voiced frames get marked unvoiced (in tests, up
     # to 85% of them), and it also cuts octave-jump spikes.
-    voice_band = call(sound, "Filter (pass Hann band)...", 0, VOICE_BAND_HZ, 100)
-    pitch = voice_band.to_pitch_ac(time_step=time_step, pitch_floor=PITCH_FLOOR,
-                                   pitch_ceiling=PITCH_CEILING)
+    voice_band = call(sound, "Filter (pass Hann band)...", PITCH_HIGHPASS_HZ, VOICE_BAND_HZ, 100)
+    pitch = voice_band.to_pitch_ac(time_step=time_step, pitch_floor=cfg["floor"],
+                                   pitch_ceiling=cfg["ceiling"], voicing_threshold=cfg["voicing"],
+                                   octave_cost=cfg["octave_cost"])
     f0 = pitch.selected_array["frequency"].astype(float)
+    strength = pitch.selected_array["strength"].astype(float)
     f0[f0 == 0] = np.nan
-    return pitch.xs(), f0
+    return pitch.xs(), f0, strength
+
+
+def pitch_track(sound, time_step=0.01, mode="speak"):
+    """(times, f0) with NaN where unvoiced; ungated, see `gated_pitch` for takes."""
+    times, f0, _ = _praat_pitch(sound, time_step, mode)
+    return times, f0
 
 
 def formant_values(formant_obj, times):
@@ -335,36 +362,134 @@ def choose_formant_ceiling(segments):
     return best
 
 
+# --- OFFLINE PITCH ---
+
+GATE_STRENGTH = 0.6           # Praat strength: ghosts 0.57-0.71 vs voice 0.85-0.9 (audit)
+GATE_MARGIN_DB = VOICE_MARGIN_DB   # voice-band level over the take's quietest-decile level
+GATE_MIN_RUN = 5              # frames (50 ms); shorter voiced runs are noise
+MEDIAN_FRAMES = 5             # f0 median within a run
+HARVEST_RATE = 16000          # harvest runs on a decimated copy: ~3x faster, same f0
+OCTAVE_WINDOW_ST = 1.5        # Praat vs harvest closer than this to 12 st count as an octave error
+
+
+def _runs(mask):
+    """(start, stop) of each run of True values."""
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], np.asarray(mask, dtype=int), [0]])))
+    return list(zip(edges[::2], edges[1::2]))
+
+
+def _harvest_f0(audio, sample_rate, times, mode):
+    """WORLD harvest f0 interpolated onto `times`; NaN where harvest is unvoiced."""
+    import pyworld as pw
+    from scipy.signal import resample_poly
+    cfg = PITCH_MODES[mode]
+    x = resample_poly(audio, HARVEST_RATE, sample_rate) if sample_rate != HARVEST_RATE else audio
+    x = np.ascontiguousarray(x, dtype=np.float64)
+    f0, t = pw.harvest(x, HARVEST_RATE, f0_floor=cfg["floor"], f0_ceil=cfg["ceiling"], frame_period=10.0)
+    f0[f0 == 0] = np.nan
+    return np.interp(times, t, f0, left=np.nan, right=np.nan)
+
+
+def gated_pitch(audio, sample_rate=SAMPLE_RATE, mode="speak"):
+    """Take-level pitch track with the ghosts removed.
+
+    Praat proposes f0 (and its strength); harvest fixes octave errors; frames
+    are then dropped unless strong enough, loud enough over the take's own noise
+    floor (voice band), and part of a run. Returns a dict: times, f0 (NaN where
+    gated out), voiced_fraction of all frames, ghost_fraction (share of the
+    frames Praat called voiced that the gate removed).
+    """
+    audio = np.asarray(audio, dtype=float).flatten()
+    sound = parselmouth.Sound(audio, sampling_frequency=sample_rate)
+    times, f0, strength = _praat_pitch(sound, 0.01, mode)
+    proposed = ~np.isnan(f0)
+
+    harvest = _harvest_f0(audio, sample_rate, times, mode)
+    both = proposed & ~np.isnan(harvest)
+    off = np.full(len(f0), np.nan)
+    off[both] = 12 * np.log2(f0[both] / harvest[both])
+    octave = both & (np.abs(np.abs(off) - 12) < OCTAVE_WINDOW_ST)
+    f0 = np.where(octave, harvest, f0)
+
+    band = frame_levels(audio, sample_rate, times, band=True)
+    ok = proposed & (strength >= GATE_STRENGTH) & ~np.isnan(band)
+    if ok.any():
+        floor = np.nanpercentile(band, NOISE_PERCENTILE)
+        # A take with no pauses has no noise to measure: never ask for more than
+        # a little under the level of the clearly voiced frames.
+        loud = np.median(band[ok & (strength >= 0.8)]) if (ok & (strength >= 0.8)).any() else np.inf
+        ok &= band >= min(floor + GATE_MARGIN_DB, loud - 6)
+    for start, stop in _runs(ok):
+        if stop - start < GATE_MIN_RUN:
+            ok[start:stop] = False
+    f0 = np.where(ok, f0, np.nan)
+    for start, stop in _runs(ok):
+        f0[start:stop] = median_filter(f0[start:stop], size=MEDIAN_FRAMES, mode="nearest")
+    return {"times": times, "f0": f0,
+            "voiced_fraction": float(ok.mean()),
+            "ghost_fraction": float((proposed & ~ok).sum() / max(proposed.sum(), 1))}
+
+
 # --- LIVE FRAME ANALYSIS ---
+
+LIVE_HOLD_MARGIN_DB = 4       # while voiced, a frame needs only this much over the floor
+LIVE_JUMP_CENTS = 600         # a bigger jump must be confirmed by recent frames
+LIVE_JUMP_AGREE = 3           # of the last 5 candidates within LIVE_JUMP_CENTS / 2
+LIVE_HISTORY = 5
+DEFAULT_NOISE_FLOOR_DBFS = -60   # ceiling on the first learned floor (quiet room; the user's mic sits near -58)
+
 
 class FrameAnalyzer:
     """Measures the most recent slice of audio for the live meters."""
 
     WINDOW_SECONDS = 0.12
 
-    def __init__(self, sample_rate=SAMPLE_RATE, frame_interval=0.025):
+    def __init__(self, sample_rate=SAMPLE_RATE, frame_interval=0.025, mode="speak", noise_floor=None):
+        """`noise_floor` seeds the voice-band floor (dBFS), e.g. from the last session."""
         self.sample_rate = sample_rate
+        self.mode = mode
         self.formant_ceiling = DEFAULT_FORMANT_CEILING
-        self.noise_floor = None       # voice-band dBFS
+        self.noise_floor = noise_floor      # voice-band dBFS; None until a pause is heard
         self._floor_rise = NOISE_FLOOR_RISE_DB_PER_S * frame_interval
-        self._warmup_frames = int(NOISE_FLOOR_WARMUP_SECONDS / frame_interval)
+        self._voiced, self._last_f0 = False, np.nan   # previous frame reported a pitch
+        self._candidates = deque(maxlen=LIVE_HISTORY)
         freqs, _ = _power_spectrum_db(np.zeros(SPECTRAL_FRAME), sample_rate, pad=2)
         self._spectrum_bins = freqs <= SPECTRUM_MAX_HZ
         self.spectrum_freqs = freqs[self._spectrum_bins]
 
     def _above_noise(self, band_level):
-        """Update the noise floor with this frame; True if it stands out
-        from the floor enough to be voice."""
+        """True if this frame stands out from the floor enough to be voice. With
+        no floor yet, the pitch tracker alone decides (voice may start at t=0)."""
         if band_level <= DIGITAL_SILENCE_DBFS:
             return False
-        if self.noise_floor is None or band_level < self.noise_floor:
-            self.noise_floor = band_level
-        else:
-            self.noise_floor += self._floor_rise
-        if self._warmup_frames > 0:       # floor not known yet
-            self._warmup_frames -= 1
+        if self.noise_floor is None:
             return True
-        return band_level >= self.noise_floor + VOICE_MARGIN_DB
+        self.noise_floor = min(self.noise_floor, band_level)
+        margin = LIVE_HOLD_MARGIN_DB if self._voiced else VOICE_MARGIN_DB
+        return band_level >= self.noise_floor + margin
+
+    def _end_frame(self, band_level, f0):
+        """Track the floor from frames the pitch tracker called unvoiced: it
+        drops at once to a quieter frame but rises slowly, and never while the
+        previous frame was voiced, so a long held note doesn't become the floor."""
+        if np.isnan(f0):
+            if band_level > DIGITAL_SILENCE_DBFS:
+                if self.noise_floor is None:
+                    # Capped: the first "unvoiced" frame may be the start of a note.
+                    self.noise_floor = min(band_level, DEFAULT_NOISE_FLOOR_DBFS)
+                elif not self._voiced and band_level > self.noise_floor:
+                    self.noise_floor += self._floor_rise
+            self._candidates.clear()
+        self._voiced, self._last_f0 = not np.isnan(f0), f0
+
+    def _confirmed(self, f0):
+        """False for a jump of more than LIVE_JUMP_CENTS that recent frames
+        don't back: a pitch step halves for a single frame."""
+        self._candidates.append(f0)
+        if not self._voiced or abs(1200 * np.log2(f0 / self._last_f0)) <= LIVE_JUMP_CENTS:
+            return True
+        near = sum(abs(1200 * np.log2(f0 / c)) <= LIVE_JUMP_CENTS / 2 for c in self._candidates)
+        return near >= LIVE_JUMP_AGREE
 
     def spectrum(self, frame):
         """Power spectrum (dB) of the frame over 0-SPECTRUM_MAX_HZ."""
@@ -378,15 +503,21 @@ class FrameAnalyzer:
                   "f0": np.nan, "delta_f": np.nan, "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
                   "formants": np.full(4, np.nan), "resonance_reliable": False,
                   "spectrum": self.spectrum(frame)}
-        if not self._above_noise(result["band_level"]) or result["level"] < SILENCE_DBFS:
+        band_level = result["band_level"]
+        if not self._above_noise(band_level) or result["level"] < SILENCE_DBFS:
+            self._end_frame(band_level, np.nan)
             return result
 
         sound = parselmouth.Sound(window, sampling_frequency=self.sample_rate)
-        _, f0_track = pitch_track(sound)
+        _, f0_track = pitch_track(sound, mode=self.mode)
         recent = f0_track[-3:]
         if np.isnan(recent).all():
+            self._end_frame(band_level, np.nan)
             return result
         f0 = float(np.nanmedian(recent))
+        if not self._confirmed(f0):
+            return result
+        self._end_frame(band_level, f0)
         result["f0"] = f0
 
         # Praat's Burg window is twice `window_length`, so 80 ms gives a few frames.
@@ -407,13 +538,14 @@ class FrameAnalyzer:
 
 # --- TAKE ANALYSIS ---
 
-def analyze_take(audio, sample_rate=SAMPLE_RATE):
+def analyze_take(audio, sample_rate=SAMPLE_RATE, mode="speak"):
     audio = np.asarray(audio, dtype=float).flatten()
     if len(audio) < sample_rate * 0.3:
         return {"error": "Take too short. Record at least a second of voice."}
 
     sound = parselmouth.Sound(audio, sampling_frequency=sample_rate)
-    times, f0 = pitch_track(sound)
+    pitch = gated_pitch(audio, sample_rate, mode)
+    times, f0 = pitch["times"], pitch["f0"]
     voiced = ~np.isnan(f0)
     if voiced.sum() < 20:
         return {"error": f"Not enough voiced audio ({int(voiced.sum())} voiced frames). "
@@ -458,6 +590,9 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE):
         "clip_events": clip_events(audio),
         "singing": singing_stats(times, f0),
         "pitch": median_f0,
+        "pitch_floor": float(np.percentile(f0[voiced], 10)),   # low floor reads as male
+        "voiced_fraction": pitch["voiced_fraction"],
+        "ghost_fraction": pitch["ghost_fraction"],
         "note": note,
         "cents": cents,
         "contour": semitone_std(f0),

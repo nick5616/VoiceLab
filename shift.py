@@ -10,7 +10,7 @@ import numpy as np
 import parselmouth
 from parselmouth.praat import call
 
-from analysis import PITCH_FLOOR, SAMPLE_RATE, analyze_take, pitch_track
+from analysis import PITCH_MODES, SAMPLE_RATE, analyze_take, gated_pitch
 
 # name: (label, min, max, neutral, unit). Slider values are in these units.
 SHIFT_PARAMS = {
@@ -39,28 +39,30 @@ def shift_voice(audio, sample_rate=SAMPLE_RATE, **params):
 
     if (p["semitones"], p["resonance"], p["intonation"], p["tempo"]) != (0, 0, 100, 100):
         sound = parselmouth.Sound(x, sampling_frequency=sample_rate)
-        _, f0 = pitch_track(sound)
+        mode = p.get("mode", "speak")
+        f0 = gated_pitch(x, sample_rate, mode)["f0"]     # ghosts would pin the ceiling
         if np.isnan(f0).all():
             raise ValueError("No voiced audio to shift.")
         median = float(np.nanmedian(f0))
         # Analysis ceiling just above the take's own range limits octave errors.
-        ceiling = float(np.clip(np.nanmax(f0) * 1.2, 300, 1200))
+        floor, mode_ceiling = PITCH_MODES[mode]["floor"], PITCH_MODES[mode]["ceiling"]
+        ceiling = float(np.clip(np.nanmax(f0) * 1.2, 300, mode_ceiling))
         new_median = median * 2 ** (p["semitones"] / 12) if p["semitones"] else 0
-        shifted = call(sound, "Change gender...", PITCH_FLOOR, ceiling, 1 + p["resonance"] / 100,
+        shifted = call(sound, "Change gender...", floor, ceiling, 1 + p["resonance"] / 100,
                        new_median, p["intonation"] / 100, 100 / p["tempo"])
         x = shifted.values[0]
 
     if p["breathiness"] or p["brightness"]:
-        x = _world_shift(x, sample_rate, p["breathiness"] / 100, p["brightness"])
+        x = _world_shift(x, sample_rate, p["breathiness"] / 100, p["brightness"], p.get("mode", "speak"))
 
     x *= rms / (np.sqrt(np.mean(x ** 2)) + 1e-12)
     return np.clip(x, -1, 1)
 
 
-def _world_shift(x, sample_rate, breathiness, brightness):
+def _world_shift(x, sample_rate, breathiness, brightness, mode="speak"):
     import pyworld as pw
     x = np.ascontiguousarray(x, dtype=np.float64)
-    f0, t = pw.dio(x, sample_rate, f0_floor=PITCH_FLOOR, f0_ceil=1200, frame_period=WORLD_FRAME_MS)
+    f0, t = pw.dio(x, sample_rate, f0_floor=PITCH_MODES[mode]["floor"], f0_ceil=PITCH_MODES[mode]["ceiling"], frame_period=WORLD_FRAME_MS)
     f0 = pw.stonemask(x, f0, t, sample_rate)
     sp = pw.cheaptrick(x, f0, t, sample_rate)
     ap = pw.d4c(x, f0, t, sample_rate)
