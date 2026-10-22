@@ -6,12 +6,13 @@ from PyQt6.QtWidgets import (QVBoxLayout,
     QDialog,
     QGridLayout,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QDialogButtonBox)
 from PyQt6.QtCore import Qt
 
 from analysis import hz_to_note
-from profile_store import TARGET_KEYS, target_from_value
+from profile_store import TARGET_KEYS, TARGET_PRESETS, target_from_value
 from ui_common import BUTTON_STYLE, METRIC_DEFS, format_value
 
 # Targets dialog: key -> (spinbox min, max, decimals, unit)
@@ -40,6 +41,17 @@ class TargetsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("<b>Targets</b> — tick a metric to give it a target range."))
+        # Where to start from: your own baseline, or a typical range that is only a starting point.
+        self.start_from = QComboBox()
+        self.start_from.addItem("Start from…", None)
+        if profile.baseline:
+            self.start_from.addItem("Your baseline", "baseline")
+        for name, preset in TARGET_PRESETS.items():
+            self.start_from.addItem(preset["label"], name)
+        self.start_from.setStyleSheet("QComboBox { background: #1e1e1e; color: white; padding: 3px; }")
+        self.start_from.activated.connect(self._start_from)
+        layout.addWidget(self.start_from)
+        self.notes = {}         # key -> why its range is what it is, shown beside it
         grid = QGridLayout()
         self.rows = {}
         for row, key in enumerate(TARGET_KEYS):
@@ -58,6 +70,8 @@ class TargetsDialog(QDialog):
             hint = QLabel()
             hint.setStyleSheet("color: #aaa;")
             current = profile.target(key) or self._default_range(key)
+            if not profile.target(key):
+                self.notes[key] = self._default_note(key)
             check.setChecked(profile.target(key) is not None)
             spins[0].setValue(current[0])
             spins[1].setValue(current[1])
@@ -73,6 +87,8 @@ class TargetsDialog(QDialog):
             self.rows[key] = (check, spins, hint)
         layout.addLayout(grid)
         self._update_pitch_hint()
+        for key in TARGET_KEYS:
+            self._update_hint(key)
 
         layout.addSpacing(10)
         layout.addWidget(QLabel("<b>Baseline</b>"))
@@ -92,18 +108,66 @@ class TargetsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _preset(self, key):
+        """The preset range for the profile's mode that covers `key`, with its label, or None."""
+        preset = TARGET_PRESETS.get(self.profile.mode)
+        if preset and key in preset["targets"]:
+            return preset["targets"][key], preset["label"]
+        return None
+
     def _default_range(self, key):
-        """Starting range for an unset target: around the baseline if there is one."""
+        """Starting range for an unset target: around your baseline, else a typical range for the mode,
+        else (the metric has neither) around the middle of its meter."""
         base = self.profile.baseline_value(key)
         if base is not None:
             return target_from_value(key, base)
+        preset = self._preset(key)
+        if preset:
+            return preset[0]
         lo, hi = METRIC_DEFS[key][1:3]
         mid = np.sqrt(lo * hi) if key == "pitch" else (lo + hi) / 2
         return target_from_value(key, mid)
 
+    def _default_note(self, key):
+        if self.profile.baseline_value(key) is not None:
+            return "around your baseline"
+        if self._preset(key):
+            return "typical, yours may differ"
+        return "not based on your voice yet"
+
+    def _start_from(self, index):
+        """Fill the ranges from your baseline or a preset (ticking them); you can still edit each."""
+        choice = self.start_from.itemData(index)
+        if choice is None:
+            return
+        for key in TARGET_KEYS:
+            if choice == "baseline":
+                base = self.profile.baseline_value(key)
+                rng = target_from_value(key, base) if base is not None else None
+                note = "around your baseline"
+            else:
+                rng = TARGET_PRESETS[choice]["targets"].get(key)
+                note = "typical, yours may differ"
+            if rng is None:
+                continue
+            check, spins, _ = self.rows[key]
+            check.setChecked(True)
+            for spin, value in zip(spins, rng):
+                spin.setValue(value)
+            self.notes[key] = note
+            self._update_hint(key)
+
+    def _update_hint(self, key):
+        _, spins, hint = self.rows[key]
+        parts = []
+        if key == "pitch":
+            parts.append(" – ".join(hz_to_note(s.value())[0] for s in spins))
+        if self.notes.get(key):
+            parts.append(self.notes[key])
+        hint.setText(" · ".join(parts))
+
     def _update_pitch_hint(self):
-        _, spins, hint = self.rows["pitch"]
-        hint.setText(" – ".join(hz_to_note(s.value())[0] for s in spins))
+        self._update_hint("pitch")
 
     def _show_baseline(self):
         b = self.profile.baseline

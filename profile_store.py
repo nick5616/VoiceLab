@@ -33,7 +33,8 @@ TARGET_PRESETS = {
               "targets": {"pitch": [165.0, 255.0], "delta_f": [1100.0, 1300.0]}},
 }
 SUMMARY_KEYS = TARGET_KEYS + ["contour", "level", "vtl", "formant_ceiling", "note", "cents",
-                              "snr", "snr_full", "clip_events", "source", "mode", "uid", "cq"]
+                              "snr", "snr_full", "clip_events", "source", "mode", "uid", "cq",
+                              "pitch_floor", "voiced_fraction", "ghost_fraction"]
 # Scalar parts of a take's exercise score worth tracking over time.
 EXERCISE_SUMMARY_KEYS = ["name", "notes_total", "notes_sung", "notes_in_tune",
                          "mean_abs_cents", "time_in_tune"]
@@ -60,11 +61,33 @@ def summarize(result):
     exercise score, if any), ready to store."""
     summary = {key: _clean(result.get(key)) for key in SUMMARY_KEYS if key != "register"}
     summary.update(register_summary(result.get("register")))
+    summary["task"] = task_of(result)
+    summary["tier"] = take_tier(result)
     if result.get("singing"):
         summary["singing"] = {k: _clean(v) for k, v in result["singing"].items()}
     if result.get("exercise"):
         summary["exercise"] = {k: _clean(result["exercise"].get(k)) for k in EXERCISE_SUMMARY_KEYS}
     return summary
+
+
+def task_of(result):
+    """What the take was for, so like is compared with like: a stored task (a passage, 'vowel check'),
+    else the exercise name, else free speech or free singing."""
+    if result.get("task"):
+        return result["task"]
+    exercise = result.get("exercise")
+    if exercise and exercise.get("name"):
+        return exercise["name"]
+    return "free singing" if result.get("mode") == "sing" else "free speech"
+
+
+def take_tier(result):
+    """'good' / 'fair' / 'poor' from coach.take_quality (imported late: coach imports this module)."""
+    import coach
+    try:
+        return coach.take_quality(result, result.get("noise"))["tier"]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def register_summary(register):
@@ -161,6 +184,9 @@ class Profile:
         self.egg_channel = None        # input channel (0 or 1) carrying an EGG; None = no EGG
         self.register_model = None     # RegisterModel.to_dict() once calibrated to this voice
         self.register_version = 0      # counts model changes, so takes know when to re-score
+        self.noise_floor = None        # the engine's noise floor from the last session (spec 02)
+        self.mic_check = None          # result of the last mic check (spec 06)
+        self.mic_check_asked = False   # offered once on first launch
         self.load()
 
     def load(self):
@@ -182,6 +208,9 @@ class Profile:
         self.egg_channel = data.get("egg_channel")
         self.register_model = data.get("register_model")
         self.register_version = data.get("register_version", 0)
+        self.noise_floor = data.get("noise_floor")
+        self.mic_check = data.get("mic_check")
+        self.mic_check_asked = data.get("mic_check_asked", False)
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -190,7 +219,8 @@ class Profile:
                 "mode": self.mode, "takes_dir": self.takes_dir,
                 "takes_dir_asked": self.takes_dir_asked, "input_device": self.input_device,
                 "egg_channel": self.egg_channel, "register_model": self.register_model,
-                "register_version": self.register_version}
+                "register_version": self.register_version, "noise_floor": self.noise_floor,
+                "mic_check": self.mic_check, "mic_check_asked": self.mic_check_asked}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -235,14 +265,35 @@ class Profile:
             self.targets[key] = [low, high]
         self.save()
 
-    def set_targets_from_take(self, result):
+    def set_targets_from_take(self, result, trusted=None):
+        """Targets around this take's values, widened to its frame spread (target_from_value), so the
+        take scores about 70% against itself. `trusted` limits it to metrics the take can support
+        (coach.take_quality); targets for the others are left as they were. Returns the keys set."""
         summary = summarize(result)
         tracks = result.get("tracks") or {}
-        self.targets = {}
+        targets = {k: v for k, v in self.targets.items() if trusted is not None and k not in trusted}
         for key in TARGET_KEYS:
+            if trusted is not None and key not in trusted:
+                continue
             target = target_from_value(key, summary[key], tracks.get(TARGET_TRACKS.get(key)))
             if target is not None:
-                self.targets[key] = target
+                targets[key] = target
+        changed = [k for k in TARGET_KEYS if targets.get(k) != self.targets.get(k)]
+        self.targets = targets
+        self.save()
+        return changed
+
+    def set_noise_floor(self, floor):
+        self.noise_floor = None if floor is None else float(floor)
+        self.save()
+
+    def set_mic_check(self, result):
+        self.mic_check = result
+        self.mic_check_asked = True
+        self.save()
+
+    def set_mic_check_asked(self):
+        self.mic_check_asked = True
         self.save()
 
     def in_target(self, key, value):

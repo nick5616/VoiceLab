@@ -3,7 +3,7 @@ a voice-quality metric, in the spirit of FonaDyn (Ternström & Pabon). It shows
 your range and where in it your voice is clearest, brightest or lightest."""
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QRectF, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from analysis import NOTE_NAMES, SAMPLE_RATE, frame_levels, hz_to_midi
@@ -107,7 +107,7 @@ def rebuild(takes, mode=None):
             for key in MAP_METRICS:
                 values = tracks.get(key)
                 frame[key] = np.nan if values is None else values[i]
-            data.add(frame, mode)
+            data.add(frame, take.get("mode") or mode)
     return data
 
 
@@ -116,6 +116,8 @@ def midi_name(midi):
 
 
 class VoiceMapView(QWidget):
+    rebuild_requested = pyqtSignal()
+
     def __init__(self, engine, path):
         super().__init__()
         self.path = path
@@ -140,12 +142,18 @@ class VoiceMapView(QWidget):
         clear_btn = QPushButton("Clear map")
         clear_btn.setStyleSheet(BUTTON_STYLE)
         clear_btn.clicked.connect(self.clear)
+        rebuild_btn = QPushButton("Rebuild from takes")
+        rebuild_btn.setStyleSheet(BUTTON_STYLE)
+        rebuild_btn.setToolTip("Replace the map with one built from your saved takes, without the noise "
+                               "older versions counted as voice.")
+        rebuild_btn.clicked.connect(self.rebuild_requested)
         self.scale_label = QLabel()
         self.scale_label.setWordWrap(True)
         self.scale_label.setStyleSheet("color: #ddd; font-size: 11px;")
         for w in (self.metric, self.scale_label, self.range_label, hint):
             left.addWidget(w)
         left.addStretch()
+        left.addWidget(rebuild_btn)
         left.addWidget(clear_btn)
         left_widget = QWidget()
         left_widget.setLayout(left)
@@ -229,7 +237,11 @@ class VoiceMapView(QWidget):
 
     def rebuild(self, takes):
         """Replace the map with one built from saved takes (see voice_map.rebuild)."""
-        self.data = rebuild(takes, self.mode)
+        self.use(rebuild(takes, self.mode))
+
+    def use(self, data):
+        """Replace the map with `data` (a VoiceMapData) and keep it."""
+        self.data = data
         self.save()
         self.update_metric_choices()
         self.redraw()

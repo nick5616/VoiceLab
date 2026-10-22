@@ -20,11 +20,15 @@ from pathlib import Path
 
 import numpy as np
 
+import analysis
 from analysis import SAMPLE_RATE, analyze_take
 from egg import load_stereo_take
 from profile_store import _clean
 
 FORMAT_VERSION = 1
+# Analysis a sidecar was made with. analysis.ANALYSIS_VERSION (spec 05) once it exists; until then 1,
+# which every take stored before phase 9 (no analysis_version) is below.
+ANALYSIS_VERSION = getattr(analysis, "ANALYSIS_VERSION", 1)
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
 IMPORT_MAX_SECONDS = 90         # longer files are trimmed to keep analysis quick
 # analyze_take reports these as NaN when unmeasured; JSON stores them as null.
@@ -48,6 +52,16 @@ def load_audio(path, max_seconds=IMPORT_MAX_SECONDS):
         g = gcd(SAMPLE_RATE, sr)
         audio = resample_poly(audio, SAMPLE_RATE // g, sr // g)
     return audio, trimmed
+
+
+def is_outdated(data):
+    """True if a take was analysed by an older version of the analysis than this one."""
+    return (data.get("analysis_version") or 0) < ANALYSIS_VERSION
+
+
+def default_mode(data):
+    """The mode a take was recorded in; one without it (a file added by hand) is sung if it is an exercise."""
+    return data.get("mode") or ("sing" if data.get("exercise") else "speak")
 
 
 def new_uid():
@@ -161,9 +175,10 @@ class TakeStore:
 
     def _analyze_new_file(self, path):
         audio, trimmed = load_audio(path)
-        result = analyze_take(audio)
+        result = analyze_take(audio, mode="speak")
         if "error" in result:
             return result
+        result.update(mode="speak", analysis_version=ANALYSIS_VERSION)
         modified = datetime.fromtimestamp(path.stat().st_mtime)
         result.update(uid=new_uid(), time=modified.isoformat(timespec="seconds"),
                       title=path.stem, dated=False, file=path.name,
