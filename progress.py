@@ -1,5 +1,7 @@
 """Progress over weeks: every take and vowel check charted over time, with the
-weekly median, your baseline and target, and the change since your first week."""
+weekly median (and how many takes it rests on), your baseline and target, and the change since
+your first week, said only when there are enough takes and the change is bigger than the
+take-to-take variation."""
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -11,6 +13,8 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
 from profile_store import summarize
 from widgets import ResponsiveGrid
 
+MIN_TREND_TAKES = 5            # fewer takes than this say nothing about a trend (spec 07)
+NOISE_Z = 2.0                  # a change must beat this many standard errors of the take-to-take spread
 DAY = 86400
 WEEK = 7 * DAY
 PERIODS = [("All time", None), ("Last 90 days", 90), ("Last 30 days", 30)]
@@ -79,8 +83,22 @@ def timestamp(entry):
         return None
 
 
-def select(entries, key, mode=None, include_imported=False, days=None, now=None):
-    """(times, values) of one series, oldest first, after the filters."""
+def entry_task(entry):
+    """What a take was for: its stored task, else the exercise, else free speech or singing."""
+    if entry.get("kind") == "vowels":
+        return "vowel check"
+    if entry.get("task"):
+        return entry["task"]
+    exercise = entry.get("exercise") or {}
+    if exercise.get("name"):
+        return exercise["name"]
+    return "free singing" if entry.get("mode") == "sing" else "free speech"
+
+
+def select(entries, key, mode=None, include_imported=False, days=None, now=None,
+           include_poor=False, task=None):
+    """(times, values) of one series, oldest first, after the filters. Takes graded poor are left
+    out unless include_poor; `task` keeps one kind of take (see entry_task), so unlike isn't mixed."""
     _, _, kind, getter, _ = SERIES[key]
     cutoff = ((now or datetime.now()) - timedelta(days=days)).timestamp() if days else None
     points = []
@@ -91,6 +109,9 @@ def select(entries, key, mode=None, include_imported=False, days=None, now=None)
             continue
         if kind == "take" and ((mode and e.get("mode") != mode) or
                                (e.get("source") and not include_imported)):
+            continue
+        if kind == "take" and ((e.get("tier") == "poor" and not include_poor) or
+                               (task and entry_task(e) != task)):
             continue
         if kind == "vowels" and mode == "sing":
             continue
@@ -109,32 +130,78 @@ def week_start(t):
     return (day - timedelta(days=day.weekday())).timestamp()
 
 
-def weekly_medians(times, values):
-    """(week start times, median per week) for weeks with data."""
+def weekly_groups(times, values):
+    """{week start: [values]} for weeks with data."""
     weeks = {}
     for t, v in zip(times, values):
         weeks.setdefault(week_start(t), []).append(v)
+    return weeks
+
+
+def weekly_medians(times, values):
+    """(week start times, median per week) for weeks with data."""
+    weeks = weekly_groups(times, values)
     starts = sorted(weeks)
     return np.array(starts), np.array([float(np.median(weeks[w])) for w in starts])
 
 
+def weekly_counts(times, values):
+    """Takes behind each weekly median, in the same order."""
+    weeks = weekly_groups(times, values)
+    return np.array([len(weeks[w]) for w in sorted(weeks)])
+
+
+def take_spread(key, times, values):
+    """Take-to-take standard deviation: pooled within each week where a week has repeated takes,
+    otherwise over all of them. Pitch is measured in semitones. None with fewer than two takes."""
+    values = 12 * np.log2(values) if key == "pitch" else np.asarray(values, dtype=float)
+    weeks = [np.asarray(v) for v in weekly_groups(times, values).values() if len(v) > 1]
+    if weeks:
+        dof = sum(len(w) - 1 for w in weeks)
+        return float(np.sqrt(sum(((w - w.mean()) ** 2).sum() for w in weeks) / dof))
+    return float(np.std(values, ddof=1)) if len(values) > 1 else None
+
+
+def clear_change(key, times, values):
+    """True if the last week's median differs from the first's by more than NOISE_Z standard errors of
+    the take-to-take spread; False with too few takes or one week."""
+    if len(values) < MIN_TREND_TAKES:
+        return False
+    starts, medians = weekly_medians(times, values)
+    if len(starts) < 2:
+        return False
+    counts = weekly_counts(times, values)
+    spread = take_spread(key, times, values)
+    if spread is None:
+        return False
+    delta = 12 * np.log2(medians[-1] / medians[0]) if key == "pitch" else medians[-1] - medians[0]
+    return bool(abs(delta) > NOISE_Z * spread * np.sqrt(1 / counts[0] + 1 / counts[-1]))
+
+
 def change_text(key, times, values):
-    """e.g. 'this week 1130 Hz · +45 Hz since week of Oct 6', or the latest
-    value when there is only one week."""
+    """e.g. 'this week 1130 Hz · +45 Hz since week of Oct 6 · 12 takes', or the latest value when
+    there is only one week. No change is claimed from fewer than MIN_TREND_TAKES takes, nor when it is
+    within the take-to-take variation."""
     if len(values) == 0:
         return "no data yet"
     unit = SERIES[key][1]
     starts, medians = weekly_medians(times, values)
     current = "this week" if starts[-1] == week_start(datetime.now().timestamp()) else "latest week"
     latest = f"{current} {_format(medians[-1], unit)}"
+    n = len(values)
+    takes = f"{n} take{'s' if n != 1 else ''}"
     if len(starts) < 2:
-        return f"{latest} · {len(values)} take{'s' if len(values) != 1 else ''}"
+        return f"{latest} · {takes}"
+    if n < MIN_TREND_TAKES:
+        return f"{latest} · {takes}: too few to call a trend"
     first = datetime.fromtimestamp(starts[0]).strftime("%b %d").replace(" 0", " ")
+    if not clear_change(key, times, values):
+        return f"{latest} · no clear change since week of {first} (within your usual take-to-take variation) · {takes}"
     if key == "pitch":
         delta = f"{12 * np.log2(medians[-1] / medians[0]):+.1f} st"
     else:
         delta = _format(medians[-1] - medians[0], unit, sign=True, scale=medians[0])
-    return f"{latest} · {delta} since week of {first}"
+    return f"{latest} · {delta} since week of {first} · {takes}"
 
 
 def _format(value, unit, sign=False, scale=None):
@@ -168,6 +235,7 @@ class ProgressChart(QWidget):
         self.baseline = pg.InfiniteLine(angle=0, pen=BASELINE_PEN, label="baseline",
                                         labelOpts={"color": "#bbb", "position": 0.9})
         self.dots = pg.ScatterPlotItem(size=7, pen=None, brush=pg.mkBrush(DOT_COLOR))
+        self.counts = []                # "n=3" labels over the weekly medians
         self.median = self.plot.plot(pen=pg.mkPen(MEDIAN_COLOR, width=2), symbol="o", symbolSize=6,
                                      symbolBrush=MEDIAN_COLOR, symbolPen=None)
         for item in (self.band, self.baseline, self.dots):
@@ -179,8 +247,17 @@ class ProgressChart(QWidget):
         self.title.setText(f"<b>{SERIES[self.key][0]}</b> — {change_text(self.key, times, values)}")
         self.dots.setData(times, values)
         starts, medians = weekly_medians(times, values)
-        # Each week's median is drawn mid-week.
+        counts = weekly_counts(times, values)
+        # Each week's median is drawn mid-week, labelled with the takes behind it.
         self.median.setData(starts + WEEK / 2, medians)
+        for label in self.counts:
+            self.plot.removeItem(label)
+        self.counts = []
+        for start, median, count in zip(starts, medians, counts):
+            label = pg.TextItem(f"n={count}", color="#f1c40f", anchor=(0.5, 1.4))
+            label.setPos(start + WEEK / 2, median)
+            self.plot.addItem(label, ignoreBounds=True)
+            self.counts.append(label)
         self.baseline.setVisible(baseline is not None)
         if baseline is not None:
             self.baseline.setValue(baseline)
@@ -215,15 +292,27 @@ class ProgressDialog(QDialog):
         self.period = QComboBox()
         for label, days in PERIODS:
             self.period.addItem(label, days)
+        self.task = QComboBox()
+        self.task.setToolTip("Compare like with like: free speech, a passage, an exercise.")
+        self.task_choice = None         # the task picked here; None until you pick, then the most common
+        self.task.activated.connect(self._task_picked)
         self.imported = QCheckBox("Include imported files")
         self.imported.setToolTip("Imported files may be someone else's voice, so they're left out by default.")
+        self.poor = QCheckBox("Include poor recordings")
+        self.poor.setToolTip("Takes too noisy or quiet to trust are left out by default.")
         for w in (self.mode, self.period):
             w.currentIndexChanged.connect(self.refresh)
             filters.addWidget(w)
-        self.imported.toggled.connect(self.refresh)
-        filters.addWidget(self.imported)
+        filters.addWidget(self.task)
+        for box in (self.imported, self.poor):
+            box.toggled.connect(self.refresh)
+            filters.addWidget(box)
         filters.addStretch()
         layout.addLayout(filters)
+        self.left_out = QLabel()
+        self.left_out.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.left_out.hide()
+        layout.addWidget(self.left_out)
 
         self.empty = QLabel("Nothing to chart yet. Record some takes over a few days, and they'll "
                             "show up here with a weekly median (yellow) against your baseline and targets.")
@@ -258,16 +347,44 @@ class ProgressDialog(QDialog):
             return None, None
         return self.profile.baseline_value(profile_key), self.profile.target(profile_key)
 
+    def _task_picked(self, index):
+        self.task_choice = (self.task.itemData(index),)     # a tuple, so "All tasks" (None) is a choice
+        self.refresh()
+
+    def _fill_tasks(self, entries):
+        """List the tasks takes were made for, most common first. Until you choose, the most common is shown."""
+        counts = {}
+        for e in entries:
+            if e.get("kind", "take") == "take" and not (e.get("tier") == "poor" and not self.poor.isChecked()):
+                counts[entry_task(e)] = counts.get(entry_task(e), 0) + 1
+        ordered = sorted(counts, key=lambda t: -counts[t])
+        self.task.blockSignals(True)
+        self.task.clear()
+        self.task.addItem("All tasks", None)
+        for name in ordered:
+            self.task.addItem(f"{name} ({counts[name]})", name)
+        wanted = self.task_choice[0] if self.task_choice else (ordered[0] if ordered else None)
+        self.task.setCurrentIndex(max(0, self.task.findData(wanted)))
+        self.task.blockSignals(False)
+        return self.task.currentData()
+
     def refresh(self, *_):
         entries = self.entries_provider()
+        task = self._fill_tasks(entries)
         shown = 0
         for key, chart in self.charts.items():
             times, values = select(entries, key, mode=self.mode.currentData(),
                                    include_imported=self.imported.isChecked(),
-                                   days=self.period.currentData())
+                                   days=self.period.currentData(), include_poor=self.poor.isChecked(),
+                                   task=task)
             chart.setVisible(len(values) > 0)
             if len(values):
                 chart.show_data(times, values, *self._reference(key))
                 shown += 1
         self.grid.relayout()
         self.empty.setVisible(shown == 0)
+        hidden = sum(1 for e in entries if e.get("kind", "take") == "take" and e.get("tier") == "poor"
+                     and (not task or entry_task(e) == task) and not e.get("source"))
+        self.left_out.setVisible(bool(hidden) and not self.poor.isChecked())
+        self.left_out.setText(f"{hidden} poor recording{'s' if hidden != 1 else ''} left out. "
+                              "Tick “Include poor recordings” to chart them.")

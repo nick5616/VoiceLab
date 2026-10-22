@@ -54,8 +54,11 @@ def test_weekly_medians_group_by_monday():
 
 
 def test_change_text():
-    entries = [entry(0, delta_f=1000), entry(1, delta_f=1010), entry(8, delta_f=1050),
-               entry(0, pitch=150.0), entry(8, pitch=300.0), entry(0, cpp=20.0), entry(9, cpp=21.5)]
+    # At least 5 takes each, or no change is claimed (spec 07).
+    entries = [entry(0, delta_f=1000), entry(1, delta_f=1010), entry(2, delta_f=1005), entry(8, delta_f=1050),
+               entry(9, delta_f=1050),
+               *[entry(d, pitch=150.0) for d in (0, 1, 2)], *[entry(d, pitch=300.0) for d in (8, 9)],
+               *[entry(d, cpp=20.0) for d in (0, 1, 2)], *[entry(d, cpp=21.5) for d in (8, 9)]]
     assert "+45 Hz since week of Sep 7" in change_text("delta_f", *select(entries, "delta_f"))
     assert "+12.0 st" in change_text("pitch", *select(entries, "pitch"))
     assert "+1.5 dB" in change_text("cpp", *select(entries, "cpp"))

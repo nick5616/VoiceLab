@@ -149,3 +149,33 @@ def test_register_model_and_egg_channel_persist(tmp_path):
     profile.set_egg_channel(1)
     again = Profile(tmp_path)
     assert again.register_model["calibrated"] and again.register_version == 1 and again.egg_channel == 1
+
+
+def test_targets_from_take_only_for_trusted_metrics(tmp_path):
+    profile = Profile(tmp_path)
+    profile.set_target("delta_f", (1000, 1100))
+    changed = profile.set_targets_from_take(TAKE, trusted={"pitch", "cpp"})
+    assert profile.target("delta_f") == [1000, 1100]            # untrusted: left as it was
+    assert profile.target("pitch") and profile.target("cpp") and profile.target("ring") is None
+    assert set(changed) == {"pitch", "cpp"}
+    profile.set_targets_from_take(TAKE)                          # no limit: replaces everything
+    assert profile.target("delta_f") != [1000, 1100] and profile.target("ring")
+
+
+def test_summary_has_task_and_tier(tmp_path):
+    from profile_store import summarize
+    assert summarize(TAKE)["task"] == "free speech"
+    assert summarize(TAKE | {"mode": "sing"})["task"] == "free singing"
+    assert summarize(TAKE | {"exercise": {"name": "Scale"}})["task"] == "Scale"
+    assert summarize(TAKE | {"task": "passage: Rainbow"})["task"] == "passage: Rainbow"
+    assert summarize(TAKE | {"snr": 5.0})["tier"] == "poor"
+
+
+def test_noise_floor_and_mic_check_persist(tmp_path):
+    profile = Profile(tmp_path)
+    assert profile.noise_floor is None and profile.mic_check is None and not profile.mic_check_asked
+    profile.set_noise_floor(-61.5)
+    profile.set_mic_check({"level_db": -30.0})
+    reloaded = Profile(tmp_path)
+    assert reloaded.noise_floor == -61.5 and reloaded.mic_check == {"level_db": -30.0}
+    assert reloaded.mic_check_asked

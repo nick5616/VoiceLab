@@ -1,4 +1,6 @@
+import inspect
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,33 +12,54 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QSize, QTimer
 import qtawesome as qta
 
+import analysis
+import coach
+import profile_store
 import register
-from analysis import SAMPLE_RATE, analyze_take
+from analysis import SAMPLE_RATE, score_exercise
 from egg import load_stereo_take
 from engine import AnalysisWorker, LiveEngine, device_index, input_channels, input_devices
 from exercise import ExerciseView
 import isolation
 from live_panel import LivePanel
 from progress import ProgressDialog, collect_entries
-from profile_store import Profile
+from profile_store import TARGET_KEYS, Profile
 from speech import VowelCheck
-from take_card import TakeCard
-from take_register import (analyze_recording, finish_take, fit_labelled, is_stale, label_rows,
-                           register_model, score_register)
-from take_store import IMPORT_MAX_SECONDS, TakeStore, load_audio, new_uid
+from take_card import TakeCard, take_date
+from take_register import (analyze_recording, analyze_with_options, finish_take, fit_labelled, is_stale,
+                           label_rows, register_model, score_register)
+from take_store import (ANALYSIS_VERSION, IMPORT_MAX_SECONDS, TakeStore, default_mode, is_outdated, load_audio,
+                        new_uid)
 from targets_dialog import TargetsDialog
-from ui_common import BUTTON_STYLE
+from ui_common import BUTTON_STYLE, METRIC_DEFS
+import voice_map
 from voice_map import VoiceMapView
 
 TAKES_PAGE = 20                 # take cards shown at first; older ones on request
+COMPARE_CHOICES = 15            # recent takes offered under "Compare with…"
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 EGG_CHOICES = [("none", None), ("channel 1", 0), ("channel 2", 1)]    # the EGG input channel
 WIDE_LAYOUT_WIDTH = 1100        # from this window width, live and takes sit side by side...
 TAKES_COLUMN_WIDTH = 480        # ...if the takes still get about this much
+CEILING_TAKES = 3               # usable takes the profile's formant ceiling is chosen from (spec 05)
+REST_NUDGE_MINUTES = 25         # first rest reminder, then every so often. Own judgement: vocal-hygiene
+#                                 advice commonly says to rest the voice regularly, but I could not confirm
+#                                 a specific interval (unverified)
+SESSION_TICK_MS = 15000
+# What a take keeps through re-analysis: who it is, not what was measured.
+KEPT_KEYS = ("uid", "time", "title", "dated", "file", "source", "register_label", "egg_channel", "task")
 
 
-def import_and_analyze(path, isolate, egg_channel=None, state=None, version=0):
-    """Analyse a file. With egg_channel (0 or 1) that channel of a stereo file is the EGG
+def accepts(fn, name):
+    """True if the callable takes a parameter called `name` (spec 05 and 06 add some after this was written)."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def import_and_analyze(path, isolate, egg_channel=None, state=None, version=0, mode="speak", ceiling=None):
+    """Analyse a file in `mode`. With egg_channel (0 or 1) that channel of a stereo file is the EGG
     and the other the mic; `state` and `version` are the profile's register model."""
     if egg_channel is None:
         audio, trimmed = load_audio(path)
@@ -48,7 +71,7 @@ def import_and_analyze(path, isolate, egg_channel=None, state=None, version=0):
         audio, egg_samples = audio[:limit], egg_samples[:limit]
     if isolate:
         audio = isolation.isolate_vocals(audio, SAMPLE_RATE)
-    result = finish_take(analyze_take(audio), egg_samples, state, version)
+    result = finish_take(analyze_with_options(audio, mode, ceiling), egg_samples, state, version)
     if "error" not in result:
         name = path.replace("\\", "/").split("/")[-1]
         notes = [name] + (["vocals isolated with Demucs"] if isolate else []) + \
@@ -76,6 +99,45 @@ def refit_register(takes, store, cache):
         labelled.append((data["register_label"], cache[data["uid"]]))
     model, counts = fit_labelled(labelled)
     return {"job": "refit", "model": model, "counts": counts}
+
+
+def reanalyze_take(data, store, state, version, ceiling=None):
+    """Analyse a stored take again with the current analysis, in its own mode. Only the sidecar changes,
+    never the audio file. Returns {"job": "reanalyze", "uid", "take"} or {..., "failed": message}."""
+    try:
+        audio = _take_audio(data, store)
+        egg_samples = store.egg(data) if store and data.get("egg_channel") is not None else None
+        mode = default_mode(data)
+        result = finish_take(analyze_with_options(audio, mode, ceiling), egg_samples, state, version)
+    except Exception as e:  # an unreadable file shouldn't stop the others
+        return {"job": "reanalyze", "uid": data["uid"], "failed": str(e)}
+    if "error" in result:
+        return {"job": "reanalyze", "uid": data["uid"], "failed": result["error"]}
+    result.pop("audio", None)
+    result.pop("egg_samples", None)
+    result.update({k: data[k] for k in KEPT_KEYS if k in data}, mode=mode)
+    exercise = data.get("exercise")
+    if exercise and exercise.get("targets"):    # score it again with the notes it was sung against
+        latency = exercise.get("latency") or 0.0
+        heard = [(start + latency, length, midi) for start, length, midi in exercise["targets"]]
+        tracks = result["tracks"]
+        result["exercise"] = score_exercise(tracks["times"], tracks["f0"], heard) | {
+            "name": exercise["name"], "targets": exercise["targets"], "latency": latency}
+    elif exercise:
+        result["exercise"] = exercise
+    return {"job": "reanalyze", "uid": data["uid"], "take": result}
+
+
+def rebuild_voice_map(takes, store):
+    """A Voice Map built from the saved takes, each in its own mode. Imported voices are left out."""
+    items = []
+    for data in takes:
+        if data.get("file") and (not data.get("source") or "added to folder" in data["source"]):
+            try:
+                items.append({"tracks": data["tracks"], "audio": _take_audio(data, store), "mode": data.get("mode")})
+            except Exception:  # a missing or unreadable file
+                continue
+    return {"job": "voicemap", "data": voice_map.rebuild(items), "count": len(items)}
 
 
 def rescore_register(takes, store, state, version):
@@ -111,6 +173,15 @@ class MainWindow(QMainWindow):
         self.register_again = False     # something changed while it ran
         self.refit_needed = False
         self.register_failed = set()    # uids that couldn't be scored, so they aren't retried
+        self.reanalysis_worker = None   # re-analyses takes made by an older analysis, one at a time
+        self.reanalysis_failed = set()  # uids that couldn't be, so they aren't retried this session
+        self.reanalysis_total = 0       # takes queued in this round, for the status text
+        self.reanalysis_done = 0
+        self.voicemap_worker = None
+        self.ceiling_candidates = []    # usable takes the profile's formant ceiling is chosen from
+        self.session_started = None     # clock() when you first recorded; None until then
+        self.session_clock = time.monotonic
+        self.rest_nudges = 0
         self.label_features = {}        # uid -> frame features of labelled takes
         self.cards = []
         self.older_takes = []       # loaded takes not yet shown as cards, oldest first
@@ -138,8 +209,12 @@ class MainWindow(QMainWindow):
         self.live_panel.add_tab(self.exercise_view, "Exercise", {"sing"}, default_for="sing")
         self.live_panel.add_tab(self.voice_map, "Voice Map", {"sing"})
         self.live_panel.target_provider = self.exercise_view.current_target
-        self.live_panel.mode_changed.connect(profile.set_mode)
+        self.voice_map.rebuild_requested.connect(self.rebuild_voice_map)
+        self.vowel_check.completed.connect(self.use_vowel_ceiling)
+        self.live_panel.mode_changed.connect(self.change_mode)
         self.live_panel.set_mode(profile.mode)
+        self.change_mode(profile.mode)
+        self.apply_targets()
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
@@ -163,6 +238,19 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready to Record")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #888; font-size: 14px;")
+        # Session length, and a gentle rest reminder after a while of voice use.
+        self.session_label = QLabel()
+        self.session_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.session_label.setStyleSheet("color: #777; font-size: 11px; border: none;")
+        self.session_label.hide()
+        self.rest_label = QLabel()
+        self.rest_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.rest_label.setWordWrap(True)
+        self.rest_label.setStyleSheet("color: #f1c40f; font-size: 12px; border: none;")
+        self.rest_label.hide()
+        self.session_timer = QTimer(self)
+        self.session_timer.setInterval(SESSION_TICK_MS)
+        self.session_timer.timeout.connect(self.update_session)
 
         self.record_btn = QPushButton()
         self.record_btn.setFixedSize(64, 64)
@@ -178,6 +266,11 @@ class MainWindow(QMainWindow):
         progress_btn.setStyleSheet(BUTTON_STYLE)
         progress_btn.setToolTip("Your measurements over weeks.")
         progress_btn.clicked.connect(self.show_progress)
+        self.mic_check_btn = QPushButton(qta.icon("fa5s.microphone-alt", color="white"), " Mic check")
+        self.mic_check_btn.setStyleSheet(BUTTON_STYLE)
+        self.mic_check_btn.setToolTip("Check your input level, noise and distance to the mic.")
+        self.mic_check_btn.clicked.connect(self.mic_check)
+        self.mic_check_btn.setVisible(hasattr(self.live_panel, "show_mic_check"))
         self.folder_btn = QPushButton(qta.icon("fa5s.folder-open", color="white"), "")
         self.folder_btn.setStyleSheet(BUTTON_STYLE)
         self.folder_btn.clicked.connect(self.choose_takes_folder)
@@ -214,7 +307,7 @@ class MainWindow(QMainWindow):
             left.addWidget(w)
         left.addStretch()
         right.addStretch()
-        for w in (progress_btn, mic_label, self.mic_choice, self.egg_label, self.egg_choice):
+        for w in (progress_btn, self.mic_check_btn, mic_label, self.mic_choice, self.egg_label, self.egg_choice):
             right.addWidget(w)
         button_row = QHBoxLayout()
         button_row.addLayout(left, 1)
@@ -223,6 +316,8 @@ class MainWindow(QMainWindow):
         controls_layout.setContentsMargins(10, 4, 10, 8)
         controls_layout.setSpacing(4)
         controls_layout.addWidget(self.status_label)
+        controls_layout.addWidget(self.session_label)
+        controls_layout.addWidget(self.rest_label)
         controls_layout.addLayout(button_row)
 
         # Live panel and takes: side by side on a wide window, stacked on a
@@ -239,6 +334,88 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(controls)
         if self.store:
             self.load_takes()
+
+    # --- ENGINE, MODE AND TARGETS (calls into spec 05 and 06 are guarded until they merge) ---
+
+    def change_mode(self, mode):
+        """The mode picked on the live panel: remembered, and told to the engine and the Voice Map."""
+        self.profile.set_mode(mode)
+        self.voice_map.mode = mode
+        if hasattr(self.engine, "set_mode"):
+            self.engine.set_mode(mode)
+
+    def apply_targets(self):
+        if hasattr(self.live_panel, "set_targets"):
+            self.live_panel.set_targets(self.profile.targets)
+
+    def stream_options(self):
+        """Keyword arguments for engine.open_stream: the noise floor from last time, if it takes one."""
+        if self.profile.noise_floor is not None and accepts(self.engine.open_stream, "noise_floor"):
+            return {"noise_floor": self.profile.noise_floor}
+        return {}
+
+    def mic_check(self):
+        show = getattr(self.live_panel, "show_mic_check", None)
+        if show is None:
+            self.set_status("The mic check isn't available in this build.")
+            return
+        result = show()
+        if isinstance(result, dict):
+            self.profile.set_mic_check(result)
+            self.set_status("Mic check saved")
+
+    def first_run_mic_check(self):
+        """Once, the first time VoiceLab opens a mic."""
+        if self.profile.mic_check is None and not self.profile.mic_check_asked:
+            self.profile.set_mic_check_asked()
+            self.mic_check()
+
+    def use_vowel_ceiling(self, result):
+        """The vowel check fits the formant ceiling jointly over eight vowels, the best evidence there is."""
+        if result.get("formant_ceiling"):
+            self.set_ceiling(result["formant_ceiling"])
+
+    def set_ceiling(self, ceiling):
+        self.engine.analyzer.formant_ceiling = ceiling
+        self.profile.set_formant_ceiling(ceiling)
+
+    def note_ceiling(self, results):
+        """Fix the profile's formant ceiling once, from the first few usable takes (analysis.
+        choose_profile_ceiling, spec 05), rather than following every take's own: that jumped by
+        150 Hz between takes 13 s apart (audit). Until that exists, the first usable take's."""
+        if self.profile.formant_ceiling or not results.get("formant_ceiling") or results.get("source"):
+            return
+        if coach.take_quality(results, results.get("noise"))["tier"] == "poor":
+            return
+        self.ceiling_candidates.append(results)
+        choose = getattr(analysis, "choose_profile_ceiling", None)
+        if choose is None:
+            self.set_ceiling(results["formant_ceiling"])
+        elif len(self.ceiling_candidates) >= CEILING_TAKES:
+            self.set_ceiling(choose(self.ceiling_candidates))
+
+    # --- SESSION ---
+
+    def start_session(self):
+        if self.session_started is None:
+            self.session_started = self.session_clock()
+            self.session_label.show()
+            self.session_timer.start()
+            self.update_session()
+
+    def session_minutes(self):
+        return 0.0 if self.session_started is None else (self.session_clock() - self.session_started) / 60
+
+    def update_session(self):
+        minutes = self.session_minutes()
+        self.session_label.setText(f"Session {minutes:.0f} min")
+        if minutes >= REST_NUDGE_MINUTES * (self.rest_nudges + 1):
+            self.rest_nudges += 1
+            self.rest_label.setText(f"You have been at this for {minutes:.0f} minutes. A short rest and a sip "
+                                    "of water can help; ease off if your voice feels tired or tight.")
+            self.rest_label.setToolTip("Vocal-hygiene guidance generally suggests resting the voice regularly. "
+                                       "The 25-minute interval is a rough guide (unverified).")
+            self.rest_label.show()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -280,6 +457,7 @@ class MainWindow(QMainWindow):
     def toggle_recording(self):
         if not self.is_recording:
             self.is_recording = True
+            self.start_session()
             self.status_label.setText("Recording...")
             self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
             self.update_record_button_style(recording=True)
@@ -294,13 +472,16 @@ class MainWindow(QMainWindow):
             self.record_btn.setEnabled(False)
             audio = self.engine.stop_take()
             self.analysis_worker = AnalysisWorker(analyze_recording, audio, self.engine.last_take_egg,
-                                                  self.profile.register_model, self.profile.register_version)
+                                                  self.profile.register_model, self.profile.register_version,
+                                                  self.profile.mode, self.profile.formant_ceiling)
             self.analysis_worker.finished_analysis.connect(self.process_results)
             self.analysis_worker.start()
 
     def update_record_enabled(self, *_):
         """The record button is unavailable while a drill or exercise records."""
         busy = self.vowel_check.running or self.exercise_view.running or self.analyzing
+        if self.vowel_check.running or self.exercise_view.running:
+            self.start_session()
         self.record_btn.setEnabled(not busy)
         self.import_btn.setEnabled(not busy and not self.is_recording)
 
@@ -327,7 +508,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Isolating vocals and analyzing…" if isolate else "Analyzing file…")
         self.status_label.setStyleSheet("color: #f1c40f;")
         self.analysis_worker = AnalysisWorker(import_and_analyze, path, isolate, egg_channel,
-                                              self.profile.register_model, self.profile.register_version)
+                                              self.profile.register_model, self.profile.register_version,
+                                              self.profile.mode, self.profile.formant_ceiling)
         self.analysis_worker.finished_analysis.connect(self.process_results)
         self.analysis_worker.start()
 
@@ -363,13 +545,12 @@ class MainWindow(QMainWindow):
             self.status_label.setText(results["error"])
             self.status_label.setStyleSheet("color: #e74c3c;")
             return
-        # Calibrate the live formant tracker to the ceiling that fit this take,
-        # unless it's an imported file, which may be someone else's voice.
-        if not results.get("source"):
-            self.engine.analyzer.formant_ceiling = results["formant_ceiling"]
-            self.profile.set_formant_ceiling(results["formant_ceiling"])
-        results.update(uid=new_uid(), time=datetime.now().isoformat(timespec="seconds"),
-                       mode=self.profile.mode)
+        # An imported file may be someone else's voice, so it never sets the formant ceiling.
+        self.note_ceiling(results)
+        results.update(uid=new_uid(), time=datetime.now().isoformat(timespec="seconds"))
+        results.setdefault("mode", self.profile.mode)
+        results.setdefault("analysis_version", ANALYSIS_VERSION)
+        results.setdefault("task", self.current_task(results))
         message, color = "Done", "#888"
         # With a takes folder, the folder is the record of every take; without
         # one, a summary goes to the history log so progress still builds up.
@@ -390,6 +571,15 @@ class MainWindow(QMainWindow):
         self.refresh_progress()
         self.update_register()          # exercise takes arrive without a register result
 
+    def current_task(self, results):
+        """What this take is for, so progress compares like with like: the passage being read,
+        else the exercise (profile_store.task_of), else free speech or singing."""
+        prompt = getattr(self.live_panel, "reading_prompt", None)
+        mode = results.get("mode") or self.profile.mode
+        if mode == "speak" and not results.get("exercise") and prompt is not None and prompt.isVisible():
+            return f"passage: {prompt.title.text().split('·')[-1].strip()}"
+        return profile_store.task_of(results | {"mode": mode})
+
     # --- TAKE CARDS ---
 
     def set_status(self, text, color="#888"):
@@ -407,10 +597,23 @@ class MainWindow(QMainWindow):
             self.live_panel.plane.add_take(number, data["pitch"], data["delta_f"])
         card = TakeCard(data, number, self.profile, self.set_baseline, self.set_target,
                         on_rename=self.rename_take, on_delete=self.delete_take,
-                        audio=lambda: self.take_audio(data), on_label=self.label_register)
+                        audio=lambda: self.take_audio(data), on_label=self.label_register,
+                        compare_options=self.compare_options, compare_audio=self.take_audio)
         self.cards.append(card)
         self.scroll_layout.insertWidget(self.scroll_layout.indexOf(self.more_btn) if at_bottom else 0, card)
         return card
+
+    def compare_options(self, card):
+        """[(label, take)] a card can be compared with: your baseline take first, then recent takes."""
+        others = [d for d in self.all_takes() if d is not card.data and d.get("tracks")]
+        others.sort(key=lambda d: d["time"], reverse=True)
+        options, base_uid = [], (self.profile.baseline or {}).get("uid")
+        for data in others:
+            if data.get("uid") and data["uid"] == base_uid:
+                options.append(("Baseline take", data))
+        for data in others[:COMPARE_CHOICES]:
+            options.append((data.get("title") or take_date(data) or "Take", data))
+        return options
 
     def remove_card(self, card):
         self.cards.remove(card)
@@ -514,6 +717,7 @@ class MainWindow(QMainWindow):
         self.set_status(message, "#e67e22" if result["problems"] else "#888")
         self.refresh_progress()
         self.update_register()
+        self.update_reanalysis()
 
     def all_takes(self):
         return [c.data for c in self.cards] + [d for _, d in self.older_takes]
@@ -579,6 +783,8 @@ class MainWindow(QMainWindow):
         if self.register_worker is not None and self.register_worker.isRunning():
             self.register_again = True
             return
+        if self.reanalysis_active():     # its results carry fresh register scores; update_reanalysis calls back
+            return
         self.register_again = False
         job = None
         if self.refit_needed:
@@ -639,6 +845,101 @@ class MainWindow(QMainWindow):
             card.refresh_register()
         self.refresh_progress()
 
+    # --- RE-ANALYSIS ---
+
+    def outdated_takes(self):
+        """Saved takes made by an older analysis, newest first. (Unsaved ones were just made.)"""
+        stale = [d for d in self.all_takes() if d.get("file") and d.get("uid") not in self.reanalysis_failed
+                 and is_outdated(d)]
+        return sorted(stale, key=lambda d: d["time"], reverse=True)
+
+    def reanalysis_active(self):
+        return (self.reanalysis_worker is not None and self.reanalysis_worker.isRunning()) \
+            or bool(self.outdated_takes() and self.store)
+
+    def update_reanalysis(self):
+        """Re-analyse the next take made by an older analysis, in the background, one at a time. The WAV is
+        never touched: only the sidecar is rewritten. The register jobs wait until this is done."""
+        if not self.store or (self.reanalysis_worker is not None and self.reanalysis_worker.isRunning()):
+            return
+        stale = self.outdated_takes()
+        if not stale:
+            if self.reanalysis_total:
+                self.set_status(f"Re-analysed {self.reanalysis_done} of your takes with the improved analysis. "
+                                "Use “Rebuild from takes” on the Voice Map tab to clear old noise readings from it.",
+                                "#2ecc71")
+                self.reanalysis_total = self.reanalysis_done = 0
+            self.update_register()
+            return
+        self.reanalysis_total = max(self.reanalysis_total, self.reanalysis_done + len(stale))
+        self.set_status(f"Re-analysing your takes with the improved analysis: {self.reanalysis_done + 1} "
+                        f"of {self.reanalysis_total}…", "#f1c40f")
+        job = AnalysisWorker(reanalyze_take, stale[0], self.store, self.profile.register_model,
+                             self.profile.register_version, self.profile.formant_ceiling)
+        self.reanalysis_worker = job
+        job.finished_analysis.connect(self._reanalysis_done)
+        job.start()
+
+    def _reanalysis_done(self, result):
+        uid = result.get("uid")
+        if "error" in result or result.get("failed"):
+            self.reanalysis_failed.add(uid)
+            self.set_status(result.get("failed") or result["error"], "#e67e22")
+        else:
+            self._apply_reanalysis(result)
+            self.reanalysis_done += 1
+        self.update_reanalysis()
+
+    def _apply_reanalysis(self, result):
+        """Swap a take's analysis for the new one in place, save the sidecar, and redraw its card."""
+        data = next((d for d in self.all_takes() if d.get("uid") == result["uid"]), None)
+        if data is None:               # deleted while it ran
+            return
+        audio = data.get("audio")
+        data.clear()
+        data.update(result["take"])
+        if audio is not None:
+            data["audio"] = audio
+        try:
+            self.store.write_sidecar(data)
+        except OSError as e:
+            self.set_status(f"Couldn't save the new analysis: {e}", "#e74c3c")
+        card = next((c for c in self.cards if c.data is data), None)
+        if card is not None:
+            self.live_panel.plane.remove_take(card.number)
+            if data["delta_f"] is not None:
+                self.live_panel.plane.add_take(card.number, data["pitch"], data["delta_f"])
+            card.reload()
+        self.refresh_progress()
+
+    def rebuild_voice_map(self):
+        """Replace the Voice Map with one built from the saved takes, which holds none of the noise
+        the old live frames did."""
+        if not self.store:
+            self.set_status("Choose a takes folder first: the Voice Map is rebuilt from saved takes.", "#e67e22")
+            return
+        if self.reanalysis_active() or (self.voicemap_worker and self.voicemap_worker.isRunning()):
+            self.set_status("Wait until your takes are re-analysed, then rebuild the Voice Map.", "#e67e22")
+            return
+        answer = QMessageBox.question(
+            self, "Rebuild Voice Map",
+            "Replace the Voice Map with one built from your saved takes? What it has gathered live is "
+            "replaced, and imported voices are left out.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.set_status("Rebuilding the Voice Map…", "#f1c40f")
+        self.voicemap_worker = AnalysisWorker(rebuild_voice_map, [d for d in self.all_takes()], self.store)
+        self.voicemap_worker.finished_analysis.connect(self._voice_map_rebuilt)
+        self.voicemap_worker.start()
+
+    def _voice_map_rebuilt(self, result):
+        if "error" in result:
+            self.set_status(result["error"], "#e74c3c")
+            return
+        self.voice_map.use(result["data"])
+        self.set_status(f"Voice Map rebuilt from {result['count']} take{'s' if result['count'] != 1 else ''}",
+                        "#2ecc71")
+
     # --- MIC ---
 
     def update_egg_choice(self):
@@ -668,9 +969,9 @@ class MainWindow(QMainWindow):
         channel = None if self.egg_choice.isHidden() else self.egg_choice.currentData()
         try:
             if channel is None:
-                self.engine.open_stream(device_index(name))
+                self.engine.open_stream(device_index(name), **self.stream_options())
             else:
-                self.engine.open_stream(device_index(name), channel)
+                self.engine.open_stream(device_index(name), channel, **self.stream_options())
         except (sd.PortAudioError, ValueError) as e:
             if channel is None:
                 self.set_status(f"Couldn't open {name or 'the default mic'}: {e}", "#e74c3c")
@@ -691,7 +992,7 @@ class MainWindow(QMainWindow):
         self.profile.set_egg_channel(None)
         self.live_panel.set_egg(False)
         try:
-            self.engine.open_stream(device_index(name))
+            self.engine.open_stream(device_index(name), **self.stream_options())
         except sd.PortAudioError as e:
             message += f" (and the mic alone won't open either: {e})"
         else:
@@ -722,8 +1023,20 @@ class MainWindow(QMainWindow):
         self.refresh_profile("Baseline saved")
 
     def set_target(self, results):
-        self.profile.set_targets_from_take(results)
-        self.refresh_profile("Targets set from take. Fine-tune them under Targets.")
+        """Targets around this take, as wide as its own frames spread. A reading the recording can't
+        support (coach.take_quality) never becomes a target: that target keeps its old value."""
+        quality = coach.take_quality(results, results.get("noise"))
+        trusted = {key for key in TARGET_KEYS if quality["trust"].get(key, True)}
+        if not trusted:
+            self.set_status(f"This take is too noisy to set targets from ({quality['reasons'][0]}). "
+                            "Record a cleaner one.", "#e67e22")
+            return
+        self.profile.set_targets_from_take(results, trusted)
+        left = [METRIC_DEFS[k][0] for k in TARGET_KEYS if k not in trusted and results.get(k) is not None]
+        message = "Targets set from take. Fine-tune them under Targets."
+        if left:
+            message += f" Not set from this take (it can't support them): {', '.join(left)}."
+        self.refresh_profile(message)
 
     def edit_targets(self):
         TargetsDialog(self.profile, self).exec()
@@ -731,6 +1044,7 @@ class MainWindow(QMainWindow):
         self.refresh_profile()
 
     def refresh_profile(self, message=None):
+        self.apply_targets()
         self.live_panel.refresh_profile()
         self.vowel_check.refresh_profile()
         for card in self.cards:
@@ -742,7 +1056,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.engine.stop()
         self.voice_map.save()
-        for worker in (self.analysis_worker, self.load_worker, self.register_worker):
+        floor = getattr(self.engine, "noise_floor", None)
+        if callable(floor):     # spec 02: the floor learned this session starts the next one
+            self.profile.set_noise_floor(floor())
+        for worker in (self.analysis_worker, self.load_worker, self.register_worker, self.reanalysis_worker,
+                       self.voicemap_worker):
             if worker is not None:
                 worker.wait()
         super().closeEvent(event)
@@ -758,7 +1076,9 @@ if __name__ == "__main__":
     window = MainWindow(engine, profile)
     window.show()
     try:
-        engine.start(device_index(profile.input_device))
+        start_options = {"noise_floor": profile.noise_floor} if \
+            profile.noise_floor is not None and accepts(engine.start, "noise_floor") else {}
+        engine.start(device_index(profile.input_device), **start_options)
     except sd.PortAudioError as e:
         # Still usable without a mic: imported files can be analysed and shifted.
         window.record_btn.setEnabled(False)
@@ -768,5 +1088,6 @@ if __name__ == "__main__":
                             "Connect one and pick it under Mic, or restart VoiceLab.")
     else:
         window.restore_egg()
+        QTimer.singleShot(0, window.first_run_mic_check)
     QTimer.singleShot(0, window.ask_for_takes_folder)
     sys.exit(app.exec())

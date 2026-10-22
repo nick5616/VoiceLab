@@ -9,6 +9,7 @@ import numpy as np
 import egg
 import register
 from analysis import SAMPLE_RATE, analyze_take
+from take_store import ANALYSIS_VERSION
 
 LABELS = ("chest", "head")      # what a take can be labelled as, for calibration
 # register.is_fry can also test pulse spacing in the audio, which is the only way to catch fry that
@@ -79,9 +80,22 @@ def finish_take(result, egg_samples=None, state=None, version=0):
     return add_register(result, state, version)
 
 
-def analyze_recording(audio, egg_samples=None, state=None, version=0):
-    """analyze_take plus register and EGG, for a worker thread."""
-    return finish_take(analyze_take(audio), egg_samples, state, version)
+def analyze_with_options(audio, mode="speak", ceiling=None):
+    """analyze_take in the take's mode, with the profile's formant ceiling when analyze_take takes
+    one (spec 05); the result is stamped with the analysis version it was made with."""
+    import inspect
+    options = {}
+    if ceiling and "ceiling" in inspect.signature(analyze_take).parameters:
+        options["ceiling"] = ceiling
+    result = analyze_take(audio, mode=mode, **options)
+    if "error" not in result:
+        result.update(analysis_version=ANALYSIS_VERSION, mode=mode)
+    return result
+
+
+def analyze_recording(audio, egg_samples=None, state=None, version=0, mode="speak", ceiling=None):
+    """analyze_take (in `mode`) plus register and EGG, for a worker thread."""
+    return finish_take(analyze_with_options(audio, mode, ceiling), egg_samples, state, version)
 
 
 def is_stale(data, version):
