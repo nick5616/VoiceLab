@@ -1,64 +1,36 @@
-"""Take cards and the take analysis graphs."""
-import time
-from datetime import datetime
-
+"""Take cards and the take analysis graphs. A card draws take_view's data for its take and plays it
+through the core's Player; the actions (rename, label, delete, targets) go to the core."""
 import numpy as np
 import pyqtgraph as pg
-import sounddevice as sd
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame, QLineEdit, QMenu,
                              QSizePolicy, QWidget)
 from PyQt6.QtGui import QFont, QAction
 import qtawesome as qta
 
-import coach
-import register
-from analysis import CLOSE_CENTS, IN_TUNE_CENTS, SAMPLE_RATE
-from exercise import midi_name
-from shift_panel import ShiftPanel
-from live_views import pitch_label
-from widgets import ResponsiveGrid
+import take_view
+from display import formants_label, pitch_label
+from playback import Player
 from take_store import default_mode
-from ui_common import (BUTTON_STYLE, METER_MIN_WIDTH, METRIC_DEFS, REGISTER_COLORS, MetricBar, OFF_TARGET_COLOR,
-                       ON_TARGET_COLOR, ShareBar, hiss_note)
+from ui.meters import (BUTTON_STYLE, METER_MIN_WIDTH, REGISTER_COLORS, MetricBar, OFF_TARGET_COLOR, ON_TARGET_COLOR,
+                       ShareBar)
+from ui.shift_panel import ShiftPanel
+from ui.widgets import ResponsiveGrid
 
-TAKE_BAR_KEYS = ["pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range", "level"]
 REGISTER_DOT_SIZE = 5           # px, the register-coloured dots on the pitch track
-# Take bars whose reading coach.take_quality can mark unreliable (same names in its "trust").
-TRUSTED_BARS = {"pitch", "delta_f", "h1h2", "cpp", "ring", "pitch_range"}
 TIER_COLORS = {"good": ON_TARGET_COLOR, "fair": "#f1c40f", "poor": "#e74c3c"}
-TIER_TEXT = {"good": "Good recording", "fair": "Fair recording", "poor": "Poor recording"}
+NOTE_COLORS = {"in_tune": ON_TARGET_COLOR, "off": OFF_TARGET_COLOR, None: "#555"}
 PLAY_TICK_MS = 30               # playhead refresh while a take plays
-COMPARE_GAP_SECONDS = 0.5       # silence between the take and the one it is compared with
 PLAY_STYLE = "background-color: #4CAF50; color: white; padding: 5px 10px; border-radius: 5px;"
 STOP_STYLE = "background-color: #c0392b; color: white; padding: 5px 10px; border-radius: 5px;"
 COMPARE_PEN = pg.mkPen((220, 220, 220, 150), width=1.5, style=Qt.PenStyle.DashLine)
-_playing_card = None            # the one card that is playing, so starting another stops it
-
-
-def take_date(data):
-    try:
-        return datetime.fromisoformat(data["time"]).strftime("%a %b %d · %H:%M").replace(" 0", " ")
-    except (KeyError, TypeError, ValueError):
-        return ""
+_player = Player()              # one playback at a time, for cards made without a core
 
 
 def register_colors(tracks):
     """Per-frame colour of the register track (fry grey), or None if the take has none."""
-    scores = tracks.get("register")
-    if scores is None:
-        return None
-    fry = tracks.get("fry")
-    colors = []
-    for i, score in enumerate(scores):
-        if fry is not None and fry[i] > 0.5:
-            colors.append(REGISTER_COLORS["fry"])
-        elif np.isnan(score):
-            colors.append(None)
-        else:
-            colors.append(REGISTER_COLORS["chest" if score < register.MIX_BAND[0] else
-                                          "head" if score > register.MIX_BAND[1] else "mix"])
-    return colors
+    zones = take_view.register_zones(tracks)
+    return None if zones is None else [REGISTER_COLORS[z] if z else None for z in zones]
 
 
 class AnalysisGraph(pg.GraphicsLayoutWidget):
@@ -177,28 +149,26 @@ class AnalysisGraph(pg.GraphicsLayoutWidget):
         self.text_p.setText(pitch_label(p_val) if not np.isnan(p_val) else "Unvoiced")
         self.text_p.setPos(self.ax_pitch.vb.viewRange()[0][0], self.ax_pitch.vb.viewRange()[1][1])
         if not np.isnan(f1):
-            self.text_r.setText(f"F1:{f1:.0f} F2:{f2:.0f} F3:{f3:.0f}")
+            self.text_r.setText(formants_label(f1, f2, f3))
             self.text_r.setPos(self.ax_res.vb.viewRange()[0][0], self.ax_res.vb.viewRange()[1][1])
 
 
 class NoteScoreChart(pg.PlotWidget):
-    """Per-note tuning error of an exercise, with the in-tune zone shaded."""
+    """Per-note tuning error of an exercise (take_view.exercise_notes), with the in-tune zone shaded."""
 
-    def __init__(self, notes):
+    def __init__(self, notes, in_tune_cents):
         super().__init__(background="#2b2b2b")
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
         self.setMenuEnabled(False)
         self.setFixedHeight(120)
         self.getAxis("left").setLabel("¢")
-        zone = pg.LinearRegionItem((-IN_TUNE_CENTS, IN_TUNE_CENTS), orientation="horizontal",
+        zone = pg.LinearRegionItem((-in_tune_cents, in_tune_cents), orientation="horizontal",
                                    movable=False, brush=pg.mkBrush(46, 204, 113, 40), pen=pg.mkPen(None))
         self.addItem(zone)
         xs = np.arange(len(notes))
-        heights = [np.clip(n["cents"], -100, 100) if n["cents"] is not None else 0 for n in notes]
-        brushes = ["#555" if n["cents"] is None else
-                   ON_TARGET_COLOR if abs(n["cents"]) <= IN_TUNE_CENTS else OFF_TARGET_COLOR
-                   for n in notes]
+        heights = [n["height"] for n in notes]
+        brushes = [NOTE_COLORS[n["zone"]] for n in notes]
         self.addItem(pg.BarGraphItem(x=xs, height=heights, width=0.7, brushes=brushes, pen=None))
         # Dots keep spot-on notes (zero-height bars) visible.
         sung = [i for i, n in enumerate(notes) if n["cents"] is not None]
@@ -207,51 +177,10 @@ class NoteScoreChart(pg.PlotWidget):
         missed = [i for i, n in enumerate(notes) if n["cents"] is None]
         if missed:
             self.plot(missed, [0] * len(missed), pen=None, symbol="x", symbolBrush="#888", symbolPen="#888")
-        self.getAxis("bottom").setTicks([[(i, midi_name(n["midi"])) for i, n in enumerate(notes)]])
-        self.setYRange(-100, 100, padding=0)
+        self.getAxis("bottom").setTicks([[(i, n["label"]) for i, n in enumerate(notes)]])
+        limit = take_view.NOTE_CHART_CENTS
+        self.setYRange(-limit, limit, padding=0)
         self.setXRange(-0.6, len(notes) - 0.4, padding=0)
-
-
-def exercise_summary(exercise):
-    """One line on an exercise: notes in tune and close, time in tune, and timing against the guide."""
-    text = f"{exercise['name']}: {exercise['notes_in_tune']}/{exercise['notes_total']} notes in tune (±{IN_TUNE_CENTS}¢)"
-    if exercise.get("notes_close") is not None:
-        text += f", {exercise['notes_close']} within ±{CLOSE_CENTS}¢"
-    if exercise.get("mean_abs_cents") is not None:
-        text += f" · average error {exercise['mean_abs_cents']:.0f}¢ · {exercise['time_in_tune']:.0%} of note time in tune"
-        if exercise.get("time_close") is not None:
-            text += f", {exercise['time_close']:.0%} close"
-    if exercise.get("timing"):
-        text += f" · timing: {exercise['timing']}"
-    return text
-
-
-def singing_summary(singing):
-    """One line on held notes, vibrato, drift and tuning (spread about your own centre, centre vs
-    A440, interval error), or None."""
-    if not singing or not singing["held_notes"]:
-        return None
-    parts = [f"Held notes: {singing['held_notes']}"]
-    if singing["vibrato_notes"]:
-        regularity = singing["vibrato_regularity"]
-        parts.append(f"vibrato on {singing['vibrato_notes']}: {singing['vibrato_rate']:.1f} Hz "
-                     f"±{singing['vibrato_extent']:.0f}¢"
-                     + (f", cycle variation {regularity:.0%}" if regularity is not None else ""))
-    else:
-        parts.append("straight tone")
-    if singing.get("tremolo_notes"):
-        parts.append(f"loudness wobble on {singing['tremolo_notes']}")
-    if singing["drift"] is not None:
-        parts.append(f"drift ±{singing['drift']:.0f}¢")
-    spread = singing.get("tuning_spread")
-    if spread is not None:
-        parts.append(f"notes sit ±{spread:.0f}¢ from your own centre")
-    if singing.get("interval_error") is not None:
-        parts.append(f"steps between notes off by {singing['interval_error']:.0f}¢")
-    tonic = singing.get("tonic_offset")
-    if tonic is not None:
-        parts.append(f"your centre is {abs(tonic):.0f}¢ {'above' if tonic > 0 else 'below'} A440")
-    return " · ".join(parts)
 
 
 class UntrustedMetric(QWidget):
@@ -263,38 +192,35 @@ class UntrustedMetric(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 4, 0, 4)
-        self.title = QLabel(f"{METRIC_DEFS[key][0]}: — ({reason})")
+        self.title = QLabel(take_view.untrusted_title(key, reason))
         self.title.setWordWrap(True)
         self.title.setStyleSheet("font-size: 11px; color: #888;")
         box.addWidget(self.title)
 
-    def set_reference(self, profile):
-        pass
-
-    def set_value(self, *args, **kwargs):
+    def show_reading(self, reading):
         pass
 
 
 class TakeCard(QFrame):
-    """One take's report. `audio` returns its samples (loaded on demand for
-    saved takes); `on_rename(card, title)` and `on_delete(card)` manage it.
-    `compare_options(card)` lists [(label, take)] to compare with, `compare_audio(take)` loads one."""
+    """One take's report. `audio` returns its samples (loaded on demand for saved takes);
+    `on_rename(card, title)` and `on_delete(card)` manage it. `compare_options(card)` lists
+    [(label, take)] to compare with, `compare_audio(take)` loads one. `player` plays it (one card at a time),
+    `runner` renders shifts."""
 
     def __init__(self, data, count, profile, on_set_baseline, on_set_target,
                  on_rename=None, on_delete=None, audio=None, on_label=None,
-                 compare_options=None, compare_audio=None):
+                 compare_options=None, compare_audio=None, player=None, runner=None):
         super().__init__()
         self.data, self.profile, self.number = data, profile, count
         self.on_label, self.on_rename, self.on_delete = on_label, on_rename, on_delete
         self.on_set_baseline, self.on_set_target = on_set_baseline, on_set_target
         self.compare_options, self.compare_audio = compare_options, compare_audio
         self.audio = audio or (lambda: data["audio"])
+        self.player = player or _player
+        self.runner = runner
+        self._unsubscribe = self.player.on_finished(self._finished)
         self.compare = None             # the take played and drawn alongside this one
-        self.playing = False
         self.start_at = 0.0             # where Play starts (s): set by clicking the graph
-        self.pieces = []                # what is playing: (offset in its take or None for the gap, seconds)
-        self.started = 0.0
-        self.clock = time.monotonic
         self.timer = QTimer(self)
         self.timer.setInterval(PLAY_TICK_MS)
         self.timer.timeout.connect(self._tick)
@@ -309,7 +235,25 @@ class TakeCard(QFrame):
         """)
         self.outer = QVBoxLayout(self)
         self.body = None
+        self._tracks = None
         self._build()
+
+    def dispose(self):
+        """Before the card goes: stop its playback and stop listening to the player."""
+        self.stop_playback()
+        self._unsubscribe()
+
+    @property
+    def playing(self):
+        return self.player.playing and self.player.owner is self
+
+    @property
+    def clock(self):
+        return self.player.clock
+
+    @clock.setter
+    def clock(self, clock):
+        self.player.clock = clock
 
     def reload(self):
         """Show the take again from its (re-analysed) data."""
@@ -324,15 +268,18 @@ class TakeCard(QFrame):
         self.body = QWidget()
         self.outer.addWidget(self.body)
         data, count = self.data, self.number
-        self.quality = coach.take_quality(data, data.get("noise"))
+        self._tracks = data["tracks"]
+        view = take_view.card(data, self.profile, count)
+        self.quality = view["quality"]
         layout = QVBoxLayout(self.body)
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Header
         header = QHBoxLayout()
+        placeholder, tooltip = take_view.title_hint(data, count)
         self.title = QLineEdit(data.get("title") or "")
-        self.title.setPlaceholderText(f"Take #{count}")
-        self.title.setToolTip("Click to name this take" + (" (renames its files)" if data.get("file") else ""))
+        self.title.setPlaceholderText(placeholder)
+        self.title.setToolTip(tooltip)
         self.title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         self.title.setMinimumWidth(110)
         self.title.setCursorPosition(0)       # long names show their start, not their end
@@ -365,33 +312,32 @@ class TakeCard(QFrame):
         header.addWidget(delete_btn)
         layout.addLayout(header)
 
-        if data.get("source"):
-            source = QLabel(data["source"])
+        if view["source"]:
+            source = QLabel(view["source"])
             source.setStyleSheet("color: #aaa; font-size: 11px;")
             layout.addWidget(source)
 
         # --- QUALITY AND ADVICE ---
-        tier = self.quality["tier"]
-        self.quality_chip = QLabel(f"● {TIER_TEXT[tier]}")
+        tier = view["tier"]
+        self.quality_chip = QLabel(f"● {view['tier_text']}")
         self.quality_chip.setStyleSheet(f"color: {TIER_COLORS[tier]}; font-size: 12px; font-weight: bold;")
-        self.quality_chip.setToolTip("How far this recording can be trusted. Readings it can't support "
-                                     "are shown as — instead of a number.")
+        self.quality_chip.setToolTip(view["tier_tooltip"])
         layout.addWidget(self.quality_chip)
-        if self.quality["reasons"]:
-            self.quality_reasons = QLabel(" · ".join(self.quality["reasons"]))
+        if view["reasons"]:
+            self.quality_reasons = QLabel(view["reasons"])
             self.quality_reasons.setWordWrap(True)
             self.quality_reasons.setStyleSheet("color: #bbb; font-size: 11px;")
             layout.addWidget(self.quality_reasons)
-        note = hiss_note(data.get("snr"), data.get("snr_full"))
-        if note:
-            info = QLabel(note)
+        if view["hiss"]:
+            info = QLabel(view["hiss"])
             info.setWordWrap(True)
             info.setStyleSheet("color: #aaa; font-size: 11px;")
             layout.addWidget(info)
         self.advice_box = QVBoxLayout()
         layout.addLayout(self.advice_box)
 
-        self.shift_panel = ShiftPanel(data, self.on_set_target, audio=self.audio)
+        self.shift_panel = ShiftPanel(data, self.on_set_target, audio=self.audio, runner=self.runner,
+                                      player=self.player)
         self.shift_panel.hide()
         self.shift_btn.toggled.connect(self.shift_panel.setVisible)
         # While shifting, the card's Play button plays the shifted version.
@@ -431,22 +377,15 @@ class TakeCard(QFrame):
         layout.addWidget(self.time_in_target)
 
         # --- SINGING ---
-        trust = self.quality["trust"]
-        why_singing = self.quality["why_untrusted"].get("singing", "")
-        exercise = data.get("exercise")
-        if exercise:
-            label = QLabel(exercise_summary(exercise) if trust["singing"] else
-                           f"{exercise['name']}: — ({why_singing})")
+        if view["exercise"]:
+            label = QLabel(view["exercise"])
             label.setWordWrap(True)
             label.setStyleSheet("font-size: 12px;")
             layout.addWidget(label)
-            if trust["singing"]:
-                layout.addWidget(NoteScoreChart(exercise["notes"]))
-        summary = singing_summary(data.get("singing")) if trust["singing"] else None
-        if data.get("singing") and not trust["singing"]:
-            summary = f"Singing details: — ({why_singing})"
-        if summary:
-            label = QLabel(summary)
+            if view["exercise_notes"] is not None:
+                layout.addWidget(NoteScoreChart(view["exercise_notes"], take_view.IN_TUNE_CENTS))
+        if view["singing"]:
+            label = QLabel(view["singing"])
             label.setWordWrap(True)
             label.setStyleSheet("color: #ddd; font-size: 12px;")
             layout.addWidget(label)
@@ -454,19 +393,18 @@ class TakeCard(QFrame):
         # --- REGISTER ---
         self.register_box = self._build_register_row()
         layout.addWidget(self.register_box)
-        egg = data.get("egg")
-        if egg and not egg["signal_ok"]:
-            warning = QLabel("⚠ EGG: " + (egg.get("note") or "no usable signal"))
+        if view["egg_warning"]:
+            warning = QLabel(view["egg_warning"])
             warning.setWordWrap(True)
             warning.setStyleSheet(f"color: {OFF_TARGET_COLOR}; font-size: 12px;")
             layout.addWidget(warning)
 
         # --- METRIC BARS ---
-        has_cq = egg is not None and egg["signal_ok"] and data.get("cq") is not None
+        trust, why = self.quality["trust"], self.quality["why_untrusted"]
         self.bars = {}
-        for key in TAKE_BAR_KEYS + (["cq"] if has_cq else []):
-            if key in TRUSTED_BARS and not trust[key]:
-                self.bars[key] = UntrustedMetric(key, self.quality["why_untrusted"][key])
+        for key in view["bar_keys"]:
+            if key in take_view.TRUSTED_BARS and not trust[key]:
+                self.bars[key] = UntrustedMetric(key, why[key])
             else:
                 self.bars[key] = MetricBar(key)
         bar_grid = ResponsiveGrid(METER_MIN_WIDTH)
@@ -509,35 +447,16 @@ class TakeCard(QFrame):
         return box
 
     def refresh_register(self):
-        """Show the register row and colour the graph. A take without a register result
-        (an older take, scored in the background) keeps the row's space, so the card doesn't jump."""
-        reg = self.data.get("register")
-        if not self.quality["trust"]["register"]:
-            self.graph.set_register(self.data["tracks"], show=False)
-            self.register_title.setText(f"Register — — ({self.quality['why_untrusted']['register']})")
-            self.register_bar.set_segments([])
-            self.register_text.setText('<span style="color:#888">—</span>')
-            return
-        self.graph.set_register(self.data["tracks"])
-        if not reg or "chest_share" not in reg:
-            self.register_title.setText("Register — not scored yet")
-            self.register_bar.set_segments([])
-            self.register_text.setText('<span style="color:#888">estimating…</span>')
-            return
-        shares = [(reg[f"{name}_share"], name) for name in ("chest", "mix", "head", "fry")]
-        self.register_bar.set_segments([(share, REGISTER_COLORS[name]) for share, name in shares])
-        self.register_text.setText(" · ".join(
-            f'<span style="color:{REGISTER_COLORS[name]}">{name} {share:.0%}</span>'
-            for share, name in shares if share > 0 or name != "fry"))
-        breaks = len(reg.get("breaks") or [])
-        notes = [f"{breaks} break{'s' if breaks != 1 else ''}",
-                 "calibrated to your voice" if reg.get("calibrated") else "estimate"]
-        if self.data.get("register_label"):
-            notes.append(f"you labelled it {self.data['register_label']}")
-        on_target = self.profile.in_target("register", 100 * reg["head_share"])
-        if on_target is not None:
-            notes.append("head share ✓ on target" if on_target else "head share off target")
-        self.register_title.setText("Register — " + " · ".join(notes))
+        """Show the register row and colour the graph (take_view.register_row)."""
+        row = take_view.register_row(self.data, self.profile, self.quality)
+        self.graph.set_register(self.data["tracks"], show=row["show_track"])
+        self.register_title.setText(row["title"])
+        self.register_bar.set_segments([(share, REGISTER_COLORS[zone]) for share, zone in row["segments"]])
+        if row["placeholder"] is not None:
+            self.register_text.setText(f'<span style="color:#888">{row["placeholder"]}</span>')
+        else:
+            self.register_text.setText(" · ".join(f'<span style="color:{REGISTER_COLORS[zone]}">{text}</span>'
+                                                  for zone, text in row["parts"]))
 
     def mode(self):
         return default_mode(self.data)
@@ -548,8 +467,7 @@ class TakeCard(QFrame):
             item = self.advice_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.advice = coach.advice(self.data, self.profile.targets, self.profile.baseline,
-                                   mode=self.mode(), quality=self.quality)
+        self.advice = take_view.advice(self.data, self.profile, self.quality)
         for message in self.advice:
             label = QLabel("→ " + message["text"])
             label.setWordWrap(True)
@@ -559,29 +477,23 @@ class TakeCard(QFrame):
             self.advice_box.addWidget(label)
 
     def refresh_profile(self):
-        # Share of voiced time inside each target: holding a voice across a whole
-        # passage matters more than its median.
         self.refresh_register()
         self.refresh_advice()
-        tracks, trust = self.data["tracks"], self.quality["trust"]
-        parts = []
-        for name, key in (("pitch", "pitch"), ("resonance", "delta_f")):
-            share = self.profile.time_in_target(key, tracks[key if key == "delta_f" else "f0"]) \
-                if trust[key] else None
-            if share is not None:
-                parts.append(f"{name} {share:.0%}")
-        if trust["pitch"] and trust["delta_f"] and self.profile.target("pitch") and self.profile.target("delta_f"):
-            both = self.profile.time_in_both(tracks["f0"], tracks["delta_f"])
-            if both is not None:
-                parts.append(f"pitch + resonance together {both:.0%}")
-        self.time_in_target.setText(f"Time in target: {' · '.join(parts)}" if parts else "")
-        self.time_in_target.setVisible(bool(parts))
+        text = take_view.time_in_target(self.data, self.profile, self.quality)
+        self.time_in_target.setText(text)
+        self.time_in_target.setVisible(bool(text))
+        readings = take_view.bars(self.data, self.profile, self.quality)
         for key, bar in self.bars.items():
-            bar.set_reference(self.profile)
-            if key == "delta_f" and self.data["delta_f"] is None:
-                bar.set_value(None, self.profile, note=self.data["resonance_note"])
-            else:
-                bar.set_value(self.data[key], self.profile)
+            bar.show_reading(readings[key])
+
+    def take_updated(self):
+        """The core changed the take: its title, label, register scores or (re-analysis) everything."""
+        if self.data["tracks"] is not self._tracks:
+            self.reload()
+            return
+        self.title.setText(self.data.get("title") or "")
+        self.update_saved_state()
+        self.refresh_register()
 
     def _title_edited(self):
         title = self.title.text().strip()
@@ -590,21 +502,20 @@ class TakeCard(QFrame):
 
     def update_saved_state(self):
         """Date, and where the take is stored."""
-        self.date.setText(take_date(self.data) + ("" if self.data.get("file") else " · not saved"))
-        self.date.setToolTip(self.data.get("file") or "Choose a takes folder to keep takes between sessions.")
+        text, tooltip = take_view.saved_state(self.data)
+        self.date.setText(text)
+        self.date.setToolTip(tooltip)
 
     # --- PLAYBACK ---
 
     def _update_play_text(self):
+        self.play_btn.setText(take_view.play_label(self.playing, self.shift_btn.isChecked(), self.compare is not None))
         if self.playing:
-            self.play_btn.setText(" Stop")
             self.play_btn.setIcon(qta.icon("fa5s.stop", color="white"))
             self.play_btn.setStyleSheet(STOP_STYLE)
-            return
-        self.play_btn.setIcon(qta.icon("fa5s.play", color="white"))
-        self.play_btn.setStyleSheet(PLAY_STYLE)
-        self.play_btn.setText(" Play shifted" if self.shift_btn.isChecked() else
-                              " Play, then compare" if self.compare else " Play")
+        else:
+            self.play_btn.setIcon(qta.icon("fa5s.play", color="white"))
+            self.play_btn.setStyleSheet(PLAY_STYLE)
 
     def play_audio(self):
         """Play from the start (or the point clicked on the graph); while playing, stop."""
@@ -614,54 +525,45 @@ class TakeCard(QFrame):
             self.start_playback(self.start_at)
 
     def start_playback(self, start=0.0):
-        global _playing_card
-        if _playing_card is not None and _playing_card is not self:
-            _playing_card.stop_playback()
-        samples = np.asarray(self.audio(), dtype=float)
-        duration = len(samples) / SAMPLE_RATE
-        start = float(np.clip(start, 0, max(duration - 0.05, 0)))
         if self.shift_panel.isVisible():
+            self.player.track_take(np.asarray(self.audio(), dtype=float), start, owner=self)
             self.shift_panel.play_shifted()
-            self.pieces = [(start, duration - start)]
         else:
-            buffer = samples[int(start * SAMPLE_RATE):]
-            self.pieces = [(start, len(buffer) / SAMPLE_RATE)]
+            other = None
             if self.compare is not None and self.compare_audio:
-                other = np.asarray(self.compare_audio(self.compare), dtype=float)
-                gap = np.zeros(int(COMPARE_GAP_SECONDS * SAMPLE_RATE))
-                self.pieces += [(None, COMPARE_GAP_SECONDS), (0.0, len(other) / SAMPLE_RATE)]
-                buffer = np.concatenate([buffer, gap, other])
-            sd.play(buffer, SAMPLE_RATE)
-        self.playing, _playing_card = True, self
-        self.started = self.clock()
+                other = self.compare_audio(self.compare)
+            self.player.play_take(self.audio(), start, then=other, owner=self)
         self.timer.start()
         self._update_play_text()
         self._tick()
 
     def _tick(self):
         """Move the playhead to where playback has got to; stop at the end."""
-        elapsed = self.clock() - self.started
-        for index, (offset, length) in enumerate(self.pieces):
-            if elapsed < length:
-                self.graph.set_playhead(None if offset is None else offset + elapsed)
-                if self.compare is not None:
-                    self.compare_label.setText("Playing this take" if index == 0 else
-                                               "…" if offset is None else f"Playing {self._compare_name()}")
-                return
-            elapsed -= length
-        self.stop_playback()
+        if self.player.owner is not self:
+            self.stop_playback()
+            return
+        position = self.player.position()
+        if not position["playing"]:
+            return                          # the player stopped: _finished resets the card
+        self.graph.set_playhead(position["seconds"])
+        if self.compare is not None:
+            self.compare_label.setText(take_view.compare_text(self.compare, position["piece"]))
+
+    def _finished(self, owner):
+        if owner is self:
+            self._reset_playback()
 
     def stop_playback(self):
-        global _playing_card
-        was_playing, self.playing = self.playing, False
+        if self.playing:
+            self.player.stop()              # calls _finished
+        else:
+            self._reset_playback()
+
+    def _reset_playback(self):
         self.timer.stop()
-        if was_playing:
-            sd.stop()
-        if _playing_card is self:
-            _playing_card = None
         self.start_at = 0.0
         self.graph.set_playhead(None)
-        self.compare_label.setText(self._compare_text())
+        self.compare_label.setText(take_view.compare_text(self.compare))
         self._update_play_text()
 
     def seek(self, seconds):
@@ -673,15 +575,6 @@ class TakeCard(QFrame):
         self.graph.set_playhead(seconds)
 
     # --- COMPARISON ---
-
-    def _compare_name(self):
-        data = self.compare
-        return data.get("title") or take_date(data) or "the other take"
-
-    def _compare_text(self, now=None):
-        if self.compare is None:
-            return ""
-        return now or f"Comparing with {self._compare_name()} (dashed). Play runs this take, then that one."
 
     def _fill_compare_menu(self, menu):
         menu.clear()
@@ -704,5 +597,5 @@ class TakeCard(QFrame):
             self.stop_playback()
         self.compare = take
         self.graph.set_overlay(None if take is None else take["tracks"])
-        self.compare_label.setText(self._compare_text())
+        self.compare_label.setText(take_view.compare_text(take))
         self._update_play_text()

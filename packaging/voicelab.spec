@@ -17,9 +17,12 @@ for pkg in ("parselmouth", "sounddevice", "_sounddevice_data", "qtawesome", "pyw
 hiddenimports += collect_submodules("pyqtgraph") + collect_submodules("mido")
 datas += collect_data_files("pyqtgraph")
 
-# Every app module in the repo root (covers modules added later), plus scipy bits pulled in lazily.
+# Every app module: the core in the repo root and the Qt UI in the ui package (with its subpackages),
+# covering modules added later, plus scipy bits pulled in lazily.
 app_modules = [os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(ROOT, "*.py"))]
-hiddenimports += app_modules + ["scipy.signal", "scipy.special._cdflib"]
+ui_modules = [os.path.splitext(os.path.relpath(p, ROOT))[0].replace(os.sep, ".").removesuffix(".__init__")
+              for p in glob.glob(os.path.join(ROOT, "ui", "**", "*.py"), recursive=True)]
+hiddenimports += app_modules + ui_modules + ["scipy.signal", "scipy.special._cdflib"]
 
 # QtOpenGL, QtSvg and QtWidgets stay in: pyqtgraph imports them at load time.
 EXCLUDES = [

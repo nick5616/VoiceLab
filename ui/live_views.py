@@ -1,5 +1,5 @@
 """Live visualizations: pitch trace, spectrogram + spectrum slice, and the
-pitch x resonance plane."""
+pitch x resonance plane. They draw what the live session gives them."""
 from collections import deque
 
 import numpy as np
@@ -8,11 +8,10 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsRectItem
 
-from analysis import NOTE_NAMES, hz_to_note
+from display import note_ticks
 from engine import UPDATE_INTERVAL
+from live_session import HISTORY_LEN, HISTORY_SECONDS
 
-HISTORY_SECONDS = 8
-HISTORY_LEN = int(HISTORY_SECONDS / UPDATE_INTERVAL)
 HISTORY_TIMES = np.linspace(-HISTORY_SECONDS, 0, HISTORY_LEN)
 MIN_PITCH, MAX_PITCH = 60, 1500
 SPEECH_PITCH_LIMITS = (70, 500)   # Hz; the speech tracker's range (spec 01: floor 75, ceiling 500)
@@ -36,27 +35,6 @@ REFERENCE_REGIONS = [
     ("typical male-read", (960, 1090), (85, 155), "#3498db"),
     ("typical female-read", (1110, 1260), (165, 255), "#e74c3c"),
 ]
-
-
-def pitch_label(f0):
-    note, cents = hz_to_note(f0)
-    return f"{note} {cents:+d}¢ · {f0:.0f} Hz"
-
-
-def note_ticks(lo_hz, hi_hz):
-    """Pitch-axis ticks (in log2 Hz) labelled with note names, thinned to fit."""
-    lo_midi = int(np.floor(69 + 12 * np.log2(lo_hz / 440)))
-    hi_midi = int(np.ceil(69 + 12 * np.log2(hi_hz / 440)))
-    span = hi_midi - lo_midi
-    step = 1 if span <= 12 else 2 if span <= 24 else 5
-    major, minor = [], []
-    for midi in range(lo_midi, hi_midi + 1):
-        y = np.log2(440 * 2 ** ((midi - 69) / 12))
-        if midi % step == 0:
-            major.append((y, f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}  {2 ** y:.0f}"))
-        else:
-            minor.append((y, ""))
-    return [major, minor]
 
 
 def _static_plot(plot):
@@ -112,9 +90,10 @@ class PitchView(pg.PlotWidget):
             self.target_band.setRegion(np.log2(target_hz))
         self._follow_pitch()
 
-    def update_frame(self, frame):
-        self.history.append(frame["f0"])
-        self.curve.setData(HISTORY_TIMES, np.log2(np.array(self.history)))
+    def show_history(self, history):
+        """Draw the live session's pitch history (Hz, NaN where unvoiced), oldest first."""
+        self.history = deque(history, maxlen=HISTORY_LEN)
+        self.curve.setData(HISTORY_TIMES[-len(self.history):], np.log2(np.array(self.history, dtype=float)))
         self._follow_pitch()
 
     def _follow_pitch(self):
@@ -295,7 +274,9 @@ class PitchResonancePlane(pg.PlotWidget):
             self.resonance_band.setRegion(resonance_target)
 
     def update_point(self, f0, delta_f):
-        """f0 / delta_f are smoothed values, or NaN when not measurable."""
+        """f0 / delta_f are smoothed values, or None (or NaN) when not measurable."""
+        f0 = np.nan if f0 is None else f0
+        delta_f = np.nan if delta_f is None else delta_f
         if np.isnan(f0) or np.isnan(delta_f):
             self.current.setData([], [])
             self.missing_frames += 1
