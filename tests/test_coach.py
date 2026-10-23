@@ -50,6 +50,13 @@ def test_rule_fires(key, change, kwargs):
     assert key in keys(ON_TARGET | change, WIDE_PITCH, **kwargs)
 
 
+@pytest.mark.parametrize("key,change,kwargs", RULE_CASES)
+def test_rule_stays_in_its_mode(key, change, kwargs):
+    other = "speak" if kwargs.get("mode") == "sing" else "sing"
+    fires = key in keys(ON_TARGET | change, WIDE_PITCH, **(kwargs | {"mode": other}))
+    assert fires == (key not in coach.RULE_MODES)   # mode-specific rules stay quiet elsewhere
+
+
 def test_on_target_gets_praise_not_advice():
     assert keys(ON_TARGET) == ["on_target"]
 
