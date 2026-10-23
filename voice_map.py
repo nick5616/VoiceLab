@@ -1,12 +1,11 @@
 """Voice map: a pitch x level grid accumulated from live frames and coloured by
 a voice-quality metric, in the spirit of FonaDyn (Ternström & Pabon). It shows
-your range and where in it your voice is clearest, brightest or lightest."""
+your range and where in it your voice is clearest, brightest or lightest. MapSession is the live map as
+data; a UI draws its grid(). No UI toolkit."""
 import numpy as np
-import pyqtgraph as pg
-from PyQt6.QtCore import QRectF, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from analysis import NOTE_NAMES, SAMPLE_RATE, frame_levels, hz_to_midi
+from analysis import SAMPLE_RATE, frame_levels, hz_to_midi
+from display import midi_name
 
 MIDI_LO, MIDI_HI = 36, 96            # C2-C7
 LEVEL_LO, LEVEL_HI, LEVEL_STEP = -60, 0, 2   # dBFS
@@ -24,7 +23,10 @@ MAP_METRICS = {
     "cq": ("Contact quotient (EGG)", (0.2, 0.7), ""),
 }
 EGG_METRICS = {"cq"}                 # only offered once an EGG has filled some cells
-BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
+HINT = ("Builds up as you sing or speak, across sessions. Level is uncalibrated: "
+        "keep mic gain and distance the same.")
+REBUILD_TOOLTIP = ("Replace the map with one built from your saved takes, without the noise "
+                   "older versions counted as voice.")
 
 
 class VoiceMapData:
@@ -111,140 +113,71 @@ def rebuild(takes, mode=None):
     return data
 
 
-def midi_name(midi):
-    return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
+class MapSession:
+    """The Voice Map kept across sessions at `path`: live frames add to it (on_frame), and grid(key)
+    gives what to draw for one metric. `mode` ("speak" | "sing") range-checks the pitch."""
 
-
-class VoiceMapView(QWidget):
-    rebuild_requested = pyqtSignal()
-
-    def __init__(self, engine, path):
-        super().__init__()
+    def __init__(self, path):
         self.path = path
-        self.mode = None                  # "speak" | "sing": set by the host so f0 can be range-checked
+        self.mode = None
         self.data = VoiceMapData.load(path) if path.exists() else VoiceMapData()
-        self.pending = 0
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        left = QVBoxLayout()
-        self.metric = QComboBox()
-        self.update_metric_choices()
-        self.metric.setStyleSheet("QComboBox { background: #1e1e1e; color: white; }")
-        self.metric.currentIndexChanged.connect(self.redraw)
-        self.range_label = QLabel()
-        self.range_label.setWordWrap(True)
-        self.range_label.setStyleSheet("color: white; font-size: 13px;")
-        hint = QLabel("Builds up as you sing or speak, across sessions. Level is uncalibrated: "
-                      "keep mic gain and distance the same.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #aaa; font-size: 11px;")
-        clear_btn = QPushButton("Clear map")
-        clear_btn.setStyleSheet(BUTTON_STYLE)
-        clear_btn.clicked.connect(self.clear)
-        rebuild_btn = QPushButton("Rebuild from takes")
-        rebuild_btn.setStyleSheet(BUTTON_STYLE)
-        rebuild_btn.setToolTip("Replace the map with one built from your saved takes, without the noise "
-                               "older versions counted as voice.")
-        rebuild_btn.clicked.connect(self.rebuild_requested)
-        self.scale_label = QLabel()
-        self.scale_label.setWordWrap(True)
-        self.scale_label.setStyleSheet("color: #ddd; font-size: 11px;")
-        for w in (self.metric, self.scale_label, self.range_label, hint):
-            left.addWidget(w)
-        left.addStretch()
-        left.addWidget(rebuild_btn)
-        left.addWidget(clear_btn)
-        left_widget = QWidget()
-        left_widget.setLayout(left)
-        left_widget.setFixedWidth(230)
-        layout.addWidget(left_widget)
-
-        self.plot = pg.PlotWidget(background="#1e1e1e")
-        self.plot.setMouseEnabled(x=False, y=False)
-        self.plot.hideButtons()
-        self.plot.setMenuEnabled(False)
-        self.plot.getAxis("left").setLabel("Level dBFS")
-        self.plot.getAxis("bottom").setTicks([[(m + 0.5, midi_name(m))
-                                               for m in range(MIDI_LO, MIDI_HI + 1, 12)]])
-        self.image = pg.ImageItem(np.zeros(self.data.counts.shape))
-        self.image.setRect(QRectF(MIDI_LO, LEVEL_LO, MIDI_HI - MIDI_LO + 1, LEVEL_HI - LEVEL_LO))
-        lut = pg.colormap.get("viridis").getLookupTable(nPts=256, alpha=True)
-        lut[0] = (0, 0, 0, 0)   # index 0 = empty cell, drawn transparent
-        self.image.setLookupTable(lut)
-        self.plot.addItem(self.image)
-        layout.addWidget(self.plot)
-        self.redraw()
-        engine.frame_ready.connect(self.on_frame)
+        self.pending = 0            # frames added since the last grid()
 
     def metric_keys(self):
         """Metrics the picker offers: EGG ones only while the map holds EGG data."""
         return [k for k in MAP_METRICS if k not in EGG_METRICS or self.data.has_data(k)]
 
-    def update_metric_choices(self):
-        """Refill the picker if the offered metrics changed, keeping the selection."""
-        keys = self.metric_keys()
-        if keys == [self.metric.itemData(i) for i in range(self.metric.count())]:
-            return
-        current = self.metric.currentData()
-        self.metric.blockSignals(True)
-        self.metric.clear()
-        for key in keys:
-            self.metric.addItem(MAP_METRICS[key][0], key)
-        self.metric.setCurrentIndex(max(0, self.metric.findData(current)))
-        self.metric.blockSignals(False)
-        if self.metric.currentData() != current and hasattr(self, "image"):
-            self.redraw()
+    def metric_choices(self):
+        """[(key, label)] for the metric picker."""
+        return [(k, MAP_METRICS[k][0]) for k in self.metric_keys()]
 
     def on_frame(self, frame):
-        if self.data.add(frame, getattr(self, "mode", None)):
-            self.update_metric_choices()
+        """Count a live frame; True if it was added to the map."""
+        added = self.data.add(frame, self.mode)
+        if added:
             self.pending += 1
-            if self.pending >= REDRAW_EVERY and self.isVisible():
-                self.redraw()
+        return added
 
-    def redraw(self):
+    def due(self):
+        """True once enough frames came in since the last grid() to draw again."""
+        return self.pending >= REDRAW_EVERY
+
+    def grid(self, key):
+        """What to draw for metric `key`: {"values" (cell means, with empty cells below the colour range),
+        "levels" (lo, hi) of the colour range, "rect" (x, y, width, height) in MIDI and dBFS, "x_range",
+        "y_range", "scale_text", "range_text", "ticks" [(x, name)]}."""
         self.pending = 0
-        self.update_metric_choices()
-        key = self.metric.currentData()
         lo, hi = MAP_METRICS[key][1]
         values = self.data.mean(key)
-        # Map real values to lut indices 1-255 and empty cells below them to 0.
+        # Real values map to colour-table indices 1-255 and empty cells below them to 0.
         step = (hi - lo) / 254
-        self.image.setImage(np.where(np.isnan(values), lo - 10 * step, values),
-                            levels=(lo - step, hi), autoLevels=False)
-        self.scale_label.setText(f"Colour: purple {lo:g} → yellow {hi:g}{MAP_METRICS[key][2]}")
-
         rng = self.data.range_midi()
         if rng:
             lo_m, hi_m = rng
-            self.range_label.setText(f"Range: {midi_name(lo_m)}–{midi_name(hi_m)} "
-                                     f"({hi_m - lo_m} semitones)")
-            self.plot.setXRange(max(MIDI_LO, lo_m - 4), min(MIDI_HI + 1, hi_m + 5), padding=0)
+            range_text = f"Range: {midi_name(lo_m)}–{midi_name(hi_m)} ({hi_m - lo_m} semitones)"
+            x_range = (max(MIDI_LO, lo_m - 4), min(MIDI_HI + 1, hi_m + 5))
         else:
-            self.range_label.setText("Nothing mapped yet.")
-            self.plot.setXRange(MIDI_LO + 6, MIDI_LO + 42, padding=0)
-        self.plot.setYRange(LEVEL_LO, LEVEL_HI, padding=0)
-
-    def showEvent(self, event):
-        self.redraw()
-        super().showEvent(event)
+            range_text, x_range = "Nothing mapped yet.", (MIDI_LO + 6, MIDI_LO + 42)
+        return {"values": np.where(np.isnan(values), lo - 10 * step, values), "levels": (lo - step, hi),
+                "rect": (MIDI_LO, LEVEL_LO, MIDI_HI - MIDI_LO + 1, LEVEL_HI - LEVEL_LO),
+                "x_range": x_range, "y_range": (LEVEL_LO, LEVEL_HI),
+                "scale_text": f"Colour: purple {lo:g} → yellow {hi:g}{MAP_METRICS[key][2]}",
+                "range_text": range_text,
+                "ticks": [(m + 0.5, midi_name(m)) for m in range(MIDI_LO, MIDI_HI + 1, 12)]}
 
     def clear(self):
+        """Forget everything, and keep that."""
         self.data = VoiceMapData()
         self.save()
-        self.redraw()
 
     def rebuild(self, takes):
-        """Replace the map with one built from saved takes (see voice_map.rebuild)."""
+        """Replace the map with one built from saved takes (see rebuild)."""
         self.use(rebuild(takes, self.mode))
 
     def use(self, data):
         """Replace the map with `data` (a VoiceMapData) and keep it."""
         self.data = data
         self.save()
-        self.update_metric_choices()
-        self.redraw()
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)

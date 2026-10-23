@@ -1,5 +1,6 @@
 """Takes, targets and practice UI (spec 07): re-analysis, the take card's quality and advice, targets,
-progress, playback and the session reminder. Offscreen Qt, no mic and no speakers."""
+progress, playback and the session reminder, as the window shows them. Offscreen Qt, no mic and no
+speakers. The same logic is checked without a UI in test_core.py."""
 import copy
 import hashlib
 import json
@@ -17,11 +18,12 @@ import mic_noise  # noqa: E402
 import profile_store  # noqa: E402
 from analysis import analyze_take  # noqa: E402
 from profile_store import Profile  # noqa: E402
-from progress import ProgressDialog, change_text, select  # noqa: E402
-from take_card import AnalysisGraph, TakeCard, UntrustedMetric  # noqa: E402
+from progress import change_text, select  # noqa: E402
+from ui.progress_dialog import ProgressDialog  # noqa: E402
+from ui.take_card import AnalysisGraph, TakeCard, UntrustedMetric  # noqa: E402
 from take_register import analyze_recording, finish_take  # noqa: E402
 from take_store import ANALYSIS_VERSION, TakeStore, is_outdated  # noqa: E402
-from targets_dialog import TargetsDialog  # noqa: E402
+from ui.targets_dialog import TargetsDialog  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
 from test_app import app, make_window, record, wait_for  # noqa: E402,F401  (fixtures)
 
@@ -53,7 +55,7 @@ def test_old_take_is_reanalysed_without_touching_the_wav(make_window, tmp_path):
     before, mtime = sha(wav), wav.stat().st_mtime_ns
     window = make_window(folder)
     assert is_outdated(window.cards[0].data)
-    assert wait_for(lambda: not window.reanalysis_active())
+    assert wait_for(lambda: not window.core.reanalysis_active())
     card = window.cards[0]
     assert card.data["analysis_version"] == ANALYSIS_VERSION and not is_outdated(card.data)
     assert card.data["pitch_range"] < 20                       # the stored 47 st was ghosts
@@ -70,7 +72,7 @@ def test_reanalysis_runs_one_at_a_time_and_reports_progress(make_window, tmp_pat
         old_take(folder, day=day)
     window = make_window(folder)
     seen = []
-    assert wait_for(lambda: (seen.append(window.status_label.text()), not window.reanalysis_active())[1])
+    assert wait_for(lambda: (seen.append(window.status_label.text()), not window.core.reanalysis_active())[1])
     assert any("1 of 3" in text for text in seen) and any("3 of 3" in text for text in seen)
     assert all(not is_outdated(card.data) for card in window.cards)
 
@@ -81,12 +83,12 @@ def test_current_takes_are_left_alone(make_window, tmp_path):
     take["analysis_version"] = ANALYSIS_VERSION
     TakeStore(folder).save(take | {"time": "2026-09-01T10:00:00"})
     window = make_window(folder)
-    assert not window.outdated_takes() and window.reanalysis_worker is None
+    assert not window.core.outdated_takes() and window.core.jobs["reanalysis"] is None
 
 
 def test_sung_take_is_analysed_in_sing_mode(make_window):
     window = make_window()
-    window.live_panel.set_mode("sing", user=True)
+    window.live_panel.mode_buttons["sing"].click()
     assert window.profile.mode == "sing" and window.voice_map.mode == "sing"
     high = synth_vowel(700, MALE_FORMANTS, seconds=2, noise=0.02)
     card = record(window, high)
@@ -107,7 +109,7 @@ def test_card_shows_tier_reasons_and_advice(make_window):
     pitch, delta_f = card.data["pitch"], card.data["delta_f"]
     window.profile.set_target("pitch", [pitch * 0.9, pitch * 1.1])
     window.profile.set_target("delta_f", [delta_f + 150, delta_f + 300])
-    window.refresh_profile()
+    window.core.refresh_profile()
     texts = [m["text"] for m in card.advice]
     assert 1 <= len(card.advice) <= 3
     if card.quality["trust"]["pitch"] and card.quality["trust"]["delta_f"] and tier != "poor":
@@ -335,7 +337,7 @@ def test_graph_click_maps_to_seconds(make_window):
 
 def test_session_length_and_rest_reminder(make_window):
     window = make_window()
-    clock = window.session_clock = FakeClock()
+    clock = window.core.clock = FakeClock()
     assert window.session_label.isHidden() and window.rest_label.isHidden()
     record(window, VOICE)
     assert not window.session_label.isHidden() and window.session_label.text() == "Session 0 min"
@@ -357,8 +359,8 @@ def test_voice_map_rebuilds_from_takes(make_window, tmp_path, monkeypatch):
     window = make_window(folder)
     record(window, VOICE)
     window.voice_map.clear()
+    assert window.voice_map.data.counts.sum() == 0
     window.voice_map.rebuild_requested.emit()
-    assert wait_for(lambda: window.voicemap_worker is not None and not window.voicemap_worker.isRunning())
     assert wait_for(lambda: "rebuilt" in window.status_label.text())
     assert window.voice_map.data.counts.sum() > 50
 
@@ -369,7 +371,7 @@ def test_formant_ceiling_is_fixed_once(make_window):
     first = record(window, VOICE)
     ceiling = window.profile.formant_ceiling
     assert ceiling == first.data["formant_ceiling"]
-    window.note_ceiling(dict(first.data, formant_ceiling=ceiling + 150))
+    window.core.note_ceiling(dict(first.data, formant_ceiling=ceiling + 150))
     assert window.profile.formant_ceiling == ceiling                 # later takes don't move it
 
 

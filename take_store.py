@@ -137,15 +137,16 @@ class TakeStore:
 
     # --- READ ---
 
-    def load_all(self):
+    def load_all(self, progress=None):
         """(takes oldest first, [problem messages]). Audio files without a
-        readable sidecar are analysed now and get one."""
+        readable sidecar are analysed now and get one. progress(done, total) hears about each file."""
         if not self.folder.is_dir():
             return [], [f"Takes folder not found: {self.folder}"]
         takes, problems = [], []
-        for path in sorted(self.folder.iterdir()):
-            if path.suffix.lower() not in AUDIO_EXTENSIONS or not path.is_file():
-                continue
+        paths = [p for p in sorted(self.folder.iterdir()) if p.suffix.lower() in AUDIO_EXTENSIONS and p.is_file()]
+        for done, path in enumerate(paths):
+            if progress:
+                progress(done, len(paths))
             try:
                 data = self._read_sidecar(path)
                 if data is None:

@@ -1,19 +1,15 @@
-"""Singing exercises: built-in patterns or a MIDI melody, a guide tone,
-a scrolling piano roll, and per-note scoring of the take."""
+"""Singing exercises: built-in patterns or a MIDI melody, a guide tone, per-note scoring of the take, and
+ExerciseSession, the running exercise as data (a UI draws the piano roll from it). No UI toolkit."""
 import time
 from collections import defaultdict
 
 import numpy as np
-import pyqtgraph as pg
 import sounddevice as sd
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                             QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
-from analysis import (CLOSE_CENTS, IN_TUNE_CENTS, NOTE_NAMES, PERCEIVED_SECONDS, SAMPLE_RATE,
+from analysis import (CLOSE_CENTS, IN_TUNE_CENTS, PERCEIVED_SECONDS, SAMPLE_RATE,
                       analyze_take, hz_to_midi, midi_to_hz, perceived_cents, score_exercise)
-from engine import AnalysisWorker
+from display import midi_name
+from jobs import JobRunner
 
 # Semitone patterns from the start note: (name, intervals, seconds per note).
 PATTERNS = [
@@ -29,13 +25,10 @@ TAIL_SECONDS = 0.6                # keep recording briefly after the last note
 ROLL_BEFORE, ROLL_AFTER = 3, 5    # piano roll window around "now" (s)
 NOTE_RANGE = range(36, 85)        # C2-C6 start notes
 IN_TUNE_COLOR, CLOSE_COLOR, OFF_COLOR = "#2ecc71", "#f1c40f", "#e67e22"   # within 25 / 50 cents / beyond
-BAR_COLORS = {IN_TUNE_COLOR: (46, 204, 113, 200), CLOSE_COLOR: (241, 196, 15, 200), OFF_COLOR: (230, 126, 34, 200)}
-DEFAULT_BAR_COLOR = (52, 152, 219, 200)
-BUTTON_STYLE = "background-color: #3a3a3a; color: white; padding: 5px 10px; border-radius: 5px;"
-
-
-def midi_name(midi):
-    return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
+DEFAULT_START_MIDI = 48          # C3
+MIDI_CHOICE = len(PATTERNS)       # the choice after the patterns: a MIDI melody
+MIDI_CHOICE_TEXT = "Load MIDI melody…"
+IDLE_STATUS = "Sing along with the bars. Singing an octave down is fine."
 
 
 def pattern_targets(intervals, note_seconds, start_midi):
@@ -128,67 +121,6 @@ def analyze_exercise_take(audio, targets, name, latency=0.0):
     return result
 
 
-class PianoRoll(pg.PlotWidget):
-    """Target notes as bars scrolling past a playhead, with your pitch on top."""
-
-    def __init__(self):
-        super().__init__(background="#1e1e1e")
-        self.setMouseEnabled(x=False, y=False)
-        self.hideButtons()
-        self.setMenuEnabled(False)
-        self.showGrid(x=False, y=True, alpha=0.15)
-        self.getAxis("left").setWidth(45)
-        self.getAxis("bottom").setLabel("seconds")
-        self.bars = self.plot(pen=pg.mkPen((150, 150, 150, 140), width=12), connect="pairs")
-        self.current_bar = self.plot(pen=pg.mkPen(DEFAULT_BAR_COLOR, width=12))
-        self.trace = self.plot(pen=pg.mkPen("#f1c40f", width=2), connect="finite")
-        self.playhead = pg.InfiniteLine(angle=90, pen=pg.mkPen("w", width=1))
-        self.addItem(self.playhead)
-        self.targets = []
-        self.trace_t, self.trace_m = [], []
-
-    def set_targets(self, targets):
-        self.targets = targets
-        self.trace_t, self.trace_m = [], []
-        xs, ys = [], []
-        for start, duration, midi in targets:
-            xs += [start, start + duration - 0.02]
-            ys += [midi, midi]
-        self.bars.setData(xs, ys)
-        self.trace.setData([], [])
-        self.current_bar.setData([], [])
-        midis = [m for _, _, m in targets]
-        lo, hi = min(midis) - 3, max(midis) + 3
-        self.setYRange(lo, hi, padding=0)
-        self.getAxis("left").setTicks([[(m, midi_name(m)) for m in range(lo, hi + 1)
-                                        if m in midis or m % 12 == 0]])
-        self.update_view(0.0, np.nan)
-
-    def update_view(self, now, f0, color=None):
-        """Move the roll to `now` with the latest f0; `color` (a tuning_color) tints the current bar."""
-        if not np.isnan(f0):
-            midi = float(hz_to_midi(f0))
-            # Fold onto the target's octave so an octave-down singer stays on the bars.
-            target = current_target(self.targets, now)
-            if target is not None:
-                midi -= 12 * np.round((midi - target) / 12)
-            self.trace_t.append(now)
-            self.trace_m.append(midi)
-        else:
-            self.trace_t.append(now)
-            self.trace_m.append(np.nan)
-        self.trace.setData(self.trace_t, self.trace_m)
-        self.playhead.setValue(now)
-        self.setXRange(now - ROLL_BEFORE, now + ROLL_AFTER, padding=0)
-        self.current_bar.setPen(pg.mkPen(BAR_COLORS.get(color, DEFAULT_BAR_COLOR), width=12))
-        for start, duration, midi in self.targets:
-            if start <= now < start + duration:
-                self.current_bar.setData([start, start + duration - 0.02], [midi, midi])
-                break
-        else:
-            self.current_bar.setData([], [])
-
-
 def current_target(targets, now):
     for start, duration, midi in targets:
         if start <= now < start + duration:
@@ -196,106 +128,91 @@ def current_target(targets, now):
     return None
 
 
-class ExerciseView(QWidget):
-    """Pick an exercise, sing it against the piano roll, get a scored take."""
+def fold_to_target(f0, target):
+    """f0 as a (fractional) MIDI note, folded onto the target's octave so an octave-down singer stays
+    on the bars; NaN when unvoiced."""
+    if np.isnan(f0):
+        return np.nan
+    midi = float(hz_to_midi(f0))
+    if target is not None:
+        midi -= 12 * np.round((midi - target) / 12)
+    return midi
 
-    running_changed = pyqtSignal(bool)
-    take_ready = pyqtSignal(dict)
 
-    def __init__(self, engine):
-        super().__init__()
-        self.engine = engine
+class ExerciseSession:
+    """Pick an exercise, sing it against the guide, get a scored take. Emits "exercise_changed"(state)
+    when its text changes outside a frame, "practice"(running) when it starts or stops, and
+    "exercise_scored"(result) when a scored take is ready. on_frame(frame) returns the frame's state."""
+
+    def __init__(self, engine, events, runner=None, clock=time.perf_counter):
+        self.engine, self.events = engine, events
+        self.runner = runner or JobRunner(events)
+        self.clock = clock
         self.running = False
-        self.targets, self.midi_targets, self.midi_name = [], None, None
+        self.choice = 0                  # index into PATTERNS, or MIDI_CHOICE
+        self.start_midi = DEFAULT_START_MIDI
+        self.transpose = 0               # semitones, for a MIDI melody
+        self.guide = True                # play the guide tone
+        self.targets, self.midi_targets, self.midi_file = [], None, None
         self.t0 = None
         self.latency = 0.0               # guide output latency, s
         self.recent = []                 # (time, cents from target) over the last PERCEIVED_SECONDS
-        self.worker = None
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        left = QVBoxLayout()
-        self.cents_label = QLabel("—")
-        self.cents_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        self.cents_label.setStyleSheet("color: white;")
-        self.choice = QComboBox()
-        for name, _, _ in PATTERNS:
-            self.choice.addItem(name)
-        self.choice.addItem("Load MIDI melody…")
-        self.choice.activated.connect(self._choice_changed)
-        self.start_note = QComboBox()
-        for m in NOTE_RANGE:
-            self.start_note.addItem(midi_name(m), m)
-        self.start_note.setCurrentIndex(NOTE_RANGE.index(48))  # C3
-        self.transpose = QSpinBox()
-        self.transpose.setRange(-24, 24)
-        self.transpose.setPrefix("Transpose ")
-        self.transpose.hide()
-        self.guide = QCheckBox("Guide tone")
-        self.guide.setToolTip("Use headphones, or the mic will hear the guide instead of you.")
-        self.guide.setChecked(True)
-        self.start_btn = QPushButton("Start")
-        self.start_btn.setStyleSheet(BUTTON_STYLE)
-        self.start_btn.clicked.connect(self.toggle)
-        self.status = QLabel("Sing along with the bars. Singing an octave down is fine.")
-        self.status.setWordWrap(True)
-        self.status.setStyleSheet("color: #aaa; font-size: 11px;")
-        style = "QComboBox, QSpinBox { background: #1e1e1e; color: white; } QCheckBox { color: #ddd; }"
-        for w in (self.choice, self.start_note, self.transpose, self.guide):
-            w.setStyleSheet(style)
-        for w in (self.cents_label, self.choice, self.start_note, self.transpose,
-                  self.guide, self.start_btn, self.status):
-            left.addWidget(w)
-        left.addStretch()
-        left_widget = QWidget()
-        left_widget.setLayout(left)
-        left_widget.setFixedWidth(230)
-        layout.addWidget(left_widget)
-
-        self.roll = PianoRoll()
-        layout.addWidget(self.roll)
-        self.start_note.currentIndexChanged.connect(self._refresh_targets)
-        self.transpose.valueChanged.connect(self._refresh_targets)
-        self._refresh_targets()
-        engine.frame_ready.connect(self.on_frame)
+        self.status = IDLE_STATUS
+        self.cents_text, self.cents_color = "—", None    # the big readout; colour from tuning_color
+        self.result = None
+        self.job = None
 
     # --- CHOOSING ---
 
-    def _is_midi(self):
-        return self.choice.currentIndex() == len(PATTERNS)
+    @staticmethod
+    def choice_names():
+        return [name for name, _, _ in PATTERNS] + [MIDI_CHOICE_TEXT]
 
-    def _choice_changed(self):
-        if self._is_midi():
-            path, _ = QFileDialog.getOpenFileName(self, "Load MIDI melody", "", "MIDI files (*.mid *.midi)")
-            if path:
+    @staticmethod
+    def start_notes():
+        """[(MIDI, name)] of the start notes offered."""
+        return [(m, midi_name(m)) for m in NOTE_RANGE]
+
+    def is_midi(self):
+        return self.choice == MIDI_CHOICE
+
+    def choose(self, choice, midi_path=None):
+        """Pick a pattern, or (MIDI_CHOICE) a melody loaded from `midi_path`. Without a melody loaded the
+        first pattern is picked instead. Returns the choice in effect."""
+        self.choice = choice
+        if self.is_midi():
+            if midi_path:
                 try:
-                    self.midi_targets = load_midi_melody(path)
-                    self.midi_name = path.replace("\\", "/").split("/")[-1]
+                    self.midi_targets = load_midi_melody(midi_path)
+                    self.midi_file = midi_path.replace("\\", "/").split("/")[-1]
                 except Exception as e:
-                    self.status.setText(f"Couldn't load MIDI: {e}")
+                    self.status = f"Couldn't load MIDI: {e}"
                     self.midi_targets = None
+                self._changed()
             if not self.midi_targets:
-                self.choice.setCurrentIndex(0)
-        self._refresh_targets()
-
-    def _refresh_targets(self):
-        midi = self._is_midi()
-        self.start_note.setVisible(not midi)
-        self.transpose.setVisible(midi)
-        self.roll.set_targets(self.build_targets())
+                self.choice = 0
+        return self.choice
 
     def build_targets(self):
-        if self._is_midi() and self.midi_targets:
-            return [(s, d, n + self.transpose.value()) for s, d, n in self.midi_targets]
-        name, intervals, seconds = PATTERNS[min(self.choice.currentIndex(), len(PATTERNS) - 1)]
-        return pattern_targets(intervals, seconds, self.start_note.currentData())
+        if self.is_midi() and self.midi_targets:
+            return [(s, d, n + self.transpose) for s, d, n in self.midi_targets]
+        name, intervals, seconds = PATTERNS[min(self.choice, len(PATTERNS) - 1)]
+        return pattern_targets(intervals, seconds, self.start_midi)
 
     def exercise_name(self):
-        if self._is_midi() and self.midi_name:
-            return self.midi_name
-        return f"{self.choice.currentText()} from {self.start_note.currentText()}"
+        if self.is_midi() and self.midi_file:
+            return self.midi_file
+        return f"{self.choice_names()[self.choice]} from {midi_name(self.start_midi)}"
 
     # --- RUNNING ---
+
+    def state(self):
+        """{"running", "status", "cents_text", "cents_color", "targets"}."""
+        return {"running": self.running, "status": self.status, "cents_text": self.cents_text,
+                "cents_color": self.cents_color, "targets": self.targets if self.running else self.build_targets()}
+
+    def _changed(self):
+        self.events.emit("exercise_changed", self.state())
 
     def toggle(self):
         if self.running:
@@ -305,42 +222,37 @@ class ExerciseView(QWidget):
 
     def start(self):
         if self.engine.is_capturing():
-            self.status.setText("Stop the current recording first.")
-            return
+            self.status = "Stop the current recording first."
+            self._changed()
+            return False
         self.targets = self.build_targets()
-        self.roll.set_targets(self.targets)
         self.engine.start_take()
         self.latency = 0.0
         self.recent = []
-        if self.guide.isChecked():
+        if self.guide:
             sd.play(guide_audio(self.targets), SAMPLE_RATE)
             self.latency = output_latency()
-        self.t0 = time.perf_counter()
+        self.t0 = self.clock()
+        self.status = "Count-in…"
         self._set_running(True)
-        self.status.setText("Count-in…")
+        return True
 
     def stop(self, finished=False):
         sd.stop()
         audio = self.engine.stop_take() if self.engine.is_capturing() else np.zeros(0)
+        self.status = "Scoring…" if finished else "Stopped."
         self._set_running(False)
-        if not finished:
-            self.status.setText("Stopped.")
-            return
-        self.status.setText("Scoring…")
-        self.worker = AnalysisWorker(analyze_exercise_take, audio, self.targets, self.exercise_name(),
-                                     self.latency)
-        self.worker.finished_analysis.connect(self._scored)
-        self.worker.start()
+        if finished:
+            self.job = self.runner.submit("exercise", "Scoring the exercise", analyze_exercise_take, audio,
+                                          self.targets, self.exercise_name(), self.latency, on_done=self._scored)
 
     def _set_running(self, running):
         self.running = running
-        self.start_btn.setText("Stop" if running else "Start")
-        for w in (self.choice, self.start_note, self.transpose):
-            w.setEnabled(not running)
-        self.running_changed.emit(running)
+        self._changed()
+        self.events.emit("practice", running)
 
     def now(self):
-        return time.perf_counter() - self.t0 if self.running else None
+        return self.clock() - self.t0 if self.running else None
 
     def current_target(self):
         """MIDI note the singer should be on right now, or None."""
@@ -356,39 +268,45 @@ class ExerciseView(QWidget):
         return perceived_cents([c for _, c in self.recent])
 
     def on_frame(self, frame):
+        """Follow one live frame. Returns None when not running, else {"now", "midi" (the voice folded onto
+        the target's octave, NaN unvoiced), "color" (tuning_color of the perceived error), "current"
+        ((start, duration, midi) of the bar under the playhead, or None), "finished", and state()'s keys}.
+        Finishing the exercise stops it and scores the take."""
         if not self.running:
-            return
-        now = self.now()
+            return None
+        now = self.clock() - self.t0
         f0 = frame["f0"]
         # The singer follows what they hear, which the output device delays.
         target = current_target(self.targets, now - self.latency)
         cents = self.perceived_error(now, f0, target)
         color = tuning_color(cents)
-        self.roll.update_view(now, f0, color)
         if target is not None and color is not None:
-            self.cents_label.setText(f"{midi_name(target)} {cents:+.0f}¢")
-            self.cents_label.setStyleSheet(f"color: {color};")
+            self.cents_text, self.cents_color = f"{midi_name(target)} {cents:+.0f}¢", color
         elif target is not None:
-            self.cents_label.setText(midi_name(target))
-            self.cents_label.setStyleSheet("color: white;")
-        if now < LEAD_IN:
-            self.status.setText(f"Count-in… {COUNT_IN_BEATS - int(now / BEAT_SECONDS)}")
-        else:
-            self.status.setText("Sing!")
+            self.cents_text, self.cents_color = midi_name(target), None
+        self.status = f"Count-in… {COUNT_IN_BEATS - int(now / BEAT_SECONDS)}" if now < LEAD_IN else "Sing!"
+        current = next(((s, d, m) for s, d, m in self.targets if s <= now < s + d), None)
+        view = {"now": now, "midi": fold_to_target(f0, current_target(self.targets, now)), "color": color,
+                "current": current, "finished": False}
         if now > max(s + d for s, d, _ in self.targets) + TAIL_SECONDS:
+            view["finished"] = True
             self.stop(finished=True)
+        return self.state() | view
 
     def _scored(self, result):
+        self.job = None
         if "error" in result:
-            self.status.setText(result["error"])
+            self.status = result["error"]
+            self._changed()
             return
         score = result["exercise"]
         if score["notes_sung"]:
-            self.status.setText(f"{score['notes_in_tune']}/{score['notes_total']} notes in tune "
-                                f"(±{IN_TUNE_CENTS}¢), {score['notes_close']} close (±{CLOSE_CENTS}¢), "
-                                f"average error {score['mean_abs_cents']:.0f}¢ · {score['timing']}.")
+            self.status = (f"{score['notes_in_tune']}/{score['notes_total']} notes in tune "
+                           f"(±{IN_TUNE_CENTS}¢), {score['notes_close']} close (±{CLOSE_CENTS}¢), "
+                           f"average error {score['mean_abs_cents']:.0f}¢ · {score['timing']}.")
         else:
-            self.status.setText("No sung notes detected.")
-        self.cents_label.setText("—")
-        self.cents_label.setStyleSheet("color: white;")
-        self.take_ready.emit(result)
+            self.status = "No sung notes detected."
+        self.cents_text, self.cents_color = "—", None
+        self.result = result
+        self._changed()
+        self.events.emit("exercise_scored", result)
