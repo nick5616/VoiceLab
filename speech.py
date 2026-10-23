@@ -39,12 +39,50 @@ VOWEL_INTRO = ("Say 8 short words, one at a time. Each is captured when you "
 NO_VOWELS = "No vowels could be measured. Try a bit louder, and keep your pitch under ~350 Hz."
 
 
-def passage(index):
-    """{"index", "name", "title", "text"} of a reading passage; the index wraps around."""
-    index %= len(READING_PASSAGES)
-    name, text = READING_PASSAGES[index]
-    return {"index": index, "name": name, "text": text,
-            "title": f"Read aloud · {index + 1}/{len(READING_PASSAGES)} · {name}"}
+# Everyday phrases for the live phrase prompt: short, ordinary things people say out loud, so the
+# practice voice gets used where it matters. Written for VoiceLab; a mix of questions (rising
+# endings) and statements, greetings, requests and small talk.
+PHRASES = [
+    "Hi, could I get a medium latte, please?",
+    "What's the best number to reach you on?",
+    "Sorry, I didn't catch your name.",
+    "Is this seat taken?",
+    "Thanks so much, have a lovely evening!",
+    "Could you tell me where the station is?",
+    "I'd like to book a table for two at seven.",
+    "Hello, this is Sam calling about my appointment.",
+    "Oh, that sounds wonderful!",
+    "Can I pay by card?",
+    "How was your weekend?",
+    "Excuse me, is this the right line?",
+    "I'll have the soup, and a glass of water.",
+    "Nice to meet you, I've heard so much about you.",
+    "Do you know what time it closes?",
+    "No worries at all, take your time.",
+]
+CUSTOM_PASSAGE_NAME = "Your own passage"
+CUSTOM_PASSAGE_HINT = "Paste or type anything you like to read: a poem, a script, an email."
+
+
+def passages(custom=None):
+    """[(name, text)] of the passages to read: the built-in ones, then your own when you have one."""
+    return READING_PASSAGES + ([(CUSTOM_PASSAGE_NAME, custom)] if custom and custom.strip() else [])
+
+
+def passage(index, custom=None):
+    """{"index", "name", "title", "text", "custom"} of a reading passage; the index wraps around.
+    `custom` is your own passage's text, offered after the built-in ones."""
+    shown = passages(custom)
+    index %= len(shown)
+    name, text = shown[index]
+    return {"index": index, "name": name, "text": text, "custom": index >= len(READING_PASSAGES),
+            "title": f"Read aloud · {index + 1}/{len(shown)} · {name}"}
+
+
+def phrase(index):
+    """{"index", "text", "number", "count"} of an everyday phrase; the index wraps around."""
+    index %= len(PHRASES)
+    return {"index": index, "text": PHRASES[index], "number": index + 1, "count": len(PHRASES)}
 
 
 class VowelCheckSession:

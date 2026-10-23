@@ -441,3 +441,90 @@ def test_mic_check_session_runs_its_phases_without_a_ui():
     assert report["ok"] and report["advice"] == [mic_check.GOOD_ADVICE] and report["lines"]
     engine.capturing = True
     assert check.start() is None and "recording" in check.status_text()
+
+
+# --- THE SHELL'S API (spec 05) ---
+
+def test_status_display_splits_toasts_from_the_quiet_line():
+    assert app_core.status_display("Saved", "success") == {"toast": "success", "line": None}
+    assert app_core.status_display("Boom", "error")["toast"] == "error"
+    assert app_core.status_display("Loading…", "busy") == {"toast": None, "line": "Loading…"}
+    assert app_core.status_display("Listening", "info")["line"] == "Listening"
+
+
+def test_record_state_follows_recording_analysis_and_practice(make_core):
+    core = make_core()
+    assert core.record_state() == ("idle", "Record")
+    core.start_recording()
+    assert core.record_state()[0] == "recording"
+    core.stop_recording()
+    assert core.record_state()[0] == "analysing" and core.takes_in_progress() == 1
+    assert core.runner.wait_all(120)
+    assert core.record_state() == ("idle", "Record") and core.takes_in_progress() == 0
+    core.vowels.running = True
+    assert core.record_state() == ("disabled", "Practice running")
+    core.vowels.running = False
+    core.set_mic_available(False, "no device")
+    assert core.record_state() == ("disabled", "Mic unavailable")
+    assert core.mic_status()["state"] == "error" and core.heard["status"][-1][1] == "error"
+
+
+def test_replay_plays_the_recent_audio(make_core):
+    played = []
+    core = make_core()
+    core.player = app_core.Player(play=lambda buffer, rate: played.append(len(buffer)), stop=lambda: None)
+    assert core.replay() == 0.0 and core.heard["status"][-1][1] == "warning"      # nothing heard yet
+    core.engine.recent_audio = lambda seconds: VOICE[:int(min(seconds, 6) * SR)]
+    assert abs(core.replay() - 1.5) < 1e-6 and played == [len(VOICE)]
+    seconds, length = core.replay_progress()
+    assert 0 <= seconds < 0.5 and length == 1.5
+    core.stop_replay()
+    assert core.replay_progress() is None
+
+
+def test_passages_phrases_and_their_tasks(make_core):
+    core = make_core()
+    count = core.passage_count()
+    index = core.set_custom_passage("  My own words, read slowly.  ")
+    assert core.passage_count() == count + 1 and index == count
+    assert core.passage(index)["text"] == "My own words, read slowly." and core.passage(index)["custom"]
+    assert Profile(core.profile.directory).ui["custom_passage"] == "My own words, read slowly."
+    core.set_reading(index)
+    assert core.current_task({"mode": "speak"}) == "passage: Your own passage"
+    core.set_reading(None)
+    core.set_phrase_practice(True)
+    assert core.current_task({"mode": "speak"}) == "phrases"
+    assert core.current_task({"mode": "sing"}) == "free singing"
+    heard = []
+    core.events.subscribe("phrase_changed", heard.append)
+    first = core.phrase()["text"]
+    assert core.next_phrase()["text"] != first and core.next_phrase(-1)["text"] == first and len(heard) == 2
+    assert core.set_custom_passage("") is None and core.passage_count() == count
+
+
+def test_ui_preferences_goal_and_onboarding_persist(make_core):
+    core = make_core()
+    heard = []
+    core.events.subscribe("ui_changed", heard.append)
+    assert core.should_onboard() and core.ui_pref("theme") == "dark"
+    core.set_ui_pref(theme="light", reduce_motion=True)
+    assert heard[-1]["theme"] == "light" and heard[-1]["reduce_motion"]
+    with pytest.raises(ValueError):
+        core.set_ui_pref(colour="pink")
+    core.finish_onboarding()
+    core.set_voice_goal("androgynous")
+    again = Profile(core.profile.directory)
+    assert again.ui["theme"] == "light" and again.ui["onboarded"] and again.voice_goal == "androgynous"
+    assert core.heard["profile_changed"] and core.heard["status"][-1] == ("Voice goal: androgynous", "success")
+
+
+def test_mic_check_text_in_plain_words(make_core):
+    core = make_core()
+    assert core.mic_check_text() == []
+    core.profile.set_mic_check({"ok": False, "advice": ["Move closer."], "time": "2026-10-23T09:00:00",
+                                "noise_db": -60.0, "voice_db": -30.0, "snr_voice_db": 30.0, "rumble": False,
+                                "whine": False, "lines": [], "rumble_share": 0.1})
+    lines = core.mic_check_text()
+    assert lines[0].startswith("Last check (Fri Oct 23") and lines[0].endswith("Move closer.")
+    assert any("Noise floor" in line for line in lines[1:])
+    assert core.mic_status({"text": "Desk rumble"})["state"] == "warn"

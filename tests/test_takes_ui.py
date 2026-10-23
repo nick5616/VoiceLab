@@ -90,7 +90,7 @@ def test_current_takes_are_left_alone(make_window, tmp_path):
 
 def test_sung_take_is_analysed_in_sing_mode(make_window):
     window = make_window()
-    window.live_panel.mode_buttons["sing"].click()
+    window.top.mode.set_current("sing", emit=True)          # the shell's Speak / Sing switch (spec 05)
     assert window.profile.mode == "sing" and window.voice_map.mode == "sing"
     high = synth_vowel(700, MALE_FORMANTS, seconds=2, noise=0.02)
     card = record(window, high)
@@ -339,20 +339,22 @@ def test_graph_click_maps_to_seconds(make_window):
 
 def test_session_length_and_rest_reminder(make_window):
     window = make_window()
+    # Spec 05: the session time sits in the top bar and the rest reminder is a gentle toast.
     clock = window.core.clock = FakeClock()
-    assert window.session_label.isHidden() and window.rest_label.isHidden()
+    assert window.top.session.text() == ""
     record(window, VOICE)
-    assert not window.session_label.isHidden() and window.session_label.text() == "Session 0 min"
+    assert window.top.session.text() == "Session 0 min"
     clock.now += 10 * 60
     window.update_session()
-    assert window.session_label.text() == "Session 10 min" and window.rest_label.isHidden()
+    rests = [t for t in window.toasts.toasts if "minutes" in t.text]
+    assert window.top.session.text() == "Session 10 min" and not rests
     clock.now += 16 * 60
     window.update_session()
-    assert not window.rest_label.isHidden() and "26 minutes" in window.rest_label.text()
-    assert "unverified" in window.rest_label.toolTip()
-    window.rest_label.hide()
+    rests = [t for t in window.toasts.toasts if "minutes" in t.text]
+    assert len(rests) == 1 and "26 minutes" in rests[0].text
+    assert "unverified" in window.top.session.toolTip()
     window.update_session()                                          # once per interval, not every tick
-    assert window.rest_label.isHidden()
+    assert len([t for t in window.toasts.toasts if "minutes" in t.text]) == 1
 
 
 def test_voice_map_rebuilds_from_takes(make_window, tmp_path, monkeypatch):
@@ -398,13 +400,10 @@ def test_vowel_check_ceiling_wins(make_window):
 
 def test_mic_check_result_is_stored(make_window, monkeypatch):
     window = make_window()
-    live = window.live_panel
-    assert live.engine is window.engine
-    monkeypatch.setattr(live, "show_mic_check", lambda: live.mic_check_done.emit({"level_db": -30.0}))
-    window.first_run_mic_check()
+    window._mic_checked({"level_db": -30.0})                         # the shell's mic check finished (spec 05)
     assert window.profile.mic_check == {"level_db": -30.0} and window.status_label.text() == "Mic check saved"
     window.profile.mic_check = None
-    window.first_run_mic_check()                                     # asked once, never again by itself
+    assert not window.core.should_run_first_mic_check()              # asked once, never again by itself
     assert window.profile.mic_check is None
 
 

@@ -42,6 +42,9 @@ EXERCISE_SUMMARY_KEYS = ["name", "notes_total", "notes_sung", "notes_in_tune",
 NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 # Where the voice report's tips point (report.py); None = just exploring, describe without pushing.
 VOICE_GOALS = ("feminine", "androgynous", "masculine", None)
+# UI preferences (profile.ui) and their defaults: the window's theme ("dark" | "light" | "system"),
+# motion, whether the first-run welcome was seen, and your own read-aloud passage (text or None).
+UI_DEFAULTS = {"theme": "dark", "reduce_motion": False, "onboarded": False, "custom_passage": None}
 
 
 def data_dir():
@@ -190,6 +193,7 @@ class Profile:
         self.mic_check = None          # result of the last mic check (spec 06)
         self.mic_check_asked = False   # offered once on first launch
         self.voice_goal = None         # one of VOICE_GOALS; None = just exploring (phase 10 spec 02)
+        self.ui = dict(UI_DEFAULTS)    # UI preferences (phase 10 spec 05); set with set_ui
         self.load()
 
     def load(self):
@@ -216,6 +220,9 @@ class Profile:
         self.mic_check_asked = data.get("mic_check_asked", False)
         goal = data.get("voice_goal")
         self.voice_goal = goal if goal in VOICE_GOALS else None
+        ui = data.get("ui")
+        self.ui = dict(UI_DEFAULTS) | ({k: v for k, v in ui.items() if k in UI_DEFAULTS}
+                                       if isinstance(ui, dict) else {})
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -226,7 +233,7 @@ class Profile:
                 "egg_channel": self.egg_channel, "register_model": self.register_model,
                 "register_version": self.register_version, "noise_floor": self.noise_floor,
                 "mic_check": self.mic_check, "mic_check_asked": self.mic_check_asked,
-                "voice_goal": self.voice_goal}
+                "voice_goal": self.voice_goal, "ui": self.ui}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -307,6 +314,14 @@ class Profile:
         if goal not in VOICE_GOALS:
             raise ValueError(f"voice goal must be one of {VOICE_GOALS}, not {goal!r}")
         self.voice_goal = goal
+        self.save()
+
+    def set_ui(self, **values):
+        """Change UI preferences (keys of UI_DEFAULTS) and save them."""
+        unknown = set(values) - set(UI_DEFAULTS)
+        if unknown:
+            raise ValueError(f"unknown UI preference(s): {', '.join(sorted(unknown))}")
+        self.ui.update(values)
         self.save()
 
     def in_target(self, key, value):

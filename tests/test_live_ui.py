@@ -1,8 +1,8 @@
-"""The live panel and mic check dialog (spec 06), driven offscreen with synthetic frames and audio. The
-panel draws the core's live session (its logic is tested without Qt in test_live_session.py); these
-check that what it decides is what the widgets show.
+"""The live view (spec 05: readout, graph, live cards) and the mic check dialog, driven offscreen with
+synthetic frames and audio. The view draws the core's live session (its logic is tested without Qt in
+test_live_session.py); these check that what it decides is what the widgets show.
 
-No audio hardware: the mic check runs against a fake engine, and panels get frames through a
+No audio hardware: the mic check runs against a fake engine, and views get frames through a
 LiveEngine that is fed audio by hand and never opens a stream.
 """
 import os
@@ -15,6 +15,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 import sounddevice as sd  # noqa: E402
+from PyQt6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import mic_check  # noqa: E402
@@ -24,14 +25,13 @@ from app_core import VoiceLabCore  # noqa: E402
 from engine import UPDATE_INTERVAL, LiveEngine  # noqa: E402
 from profile_store import Profile  # noqa: E402
 from test_analysis import MALE_FORMANTS, synth_vowel  # noqa: E402
-from ui import meters  # noqa: E402
-from ui.live_panel import LivePanel  # noqa: E402
-from ui.meters import NEUTRAL_COLOR, OFF_TARGET_COLOR, ON_TARGET_COLOR  # noqa: E402
+from ui import theme  # noqa: E402
+from ui.live_cards import NOISY_TEXT  # noqa: E402
 from ui.mic_check_dialog import MicCheckDialog  # noqa: E402
+from ui.screens.live import LiveView  # noqa: E402
 
 SR = SAMPLE_RATE
 HOP = int(UPDATE_INTERVAL * SR)
-GREEN = ON_TARGET_COLOR
 SPECTRUM_BINS = len(LiveEngine().analyzer.spectrum_freqs)
 
 
@@ -44,9 +44,14 @@ def app():
 def panel(app, tmp_path):
     core = VoiceLabCore(Profile(tmp_path / "home"), engine=LiveEngine())
     core.live.text_interval = 0             # live text is throttled by wall clock; tests run fast
-    live = LivePanel(core, lambda: None)
-    live.apply_mode("speak")
-    return live
+    theme.set_reduce_motion(True)           # as in conftest's make_window: no tween outlives the view
+    live = LiveView(core)
+    yield live
+    # Delete it now, in the event loop: left to the garbage collector, pyqtgraph items can be collected
+    # in the middle of building the next view.
+    live.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    theme.set_reduce_motion(False)
 
 
 def frame(f0=140.0, delta_f=1000.0, h1h2=5.0, cpp=20.0, ring=-15.0, level=-30.0):
@@ -57,22 +62,26 @@ def frame(f0=140.0, delta_f=1000.0, h1h2=5.0, cpp=20.0, ring=-15.0, level=-30.0)
 
 
 def show(live, f):
-    live.show_frame(f, live.core.on_frame(f)["live"])
+    snapshot = live.core.on_frame(f)["live"]
+    live.show_snapshot(f, snapshot)
+    return snapshot
 
 
 def feed_frames(live, frames):
     for f in frames:
-        show(live, f)
+        snapshot = show(live, f)
     QApplication.processEvents()
+    return snapshot
 
 
 def feed_audio(live, audio):
     """Feed audio through the engine and its analyzer, one live frame per hop."""
-    engine = live.core.engine
+    engine, snapshot = live.core.engine, None
     for i in range(0, len(audio) - HOP + 1, HOP):
         engine.feed(audio[i:i + HOP])
-        show(live, engine.analyzer.analyze(engine.latest_window()))
+        snapshot = show(live, engine.analyzer.analyze(engine.latest_window()))
     QApplication.processEvents()
+    return snapshot
 
 
 def voice(seconds, dbfs=None, f0=140):
@@ -80,107 +89,82 @@ def voice(seconds, dbfs=None, f0=140):
     return mic_noise.at_level(audio, dbfs) if dbfs is not None else audio
 
 
-# --- BAR COLOURS AND THE NOTE ---
+# --- CARD COLOURS AND THE NOTE ---
 
-def test_bars_are_neutral_without_targets_and_never_red(panel):
-    assert meters.bar_color(0.1, None) == meters.bar_color(0.9, None) == NEUTRAL_COLOR
+def test_cards_are_neutral_without_targets_and_never_red(panel):
     feed_frames(panel, [frame(delta_f=1350, cpp=10)] * 30)
     for key in ("delta_f", "cpp", "h1h2", "pitch"):
-        assert panel.meters[key].bar.color == NEUTRAL_COLOR
-    assert not hasattr(meters, "BAR_COLORS")
+        assert panel.cards.cards[key].value.tone == "primary"
+    assert panel.note_label.tone == "primary"
 
 
-def test_verdicts_colour_the_bars_and_the_note(panel):
+def test_verdicts_colour_the_cards_and_the_note(panel):
     panel.core.set_targets({"pitch": [130, 150], "delta_f": [1100, 1200]})
     feed_frames(panel, [frame(f0=140, delta_f=1000)] * 100)          # pitch on target, resonance not
-    assert panel.meters["pitch"].bar.color == GREEN                  # the pitch bar itself is judged alone
-    assert panel.meters["delta_f"].bar.color == OFF_TARGET_COLOR
-    assert panel.meters["pitch"].bar.band is not None
-    assert GREEN not in panel.note_label.styleSheet()
+    cards = panel.cards.cards
+    assert cards["pitch"].value.tone == "on_target"                  # the pitch card itself is judged alone
+    assert cards["delta_f"].value.tone == "off_target"               # amber, not red
+    assert cards["pitch"].bar.target == (130, 150)
+    assert panel.note_label.tone != "on_target"
     feed_frames(panel, [frame(f0=140, delta_f=1150)] * 100)         # both on target
     panel.core.live.note_shown_at = 0.0
     feed_frames(panel, [frame(f0=140, delta_f=1150)])
-    assert GREEN in panel.note_label.styleSheet() and "Hz" in panel.note_label.text()
+    assert panel.note_label.tone == "on_target" and "Hz" in panel.note_label.text()
+    assert panel.note_name.text().startswith("C#3")                  # the note under the number
 
 
 # --- UNTRUSTED READINGS ---
 
-def test_noise_hatches_the_readings_it_makes_unreliable(panel):
+def test_noise_pauses_the_readings_it_makes_unreliable(panel):
     noisy = mic_noise.at_level(voice(1.6), -42) + mic_noise.mic_noise(int(1.6 * SR))   # SNR about 16 dB
     feed_audio(panel, np.concatenate([mic_noise.mic_noise(int(1.5 * SR)), noisy, mic_noise.mic_noise(SR)]))
-    feed_audio(panel, np.concatenate([noisy, mic_noise.mic_noise(int(0.5 * SR))]))
+    snapshot = feed_audio(panel, np.concatenate([noisy, mic_noise.mic_noise(int(0.5 * SR))]))
     for key in ("cpp", "h1h2"):                                      # need 20 dB (coach.CPP_MIN_SNR)
-        meter = panel.meters[key]
-        assert "—" in meter.title.text() and "noisy" in meter.title.text()
-        assert meter.bar.position is None and meter.bar.hatched
-    assert not panel.meters["delta_f"].bar.hatched                   # formants need only 10 dB
+        card = panel.cards.cards[key]
+        assert card.text == "—" and card.unavailable == NOISY_TEXT and card.bar.value is None
+    assert panel.cards.cards["delta_f"].unavailable != NOISY_TEXT     # formants need only 10 dB
+    assert "weight and clarity" in snapshot["banner"]["text"]       # said once, by the shell's banner
 
 
 def test_too_high_for_formants_shows_a_reason(panel):
     feed_frames(panel, [dict(frame(f0=420), resonance_reliable=False)] * 20)
-    meter = panel.meters["delta_f"]
-    assert "pitch too high" in meter.title.text() and meter.bar.hatched
+    card = panel.cards.cards["delta_f"]
+    assert "pitch too high" in card.unavailable and card.bar.value is None
 
 
 # --- MODES AND SINGING ---
 
-def test_meters_and_tabs_follow_the_mode(panel):
+def test_cards_and_views_follow_the_mode(panel):
     panel.core.set_mode("sing")
-    assert panel.mode == "sing" and panel.mode_buttons["sing"].isChecked()
-    assert panel.meters["delta_f"].isHidden() and not panel.meters["ring"].isHidden()
-    assert panel.read_btn.isHidden() and panel.core.engine.analyzer.mode == "sing"
-    panel.mode_buttons["speak"].click()
-    assert panel.core.mode == "speak" and not panel.meters["delta_f"].isHidden()
+    feed_frames(panel, [frame()])
+    assert panel.mode == "sing" and "delta_f" not in panel.cards.visible_keys()
+    assert "ring" in panel.cards.visible_keys() and "plane" not in panel.tabs.keys
+    assert panel.core.engine.analyzer.mode == "sing" and panel.graph.y_range() != (70.0, 400.0)
+    panel.core.set_mode("speak")
+    feed_frames(panel, [frame()])
+    assert "delta_f" in panel.cards.visible_keys() and panel.graph.y_range() == (70.0, 400.0)
 
 
 def sing_frames(cents_offsets, base_midi=69.0):
     return [frame(f0=440 * 2 ** ((base_midi - 69) / 12 + c / 1200)) for c in cents_offsets]
 
 
-def test_tuning_stays_green_on_vibrato_and_shows_the_raw_pitch(panel):
+def test_tuning_stays_green_on_vibrato(panel):
     panel.core.set_mode("sing")
     panel.core.live.target_provider = lambda: 69
     t = np.arange(80) * UPDATE_INTERVAL
-    colors = []
+    tones = []
     for f in sing_frames(50 * np.sin(2 * np.pi * 5.5 * t)):
         show(panel, f)
-        colors.append(panel.meters["tuning"].bar.color)
-    assert set(colors[10:]) == {GREEN} and panel.meters["tuning"].bar.marker is not None
+        tones.append(panel.cards.cards["tuning"].value.tone)
+    assert set(tones[10:]) == {"on_target"}
+    assert panel.cards.cards["tuning"].bar.target == (-25, 25)      # the in-tune band
+    assert panel.core.live.metrics["tuning"]["marker"] is not None   # the raw pitch, for the record
     feed_frames(panel, sing_frames([40] * 30))
-    assert panel.meters["tuning"].bar.color == OFF_TARGET_COLOR
+    assert panel.cards.cards["tuning"].value.tone == "off_target"
 
 
-# --- BADGES AND THE COACH LINE ---
-
-def test_noise_badge_names_the_whine_and_opens_the_mic_check(panel):
-    noise = mic_noise.mic_noise(int(7 * SR))
-    audio = noise + np.concatenate([np.zeros(int(2 * SR)), voice(2.5, -30), np.zeros(int(2.5 * SR))])[:len(noise)]
-    feed_audio(panel, audio)
-    assert panel.noise_badge.text() == "whine", panel.noise_badge.text()
-    assert OFF_TARGET_COLOR in panel.noise_badge.styleSheet()
-    assert "mic check" in panel.noise_badge.toolTip()
-    panel.noise_badge.click()
-    assert isinstance(panel.mic_dialog, MicCheckDialog) and panel.mic_dialog.isVisible()
-    panel.mic_dialog.reject()
-
-
-def test_slow_capture_path_is_flagged(panel):
-    panel.core.engine.capture_info = {"path": "default", "host_api": "MME", "latency": 0.09}
-    panel.core.live.refresh_input()
-    feed_frames(panel, [frame()])
-    assert panel.path_badge.isVisibleTo(panel) and "MME" in panel.path_badge.toolTip()
-    panel.core.engine.capture_info = {"path": "wasapi", "host_api": "Windows WASAPI", "latency": 0.01}
-    panel.core.live.refresh_input()
-    feed_frames(panel, [frame()])
-    assert not panel.path_badge.isVisibleTo(panel)
-
-
-def test_clipping_badge(panel):
-    feed_frames(panel, [dict(frame(), clipped=True)])
-    assert not panel.clip_badge.isHidden()
-    feed_frames(panel, [frame()] * 40)
-    assert panel.clip_badge.isHidden()
-
+# --- THE COACH LINE ---
 
 def test_coach_line_shows_the_sessions_advice(panel):
     assert "Speak or sing" in panel.coach_label.text()
@@ -192,6 +176,17 @@ def test_coach_line_shows_the_sessions_advice(panel):
     assert 1 <= len(changes) <= 3                                     # every 2 s at most, only when it changes
     assert "resonance" in panel.coach_label.text() and "darker" in panel.coach_label.text()
     assert panel.coach_label.toolTip()
+
+
+def test_spectrum_and_plane_draw_the_frames(panel):
+    panel.show()
+    panel.show_view("spectrum")
+    feed_frames(panel, [frame()] * 5)
+    assert np.isfinite(panel.spectrum.spec[-1]).all()
+    panel.show_view("plane")
+    feed_frames(panel, [frame(delta_f=1100)] * 20)
+    assert len(panel.plane.current.getData()[0]) == 1
+    panel.hide()
 
 
 # --- MIC CHECK ---
@@ -297,21 +292,23 @@ def test_mic_check_hears_no_voice_and_refuses_during_a_take(app, monkeypatch):
     assert busy.started == 0 and "recording" in dialog.status.text() and dialog.result is None
 
 
-def test_panel_stores_and_emits_the_mic_check_result(panel, monkeypatch):
+def test_the_shell_stores_the_mic_check_result(make_window, monkeypatch):
     forbid_hardware(monkeypatch)
     floor = 10 ** (-70 / 20) * np.random.default_rng(1).standard_normal(3 * SR)
     ah = mic_noise.at_level(voice(3.0), -25) + 10 ** (-70 / 20) * np.random.default_rng(2).standard_normal(3 * SR)
-    panel.engine = FakeEngine(floor, ah)
-    received = []
-    panel.mic_check_done.connect(received.append)
-    dialog = panel.show_mic_check()
+    window = make_window()
+    window.engine = FakeEngine(floor, ah)
+    dialog = window.mic_check()
     dialog.seconds, dialog.lead_seconds = 0.05, 0.02
     dialog.start()
     end = time.perf_counter() + 10
-    while not received and time.perf_counter() < end:
+    while window.last_mic_check is None and time.perf_counter() < end:
         QApplication.processEvents()
         time.sleep(0.01)
-    assert received and panel.last_mic_check is received[0] and "advice" in received[0]
+    result = window.last_mic_check
+    assert result and window.profile.mic_check is result and "advice" in result
+    assert window.status_text() == "Mic check saved"
+    assert window.settings.mic_result.text().startswith("Last check")
 
 
 def test_closing_the_mic_check_midway_discards_the_recording(app):

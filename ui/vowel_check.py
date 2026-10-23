@@ -1,133 +1,109 @@
-"""Speaking practice views: the reading prompt and the vowel check (speech.VowelCheckSession draws here)."""
+"""The vowel check (speech.VowelCheckSession draws here): the word to say, Start / Skip / Save, progress
+through the eight words, and the vowel chart."""
 import pyqtgraph as pg
-import qtawesome as qta
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from speech import VOWEL_WORDS, passage
-from ui.meters import BUTTON_STYLE
-
-VOWEL_COLOR = "#f1c40f"
-BASELINE_COLOR = "#95a5a6"
-
-
-class ReadingPrompt(QFrame):
-    """A passage to read aloud, with previous/next controls. on_passage(index) hears about a change."""
-
-    def __init__(self, on_passage=None):
-        super().__init__()
-        self.index = 0
-        self.on_passage = on_passage or (lambda index: None)
-        self.setStyleSheet("QFrame { background-color: #1e1e1e; border-radius: 6px; } "
-                           "QLabel { color: #eee; }")
-        layout = QVBoxLayout(self)
-        header = QHBoxLayout()
-        self.title = QLabel()
-        self.title.setStyleSheet("color: #aaa; font-size: 11px;")
-        prev_btn = QPushButton(qta.icon("fa5s.chevron-left", color="white"), "")
-        next_btn = QPushButton(qta.icon("fa5s.chevron-right", color="white"), "")
-        for btn, step in ((prev_btn, -1), (next_btn, 1)):
-            btn.setStyleSheet(BUTTON_STYLE)
-            btn.setFixedWidth(34)
-            btn.clicked.connect(lambda _, s=step: self.show_passage(self.index + s))
-        header.addWidget(self.title)
-        header.addStretch()
-        header.addWidget(prev_btn)
-        header.addWidget(next_btn)
-        layout.addLayout(header)
-        self.text = QLabel()
-        self.text.setWordWrap(True)
-        self.text.setFont(QFont("Georgia", 13))
-        layout.addWidget(self.text)
-        self.show_passage(0)
-
-    def show_passage(self, index):
-        shown = passage(index)
-        self.index = shown["index"]
-        self.title.setText(shown["title"])
-        self.text.setText(shown["text"])
-        self.on_passage(self.index)
+from speech import VOWEL_PROMPT, VOWEL_WORDS
+from ui import theme
+from ui.components import Button, Caption, Headline, Label, ProgressStrip
+from ui.live_graph import style_plot
+from ui.screens.listen import listen
 
 
 class VowelChart(pg.PlotWidget):
     """Classic vowel space: F2 (right to left) against F1 (top to bottom)."""
 
     def __init__(self):
-        super().__init__(background="#1e1e1e")
-        self.setMouseEnabled(x=False, y=False)
-        self.hideButtons()
-        self.setMenuEnabled(False)
+        super().__init__()
         self.invertX(True)
         self.invertY(True)
         self.setXRange(700, 3000, padding=0)
         self.setYRange(250, 1050, padding=0)
-        self.showGrid(x=True, y=True, alpha=0.15)
-        self.getAxis("bottom").setLabel("F2 Hz (front ← → back)")
-        self.getAxis("left").setLabel("F1 Hz")
         # Bottom-left (front, open) is the emptiest corner of a vowel chart.
-        self.addLegend(offset=(10, -10))
+        self.legend = self.addLegend(offset=(10, -10))
+        self.data = (None, None)
+        theme.changed.connect(self.restyle)
+        self.restyle()
+
+    def restyle(self, *_):
+        t = theme.current()
+        self.setBackground(t["surface"])
+        style_plot(self.plotItem, left_width=56)
+        self.showGrid(x=True, y=True, alpha=0.12)
+        self.getAxis("bottom").setLabel("F2 Hz (front ← → back)", color=t["text_muted"])
+        self.getAxis("left").setLabel("F1 Hz", color=t["text_muted"])
+        self.legend.setLabelTextColor(t["text_secondary"])
+        self.show_vowels(*self.data)
 
     def show_vowels(self, current, baseline):
         """current / baseline: {word: {"f1":..., "f2":...}} or None."""
+        self.data = (current, baseline)
+        t = theme.current()
         self.clear()
-        for vowels, color, name, style in ((baseline, BASELINE_COLOR, "baseline", Qt.PenStyle.DashLine),
-                                           (current, VOWEL_COLOR, "this check", Qt.PenStyle.SolidLine)):
+        self.legend.clear()
+        for vowels, color, name, style in ((baseline, t["text_muted"], "baseline", Qt.PenStyle.DashLine),
+                                           (current, t["accent"], "this check", Qt.PenStyle.SolidLine)):
             if not vowels:
                 continue
             words = [w for w in VOWEL_WORDS if vowels.get(w) and vowels[w].get("f1")]
             xs = [vowels[w]["f2"] for w in words]
             ys = [vowels[w]["f1"] for w in words]
             # Words are ordered around the vowel space, so this draws its outline.
-            self.plot(xs + xs[:1], ys + ys[:1], pen=pg.mkPen(color, width=1.5, style=style),
-                      symbol="o", symbolSize=7, symbolBrush=color, symbolPen=None, name=name)
+            self.plot(xs + xs[:1], ys + ys[:1], pen=pg.mkPen(color, width=2, style=style),
+                      symbol="o", symbolSize=8, symbolBrush=color, symbolPen=None, name=name)
             if vowels is current:
                 for word, x, y in zip(words, xs, ys):
-                    label = pg.TextItem(word, color="#ddd", anchor=(0, 1))
+                    label = pg.TextItem(word, color=QColor(t["text_secondary"]), anchor=(0, 1))
+                    label.setFont(theme.font("caption"))
                     label.setPos(x, y)
                     self.addItem(label)
 
 
 class VowelCheck(QWidget):
-    """The hands-free vowel drill (speech.VowelCheckSession): prompts, buttons and the vowel chart."""
+    """The hands-free vowel drill (speech.VowelCheckSession): prompts, buttons, progress and the chart."""
 
     def __init__(self, core):
         super().__init__()
         self.session = core.vowels
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.XL)
         left = QVBoxLayout()
-        self.prompt = QLabel()
-        self.prompt.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        self.prompt.setStyleSheet("color: white;")
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        self.status.setStyleSheet("color: #aaa; font-size: 11px;")
-        self.start_btn = QPushButton("Start")
-        self.skip_btn = QPushButton("Skip word")
-        self.baseline_btn = QPushButton("Save as vowel baseline")
-        for btn in (self.start_btn, self.skip_btn, self.baseline_btn):
-            btn.setStyleSheet(BUTTON_STYLE)
+        left.setSpacing(theme.M)
+        self.overline = Label("Say this word, then pause", role="label", tone="muted")
+        self.prompt = Headline("", level="display")
+        self.progress = ProgressStrip()
+        self.progress.set_progress(0, len(VOWEL_WORDS))
+        self.status = Label("", role="body", tone="secondary", wrap=True)
+        self.start_btn = Button("Start", variant="primary", icon="ph.play-fill")
+        self.skip_btn = Button("Skip word", variant="secondary", icon="ph.skip-forward")
+        self.baseline_btn = Button("Save as vowel baseline", variant="secondary", icon="ph.push-pin")
         self.start_btn.clicked.connect(self.session.toggle)
         self.skip_btn.clicked.connect(self.session.skip)
         self.baseline_btn.clicked.connect(self.session.save_baseline)
-        left.addWidget(self.prompt)
-        left.addWidget(self.status)
-        left.addStretch()
+        for w in (self.overline, self.prompt, self.progress, self.status):
+            left.addWidget(w)
         buttons = QHBoxLayout()
+        buttons.setSpacing(theme.S)
         buttons.addWidget(self.start_btn)
         buttons.addWidget(self.skip_btn)
+        buttons.addStretch(1)
         left.addLayout(buttons)
-        left.addWidget(self.baseline_btn)
+        left.addWidget(self.baseline_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        left.addStretch(1)
+        left.addWidget(Caption("The vowel check measures resonance across eight vowels, the fairest reading "
+                               "there is, and sets the formant ceiling for your voice."))
         left_widget = QWidget()
         left_widget.setLayout(left)
-        left_widget.setFixedWidth(230)
+        left_widget.setFixedWidth(340)
         layout.addWidget(left_widget)
 
         self.chart = VowelChart()
-        layout.addWidget(self.chart)
+        layout.addWidget(self.chart, 1)
         self._chart_data = None
-        core.events.subscribe("vowels_changed", self.show_state)
+        listen(self, core.events, ("vowels_changed", self.show_state))
         self.show_state(self.session.state())
 
     @property
@@ -139,14 +115,20 @@ class VowelCheck(QWidget):
         return self.session.result
 
     def show_state(self, state):
-        """Draw the session's state: texts, buttons and the chart."""
+        """Draw the session's state: texts, buttons, progress and the chart."""
         if state is None:
             return
         self.prompt.setText(state["prompt"])
+        self.prompt.setVisible(state["prompt"] != VOWEL_PROMPT)       # the page already says "Vowel check"
         self.status.setText(state["status"])
         self.start_btn.setText("Stop" if state["running"] else "Start")
+        self.start_btn.set_icon("ph.stop-fill" if state["running"] else "ph.play-fill")
+        self.start_btn.set_variant("secondary" if state["running"] else "primary")
         self.skip_btn.setEnabled(state["running"])
         self.baseline_btn.setEnabled(state["can_save_baseline"])
+        self.overline.setVisible(state["running"])
+        done = self.session.index if state["running"] else (len(VOWEL_WORDS) if self.session.result else 0)
+        self.progress.set_progress(done, len(VOWEL_WORDS))
         chart = (state["current"], state["baseline"])
         if chart != self._chart_data:
             self._chart_data = chart

@@ -9,8 +9,9 @@ import numpy as np
 import coach
 import denoise
 import register
+import report
 from analysis import (IN_TUNE_CENTS, NOTE_NAMES, PERCEIVED_SECONDS, SAMPLE_RATE, VOICE_BAND_HZ, NoiseMonitor,
-                      hz_to_midi, perceived_cents, pitch_range_st, vibrato_stats)
+                      hz_to_midi, midi_to_hz, perceived_cents, pitch_range_st, vibrato_stats)
 from display import (BOTH_MODES, LIVE_TEXT_SECONDS, METRIC_DEFS, fraction, metric_reading, midi_name, pitch_label,
                      reference)
 from engine import UPDATE_INTERVAL
@@ -63,6 +64,124 @@ LABELS = {"pitch_range": f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)
 
 # Exponential smoothing for live meters (~200 ms time constant).
 METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
+
+# --- LIVE CARDS, BANNER AND GRAPH AXIS (phase 10 spec 05) ---
+# The live cards in display order per mode, plain names first; the jargon goes in the help text.
+SPEAK_CARDS = ["pitch", "delta_f", "h1h2", "cpp", "pitch_range", "register", "cq"]
+SING_CARDS = ["tuning", "vibrato", "register", "ring", "cpp", "h1h2", "cq"]
+CARD_TITLES = {"pitch": "Pitch", "delta_f": "Brightness (resonance)", "h1h2": "Weight", "cpp": "Clarity",
+               "pitch_range": "Intonation", "tuning": "Tuning", "vibrato": "Vibrato", "register": "Register",
+               "ring": "Ring", "cq": "Contact (EGG)", "level": "Input level"}
+CARD_HELP = {
+    "pitch": "How high your voice sits: the fundamental frequency (F0) over the last moment, in hertz. "
+             "The zones are tendencies across many speakers, not rules.",
+    "delta_f": "How bright or dark your voice sounds: formant spacing ΔF over F1–F4, in hertz. Higher is "
+               "brighter (a shorter apparent vocal tract). Not measured above about 350 Hz.",
+    "h1h2": "Light or heavy: H1*–H2*, the corrected level difference of the first two harmonics, in dB. "
+            "A rough proxy for vocal-fold contact; the mic and desk rumble shift it.",
+    "cpp": "Clear or breathy: cepstral peak prominence (CPP), in dB. Background noise and room echo "
+           "lower it, so it is withheld when the input is noisy.",
+    "pitch_range": "How much your pitch moves: the 10th–90th percentile spread over the last "
+                   f"{INTONATION_WINDOW_SECONDS} s, in semitones (st).",
+    "tuning": "Cents (¢) from the nearest note, or from the exercise's note; 100¢ is a semitone. "
+              f"Within ±{IN_TUNE_CENTS}¢ counts as in tune.",
+    "vibrato": "Vibrato rate (Hz) and extent (±¢) over the last second, while you hold a note.",
+    "register": "Chest (M1) ↔ head (M2), estimated from the harmonics and spectral tilt. Label a few "
+                "takes chest or head to calibrate it to your voice.",
+    "ring": "Energy at 2–4 kHz against the 0–2 kHz harmonics (the singer's formant), in dB.",
+    "cq": "Contact quotient from the electroglottograph: the share of each cycle the vocal folds touch.",
+    "level": "Input level in dBFS (uncalibrated): keep the mic gain and distance the same between takes.",
+}
+CARD_FORMATS = {"pitch": "{:.0f} Hz", "delta_f": "{:.0f} Hz", "h1h2": "{:+.1f} dB", "cpp": "{:.1f} dB",
+                "ring": "{:+.1f} dB", "pitch_range": "{:.1f} st", "level": "{:.0f} dBFS", "cq": "{:.2f}",
+                "register": "{:.0f}"}
+REPORT_ZONE_KEYS = {"pitch", "delta_f", "pitch_range"}    # cards shaded with report.ZONES
+LABELLED_ZONE_KEYS = {"pitch", "delta_f"}       # the two that carry the overall placement name their zones
+# Weight and clarity get plain bars: the report gives them no say in the overall placement (mixed
+# evidence, mic-dominated; report.WEIGHTS), so gender-coloured zones would overstate them.
+NOISE_NOTES = ("too noisy", "too quiet or noisy")       # reasons that go to the banner, not the card
+# Input problems in plain words, with what to do (mic_check.py's advice, shortened for one line).
+BANNER_TEXT = {
+    "clipping": "Too loud, the input is clipping: move back a little or lower the mic gain",
+    "whine": "A steady whine from the mic: try another USB port or cable",
+    "rumble": "Desk rumble: set the mic on something soft",
+    "quiet: move closer": "Your voice is quiet: move a little closer to the mic",
+}
+SLOW_PATH_BANNER = "Slow audio path: choose your mic again under Settings"
+PLAIN_READINGS = {"delta_f": "brightness", "h1h2": "weight", "cpp": "clarity", "ring": "ring"}
+SPEAK_AXIS_HZ = (70.0, 400.0)   # Hz; the fixed speak-mode pitch axis (spec 05), around report's 80-400 Hz bar
+SING_DEFAULT_MIDI = (48, 72)    # C3-C5: the sing axis before the Voice Map knows your range
+SING_MIN_SPAN = 12              # semitones the sing axis shows at least
+SING_MARGIN = 2                 # semitones kept above and below the voice
+SING_LEAVE_SECONDS = 0.3        # voiced pitch outside the axis this long moves it (hysteresis)
+
+
+def card_scale(key):
+    """{"scale", "log", "zones", "unit", "target_band"} of a live card's bar: report.ZONES for the speech
+    dimensions, the register's chest / mix / head, the tuning's in-tune band, else METRIC_DEFS' range."""
+    if key in REPORT_ZONE_KEYS:
+        spec = report.ZONES[key]
+        return {"scale": tuple(spec["scale"]), "log": spec["log"], "zones": [dict(z) for z in spec["zones"]],
+                "unit": spec["unit"], "fixed_band": None, "ends": METRIC_DEFS[key][3:5],
+                "labels": key in LABELLED_ZONE_KEYS}
+    if key == "register":
+        lo, hi = 100 * register.MIX_BAND[0], 100 * register.MIX_BAND[1]
+        zones = [{"id": "chest", "label": "chest", "lo": 0.0, "hi": lo}, {"id": "mix", "label": "mix", "lo": lo, "hi": hi},
+                 {"id": "head", "label": "head", "lo": hi, "hi": 100.0}]
+        return {"scale": (0.0, 100.0), "log": False, "zones": zones, "unit": "", "fixed_band": None,
+                "ends": None, "labels": True}
+    _, lo, hi, low_label, high_label, _, _ = METRIC_DEFS[key]
+    band = (-IN_TUNE_CENTS, IN_TUNE_CENTS) if key == "tuning" else None
+    return {"scale": (float(lo), float(hi)), "log": False, "zones": [], "unit": "", "fixed_band": band,
+            "ends": (low_label, high_label), "labels": False}
+
+
+def live_cards(snapshot, profile):
+    """The live cards to draw for a snapshot, in order: [{"key", "title", "help", "text" (throttled, like the
+    meter titles), "value" (on the card's scale), "unavailable" (a short reason or None), "noisy" (the reason
+    is the input, which the banner reports), "verdict", "target", "baseline"}]. Only the mode's cards, and the
+    EGG card only with an EGG."""
+    keys = SPEAK_CARDS if snapshot["mode"] == "speak" else SING_CARDS
+    out = []
+    for key in keys:
+        reading = snapshot["metrics"].get(key)
+        if reading is None or not reading.get("visible", True):
+            continue
+        tracked = key not in UNTRACKED_METERS and key not in ("tuning", "vibrato")
+        note = reading.get("unavailable") if reading.get("value") is None else None
+        out.append({"key": key, "title": CARD_TITLES[key], "help": CARD_HELP[key],
+                    "text": reading.get("shown") or "—", "value": reading.get("value"),
+                    "unavailable": note or (None if reading.get("value") is not None else "listening…"),
+                    "noisy": bool(note) and note in NOISE_NOTES, "verdict": reading.get("verdict"),
+                    "target": profile.target(key) if tracked else None,
+                    "baseline": profile.baseline_value(key) if tracked else None})
+    return out
+
+
+def pitch_axis(mode, current=None, history=(), voice_range=None):
+    """(low Hz, high Hz) of the live pitch graph. Speak: always SPEAK_AXIS_HZ, so a line's height means the
+    same every time. Sing: a note range from `voice_range` (MIDI low, high; the Voice Map's) or C3-C5,
+    padded; `current` (the axis now, Hz) only changes when the voice has left it for SING_LEAVE_SECONDS
+    (`history`: recent pitch in Hz, NaN unvoiced, oldest first), and then it grows to take the voice in."""
+    if mode == "speak":
+        return SPEAK_AXIS_HZ
+    if current is None:
+        lo, hi = voice_range or SING_DEFAULT_MIDI
+        lo, hi = lo - SING_MARGIN, hi + SING_MARGIN
+        if hi - lo < SING_MIN_SPAN:
+            mid = (lo + hi) / 2
+            lo, hi = mid - SING_MIN_SPAN / 2, mid + SING_MIN_SPAN / 2
+        return float(midi_to_hz(lo)), float(midi_to_hz(hi))
+    tail = np.asarray(list(history)[-max(1, int(SING_LEAVE_SECONDS / UPDATE_INTERVAL)):], dtype=float)
+    lo_hz, hi_hz = current
+    if len(tail) == 0 or np.isnan(tail).any():
+        return current
+    if np.all(tail < lo_hz) or np.all(tail > hi_hz):
+        midi = hz_to_midi(tail)
+        lo = min(float(hz_to_midi(lo_hz)), float(np.min(midi)) - SING_MARGIN)
+        hi = max(float(hz_to_midi(hi_hz)), float(np.max(midi)) + SING_MARGIN)
+        return float(midi_to_hz(np.floor(lo))), float(midi_to_hz(np.ceil(hi)))
+    return current
 
 
 # --- STABLE VERDICTS ---
@@ -170,7 +289,7 @@ class LiveSession:
         self.tuning_ok = None
         self.coach_frame = -10 ** 9
         self.coach = {"line": COACH_IDLE, "full": ""}
-        self.note = {"text": "—", "on_target": None}
+        self.note = {"text": "—", "on_target": None, "hz": None}
         self.note_shown_at = 0.0
         self.last_voiced_at = 0.0
         self.plane = {"f0": None, "delta_f": None}
@@ -300,6 +419,7 @@ class LiveSession:
             "pitch_history": list(self.pitch_history),
             "plane": dict(self.plane),
             "changed_text": self.changed_text,
+            "banner": self.banner(),
         }
 
     def _reading(self, key, value, **kwargs):
@@ -323,10 +443,22 @@ class LiveSession:
         old = self.metrics.get(key)
         if old is not None and self.text_interval and now - self._text_at.get(key, 0.0) < self.text_interval:
             reading["title"] = old["title"]
+            reading["shown"] = old.get("shown")
         else:
+            reading["shown"] = self.card_text(key, reading)
             self._text_at[key] = now
             self.changed_text = self.changed_text or old is None or old["title"] != reading["title"]
         self.metrics[key] = reading
+
+    @staticmethod
+    def card_text(key, reading):
+        """The short value a live card shows: "212 Hz", "+4.1 dB", "+12¢ from A", "chest"; "—" without one."""
+        value = reading.get("value")
+        if value is None:
+            return "—"
+        if key in ("tuning", "vibrato") or (key == "register" and reading.get("display")):
+            return reading.get("display") or "—"
+        return CARD_FORMATS.get(key, "{:.1f}").format(value)
 
     def reading_note(self, key, frame, f0):
         """Why this live reading can't be shown (a short reason), or None when it can: the pitch is
@@ -424,9 +556,9 @@ class LiveSession:
         recent = recent[~np.isnan(recent)]
         if len(recent):
             pitch = float(np.median(recent))
-            note = {"text": pitch_label(pitch), "on_target": self.pitch_and_resonance_on_target()}
+            note = {"text": pitch_label(pitch), "on_target": self.pitch_and_resonance_on_target(), "hz": pitch}
         elif now - self.last_voiced_at >= NOTE_HOLD_SECONDS:
-            note = {"text": "—", "on_target": None}
+            note = {"text": "—", "on_target": None, "hz": None}
         else:
             return
         self.changed_text = self.changed_text or note != self.note
@@ -510,6 +642,26 @@ class LiveSession:
         self.input.update(badge=text, severity=severity, tooltip=" ".join(tip), issues=issues, snr=snr,
                           slow_path=slow, slow_path_tooltip=path_tip)
         self.changed_text = True
+
+    def banner(self):
+        """The one input problem worth a banner, or None: {"text", "kind", "action", "target"}. Clipping
+        first, then the noise report's first issue, then readings the noise withholds, then a slow audio
+        path. `target` is what the action opens: "mic_check" or "settings"."""
+        issue = "clipping" if self.input["clipping"] else (self.input["issues"] or [None])[0]
+        withheld = [PLAIN_READINGS[k] for k in PLAIN_READINGS
+                    if self.visible(k) and not self.quality["trust"].get(k, True)]
+        parts = []
+        if issue:
+            parts.append(BANNER_TEXT.get(issue, issue[0].upper() + issue[1:]))
+        if withheld:
+            names = withheld[0] if len(withheld) == 1 else ", ".join(withheld[:-1]) + " and " + withheld[-1]
+            judge = f"can't judge {names} right now"
+            parts.append(judge if parts else "Too noisy: " + judge)
+        if parts:
+            return {"text": " · ".join(parts), "kind": "warning", "action": "Mic check", "target": "mic_check"}
+        if self.input["slow_path"]:
+            return {"text": SLOW_PATH_BANNER, "kind": "info", "action": "Settings", "target": "settings"}
+        return None
 
     def _update_coach(self):
         """The one-line coach: coach.advice on the last few seconds, at most every COACH_EVERY frames."""

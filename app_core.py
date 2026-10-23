@@ -6,7 +6,8 @@ Events (Events.emit): "take_added"(take), "take_updated"(take), "take_removed"(u
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
-"voice_map_changed"(), plus the practice sessions' "exercise_changed", "vowels_changed" and "practice".
+"voice_map_changed"(), "ui_changed"(prefs), "phrase_changed"(phrase), plus the practice sessions'
+"exercise_changed", "vowels_changed" and "practice".
 """
 import time
 from datetime import datetime
@@ -17,9 +18,11 @@ import soundfile as sf
 import analysis
 import coach
 import isolation
+import mic_check
 import profile_store
 import register
 import report
+import speech
 import take_view
 import voice_map
 from analysis import SAMPLE_RATE, score_exercise
@@ -60,6 +63,24 @@ TAKES_FOLDER_QUESTION = ("Choose a folder to save takes in? Each take is saved t
 REBUILD_QUESTION = ("Replace the Voice Map with one built from your saved takes? What it has gathered live is "
                     "replaced, and imported voices are left out.")
 DEFAULT_MIC = "System default mic"
+REPLAY_SECONDS = 10             # "Replay last 10 s" on the live screen (spec 05)
+REPLAY_OWNER = "replay"         # the player's owner while the replay plays
+PHRASE_TASK = "phrases"         # the task of takes recorded while practising phrases
+# The voice goal: what the report's tips point toward. Labels, and what choosing one changes.
+VOICE_GOAL_CHOICES = [("feminine", "Feminine"), ("androgynous", "Androgynous"), ("masculine", "Masculine"),
+                      (None, "Just exploring")]
+VOICE_GOAL_TEXT = ("Your goal only changes which way the tips after each take point. The zones and "
+                   "measurements stay the same, and just exploring describes your voice without pushing "
+                   "it anywhere.")
+STATUS_TOASTS = {"success": "success", "warning": "warning", "error": "error"}   # status level -> toast kind
+
+
+def status_display(text, level):
+    """How a UI shows a core "status": {"toast": kind or None, "line": text or None}. Successes, warnings
+    and errors are toasts; info, busy and recording are a quiet line (the activity indicator and the
+    record button already show work in progress)."""
+    kind = STATUS_TOASTS.get(level)
+    return {"toast": kind, "line": None if kind else text}
 
 
 # --- BACKGROUND JOBS (plain functions, run by the JobRunner) ---
@@ -197,6 +218,11 @@ class VoiceLabCore:
         self.reanalysis_total = 0       # takes queued in this round, for the status text
         self.reanalysis_done = 0
         self.jobs = {"analysis": None, "load": None, "register": None, "reanalysis": None, "voicemap": None}
+        self.mic_available = True       # False when the mic couldn't be opened (import still works)
+        self.mic_problem = None         # why, in words
+        self.phrase_index = 0           # the everyday phrase shown on the live screens
+        self.phrase_practice = False    # takes are for the phrases (the Practice screen's Phrases)
+        self.replay_length = 0.0        # seconds of the replay last started
         if profile.formant_ceiling and engine is not None:
             engine.analyzer.formant_ceiling = profile.formant_ceiling
         self.player = Player()
@@ -413,12 +439,49 @@ class VoiceLabCore:
         self.reading = index
 
     def current_task(self, results):
-        """What this take is for, so progress compares like with like: the passage being read,
-        else the exercise (profile_store.task_of), else free speech or singing."""
+        """What this take is for, so progress compares like with like: the passage being read (or the
+        phrases), else the exercise (profile_store.task_of), else free speech or singing."""
         mode = results.get("mode") or self.profile.mode
         if mode == "speak" and not results.get("exercise") and self.reading is not None:
-            return f"passage: {READING_PASSAGES[self.reading % len(READING_PASSAGES)][0]}"
+            return f"passage: {self.passage(self.reading)['name']}"
+        if mode == "speak" and not results.get("exercise") and self.phrase_practice:
+            return PHRASE_TASK
         return profile_store.task_of(results | {"mode": mode})
+
+    # --- PASSAGES AND PHRASES ---
+
+    def passage(self, index):
+        """speech.passage for this profile: the built-in passages, then your own (if you saved one)."""
+        return speech.passage(index, self.custom_passage())
+
+    def passage_count(self):
+        return len(speech.passages(self.custom_passage()))
+
+    def custom_passage(self):
+        """Your own read-aloud passage (text), or None."""
+        return self.profile.ui.get("custom_passage")
+
+    def set_custom_passage(self, text):
+        """Save your own passage (empty text removes it); returns its index among the passages, or None."""
+        text = (text or "").strip() or None
+        self.profile.set_ui(custom_passage=text)
+        self._status("Your passage is saved" if text else "Your passage is removed", "success")
+        return len(READING_PASSAGES) if text else None
+
+    def phrase(self):
+        """The everyday phrase to say now (speech.phrase)."""
+        return speech.phrase(self.phrase_index)
+
+    def next_phrase(self, step=1):
+        """Move to the next (or, with step -1, previous) phrase; "phrase_changed"(phrase)."""
+        self.phrase_index = (self.phrase_index + step) % len(speech.PHRASES)
+        phrase = self.phrase()
+        self.events.emit("phrase_changed", phrase)
+        return phrase
+
+    def set_phrase_practice(self, on):
+        """Takes recorded meanwhile are for the phrases (their own task in progress)."""
+        self.phrase_practice = bool(on)
 
     # --- MODE, CEILING AND TARGETS ---
 
@@ -457,6 +520,12 @@ class VoiceLabCore:
         it always replaces the profile's ceiling."""
         if result.get("formant_ceiling"):
             self.set_ceiling(result["formant_ceiling"])
+
+    def set_voice_goal(self, goal):
+        """Feminine / androgynous / masculine, or None (just exploring): where the report's tips point."""
+        self.profile.set_voice_goal(goal)
+        self.events.emit("profile_changed")
+        self._status(f"Voice goal: {dict(VOICE_GOAL_CHOICES)[goal].lower()}", "success")
 
     def set_baseline(self, uid):
         self.profile.set_baseline(self.take(uid))
@@ -516,6 +585,109 @@ class VoiceLabCore:
             return (f"You have been at this for {minutes:.0f} minutes. A short rest and a sip "
                     "of water can help; ease off if your voice feels tired or tight.")
         return None
+
+    # --- REPLAY ---
+
+    def replay(self, seconds=REPLAY_SECONDS):
+        """Play the last `seconds` of the mic (engine.recent_audio) through the player. Returns the clip's
+        length in seconds (0 when there is nothing to play yet)."""
+        audio = self.engine.recent_audio(seconds) if self.engine is not None else []
+        rate = getattr(self.engine, "sample_rate", SAMPLE_RATE)
+        if len(audio) < rate * 0.2:
+            self._status("Nothing to replay yet: say something first.", "warning")
+            return 0.0
+        self.player.play_take(audio, owner=REPLAY_OWNER)
+        self.replay_length = len(audio) / rate
+        return self.replay_length
+
+    def stop_replay(self):
+        if self.player.owner == REPLAY_OWNER:
+            self.player.stop()
+
+    def replay_progress(self):
+        """(seconds played, clip length) while the replay plays, else None."""
+        if self.player.owner != REPLAY_OWNER:
+            return None
+        position = self.player.position()
+        if not position["playing"] or position["seconds"] is None:
+            return None
+        return position["seconds"], self.replay_length
+
+    # --- WHAT THE SHELL SHOWS ---
+
+    def record_state(self):
+        """(state, caption) of the record button: "idle", "recording", "analysing" or "disabled", and the
+        words under it (None while recording: the button shows the time)."""
+        if self.is_recording:
+            return "recording", None
+        if self.analyzing:
+            return "analysing", "Analysing…"
+        if not self.mic_available:
+            return "disabled", "Mic unavailable"
+        if not self.controls()["record"]:
+            return "disabled", "Practice running"
+        return "idle", "Record"
+
+    def set_mic_available(self, ok, problem=None):
+        """Whether the mic opened (VoiceLab still imports and plays without one)."""
+        self.mic_available, self.mic_problem = bool(ok), (None if ok else problem)
+        if not ok:
+            self._status(f"No microphone ({problem}). Import still works." if problem else
+                         "No microphone. Import still works.", "error")
+        self.events.emit("mic_changed", {"device": self.profile.input_device, "egg_channel": self.profile.egg_channel,
+                                         "capture": dict(getattr(self.engine, "capture_info", None) or {})})
+        self._controls_changed()
+
+    def mic_status(self, banner=None):
+        """{"label", "state" ("ok" | "warn" | "error"), "tooltip"}: the mic in the top bar. `banner` is the
+        live snapshot's input banner, if any."""
+        name = self.profile.input_device or DEFAULT_MIC
+        if not self.mic_available:
+            return {"label": name, "state": "error", "tooltip": self.mic_problem or "The mic couldn't be opened."}
+        egg = f" · EGG on channel {self.profile.egg_channel + 1}" if self.profile.egg_channel is not None else ""
+        if banner:
+            return {"label": name + egg, "state": "warn", "tooltip": banner["text"]}
+        return {"label": name + egg, "state": "ok", "tooltip": f"Listening on {name}{egg}"}
+
+    def takes_in_progress(self):
+        """Takes still being analysed (a new take, plus older ones being re-analysed): the Takes badge."""
+        count = 1 if self.analyzing else 0
+        if self.store and self._job_running("reanalysis"):
+            count += len(self.outdated_takes())
+        return count
+
+    def mic_check_text(self):
+        """The last mic check in plain words: [lines], first what it found, then the measured numbers; []
+        before the first check."""
+        result = self.profile.mic_check
+        if not result:
+            return []
+        when = take_date(result) or "earlier"
+        advice = result.get("advice") or []
+        head = f"Last check ({when}): " + ("your input looks good." if result.get("ok") else
+                                          (advice[0] if advice else "see the details."))
+        try:
+            numbers = mic_check.summary_lines(result)
+        except (KeyError, TypeError):    # an older result without every field
+            numbers = []
+        return [head] + numbers
+
+    # --- UI PREFERENCES AND THE FIRST RUN ---
+
+    def ui_pref(self, key):
+        return self.profile.ui.get(key)
+
+    def set_ui_pref(self, **values):
+        """Change UI preferences (profile_store.UI_DEFAULTS keys); "ui_changed"(prefs)."""
+        self.profile.set_ui(**values)
+        self.events.emit("ui_changed", dict(self.profile.ui))
+
+    def should_onboard(self):
+        """True until the first-run welcome has been seen (or skipped)."""
+        return not self.profile.ui.get("onboarded")
+
+    def finish_onboarding(self):
+        self.profile.set_ui(onboarded=True)
 
     # --- TAKES FOLDER ---
 

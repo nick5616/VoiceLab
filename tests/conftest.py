@@ -1,5 +1,5 @@
-"""Fixtures shared by the app-level tests: a Qt application and a main window (built as main.py builds it,
-on a VoiceLabCore) with no mic or speakers."""
+"""Fixtures shared by the app-level tests: a Qt application and the main window (the spec 05 shell, built as
+main.py builds it, on a VoiceLabCore) with no mic or speakers."""
 import os
 import sys
 import time
@@ -38,6 +38,12 @@ def make_window(app, tmp_path, monkeypatch):
     monkeypatch.setattr(sd, "play", lambda *a, **k: None)
     monkeypatch.setattr(sd, "stop", lambda *a, **k: None)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    from ui import theme
+    monkeypatch.setenv("VOICELAB_REDUCE_MOTION", "1")
+    # Motion off: tweens jump to their end. Windows from earlier tests are deleted between tests, and an
+    # animation caught mid-flight by that deletion can crash the test process (never the app, whose
+    # window lives until it quits). tests/test_ui_components.py covers the animations themselves.
+    theme.set_reduce_motion(True)
     windows = []
 
     def make(takes_dir=None):
@@ -53,3 +59,12 @@ def make_window(app, tmp_path, monkeypatch):
     yield make
     for window in windows:
         window.close()
+    # Delete the windows here, in the event loop, rather than whenever the garbage collector gets to
+    # them: collected mid-animation, a widget tree can vanish under a running tween.
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    for window in windows:
+        window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    QApplication.processEvents()
+    theme.set_theme("dark")             # a test may have switched it; the theme is app-wide
+    theme.set_reduce_motion(False)
