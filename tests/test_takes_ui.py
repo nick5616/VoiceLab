@@ -13,9 +13,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 from PyQt6.QtWidgets import QMessageBox  # noqa: E402
 
+import main  # noqa: E402
 import mic_noise  # noqa: E402
 import profile_store  # noqa: E402
-from analysis import analyze_take  # noqa: E402
+from analysis import FORMANT_CEILINGS, analyze_take  # noqa: E402
 from profile_store import Profile  # noqa: E402
 from progress import ProgressDialog, change_text, select  # noqa: E402
 from take_card import AnalysisGraph, TakeCard, UntrustedMetric  # noqa: E402
@@ -23,7 +24,8 @@ from take_register import analyze_recording, finish_take  # noqa: E402
 from take_store import ANALYSIS_VERSION, TakeStore, is_outdated  # noqa: E402
 from targets_dialog import TargetsDialog  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
-from test_app import app, make_window, record, wait_for  # noqa: E402,F401  (fixtures)
+from conftest import wait_for  # noqa: E402
+from test_app import record  # noqa: E402
 
 VOICE = synth_vowel(140, MALE_FORMANTS, seconds=3, noise=0.05)
 REALISTIC = mic_noise.at_level(synth_vowel(140, MALE_FORMANTS, seconds=3), -30) + mic_noise.mic_noise(3 * SR)
@@ -366,21 +368,53 @@ def test_voice_map_rebuilds_from_takes(make_window, tmp_path, monkeypatch):
 def test_formant_ceiling_is_fixed_once(make_window):
     window = make_window()
     assert window.profile.formant_ceiling is None
-    first = record(window, VOICE)
+    for _ in range(main.CEILING_TAKES - 1):
+        record(window, VOICE)
+        assert window.profile.formant_ceiling is None            # not enough takes to choose from yet
+    record(window, VOICE)
     ceiling = window.profile.formant_ceiling
-    assert ceiling == first.data["formant_ceiling"]
-    window.note_ceiling(dict(first.data, formant_ceiling=ceiling + 150))
-    assert window.profile.formant_ceiling == ceiling                 # later takes don't move it
+    assert ceiling in FORMANT_CEILINGS
+    assert window.engine.analyzer.formant_ceiling == ceiling      # the live meters use it
+    assert Profile(window.profile.directory).formant_ceiling == ceiling      # kept in the profile
+    window.note_ceiling(dict(window.cards[-1].data, formant_ceiling=ceiling + 150))
+    assert window.profile.formant_ceiling == ceiling              # later takes don't move it
+    after = record(window, VOICE)
+    assert after.data["formant_ceiling"] == ceiling               # and every analysis is given it
+    assert window.engine.analyzer.formant_ceiling == ceiling
+
+
+def test_vowel_check_ceiling_wins(make_window):
+    window = make_window()
+    window.use_vowel_ceiling({"formant_ceiling": 4500})
+    assert window.profile.formant_ceiling == 4500 and window.engine.analyzer.formant_ceiling == 4500
+    for _ in range(main.CEILING_TAKES):
+        record(window, VOICE)
+    assert window.profile.formant_ceiling == 4500                 # takes never override it
+    window.use_vowel_ceiling({"formant_ceiling": 5000})           # a later vowel check always does
+    assert window.profile.formant_ceiling == 5000
 
 
 def test_mic_check_result_is_stored(make_window, monkeypatch):
     window = make_window()
-    monkeypatch.setattr(window.live_panel, "show_mic_check", lambda: {"level_db": -30.0}, raising=False)
+    live = window.live_panel
+    assert live.engine is window.engine
+    monkeypatch.setattr(live, "show_mic_check", lambda: live.mic_check_done.emit({"level_db": -30.0}))
     window.first_run_mic_check()
     assert window.profile.mic_check == {"level_db": -30.0}
     window.profile.mic_check = None
     window.first_run_mic_check()                                     # asked once, never again by itself
     assert window.profile.mic_check is None
+
+
+def test_noise_floor_is_saved_on_close_and_kept_without_one(make_window):
+    window = make_window()
+    window.engine.analyzer.noise_floor = -61.5
+    window.close()
+    assert window.profile.noise_floor == -61.5
+    assert window.stream_options() == {"noise_floor": -61.5}
+    window.engine.analyzer.noise_floor = None
+    window.close()
+    assert window.profile.noise_floor == -61.5                       # an unheard floor doesn't erase it
 
 
 def test_card_rebuilds_after_reanalysis(make_window):

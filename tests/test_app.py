@@ -14,11 +14,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 import sounddevice as sd  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from analysis import midi_to_hz  # noqa: E402
-from engine import UPDATE_INTERVAL, LiveEngine  # noqa: E402
-from profile_store import Profile  # noqa: E402
+from conftest import wait_for  # noqa: E402
+from engine import UPDATE_INTERVAL  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
 
 VOICE = synth_vowel(140, MALE_FORMANTS, seconds=1.5, noise=0.05)
@@ -27,45 +27,6 @@ HOP = int(UPDATE_INTERVAL * SR)
 
 def silence(seconds):
     return 1e-4 * np.random.default_rng(0).standard_normal(int(seconds * SR))
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture
-def make_window(app, tmp_path, monkeypatch):
-    import main
-    monkeypatch.setattr(sd, "play", lambda *a, **k: None)
-    monkeypatch.setattr(sd, "stop", lambda *a, **k: None)
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    windows = []
-
-    def make(takes_dir=None):
-        profile = Profile(tmp_path / "home")
-        if takes_dir:
-            profile.set_takes_dir(takes_dir)
-        window = main.MainWindow(LiveEngine(), profile)
-        windows.append(window)
-        if takes_dir:
-            wait_for(lambda: window.load_worker is None or not window.load_worker.isRunning())
-        return window
-
-    yield make
-    for window in windows:
-        window.close()
-
-
-def wait_for(condition, timeout=60):
-    end = time.perf_counter() + timeout
-    while time.perf_counter() < end:
-        QApplication.processEvents()
-        if condition():
-            QApplication.processEvents()
-            return True
-        time.sleep(0.01)
-    return False
 
 
 def play(window, audio, on_frame=None):
