@@ -192,6 +192,12 @@ MIN_WINDOW_FILL = 0.2       # share of a window's frames that must hold a readin
 ROUNDED_F2 = 1200           # Hz; median F2 under this in a dark stretch: rounded back vowels
                             # ('oo', 'oh': men's F2 ~ 900-1100 Hz in H95; own judgement)
 SMOOTH_S = 0.05             # median smoothing of f0 before finding dips
+# The whisker on a dimension's bar: the middle half of the take's frames (25th-75th percentile), so
+# the bar shows how far the voice moved around its reading. Own choice (spec 06): the IQR is the
+# spread the analysis already reports for delta_f (delta_f_iqr).
+RANGE_PERCENTILES = (25, 75)
+RANGE_TRACKS = {"pitch": "f0", "delta_f": "delta_f", "h1h2": "h1h2", "cpp": "cpp"}
+MIN_RANGE_FRAMES = 20       # frames with a reading needed for a whisker (0.2 s; as profile_store)
 # Smallest change worth naming against the last take or the baseline; own judgement, about the
 # take-to-take spread of the user's takes (pitch 1 st; ΔF frame IQR 70-180 Hz, median steadier).
 CHANGE_MIN = {"pitch": 1.0, "pitch_floor": 1.0, "pitch_range": 1.5, "delta_f": 40.0,
@@ -608,6 +614,21 @@ def _change_text(key, value, other, vs):
 
 # --- SPEAK DIMENSIONS ---
 
+def frame_range(take, key):
+    """(lo, hi): the middle half (RANGE_PERCENTILES) of the take's frames for one dimension, or None
+    without a track (pitch floor and intonation are themselves spreads) or with too few readings."""
+    name = RANGE_TRACKS.get(key)
+    _, tracks = _tracks(take)
+    values = tracks.get(name) if name else None
+    if values is None:
+        return None
+    values = values[~np.isnan(values)]
+    if len(values) < MIN_RANGE_FRAMES:
+        return None
+    lo, hi = np.percentile(values, RANGE_PERCENTILES)
+    return float(lo), float(hi)
+
+
 def _speak_dimension(key, take, quality, profile, previous, prev_quality):
     spec = ZONES[key]
     value = _num(take.get(key))
@@ -643,7 +664,8 @@ def _speak_dimension(key, take, quality, profile, previous, prev_quality):
             "details": _details(key, value, take, profile) if value is not None else
                        f"No reading. Source for the zones: {spec['source']}.",
             "target": tuple(float(v) for v in target) if target else None,
-            "baseline": baseline, "change": change}
+            "baseline": baseline, "change": change,
+            "range": frame_range(take, key) if trusted and not _vowel_delta_f(take) else None}
 
 
 def _issues(dimensions, quality):
@@ -1041,7 +1063,7 @@ def _sing_dimensions(take, quality):
                      "zone_label": None, "confidence": level if trusted else "none",
                      "reason": reason, "headline": headline if trusted else _cap_first(reason or ""),
                      "explanation": EXPLANATIONS[key], "details": details,
-                     "target": None, "baseline": None, "change": None})
+                     "target": None, "baseline": None, "change": None, "range": None})
 
     pitch_ok = quality["trust"].get("singing", True) and quality["trust"].get("pitch", True)
     why = quality["why_untrusted"].get("singing") or quality["why_untrusted"].get("pitch")

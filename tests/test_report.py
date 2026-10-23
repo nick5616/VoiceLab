@@ -281,3 +281,16 @@ def test_report_is_json_serialisable(tmp_path):
             assert set(rep) == {"mode", "headline", "overall", "dimensions", "tips", "issues",
                                 "caveat", "goal"}
             assert report.render_text(rep)
+
+
+def test_dimensions_carry_the_middle_half_of_their_frames():
+    rep = report.build_report(make_take(f0=200.0, df=1000.0))
+    pitch, resonance = dim(rep, "pitch"), dim(rep, "delta_f")
+    lo, hi = pitch["range"]
+    assert lo < pitch["value"] < hi and 12 * np.log2(hi / lo) < 2      # a +/-1 st wobble
+    lo, hi = resonance["range"]
+    assert lo < 1000 < hi and hi - lo < 40                              # +/-20 Hz movement
+    assert dim(rep, "pitch_floor")["range"] is None and dim(rep, "pitch_range")["range"] is None
+    poor = report.build_report(make_take(snr=6.0, level=-52.0))
+    assert all(d["range"] is None for d in poor["dimensions"])
+    json.dumps(rep, default=float)
