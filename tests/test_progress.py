@@ -86,3 +86,51 @@ def test_register_and_cq_series():
     assert list(select(entries, "cq")[1]) == [0.41, 0.43]
     assert select([entry(0)], "cq")[1].size == 0                      # no EGG, no series
     assert "0.42" in change_text("cq", *select(entries, "cq"))
+
+
+# --- THE PROGRESS SCREEN (phase 10 spec 06) ---
+
+def test_overall_placement_needs_pitch_and_resonance():
+    import progress
+    import report
+    assert progress.overall_of(entry(0, pitch=220.0)) is None
+    assert progress.overall_of(entry(0, pitch=220.0, delta_f=1130.0, mode="sing")) is None
+    feminine = progress.overall_of(entry(0, pitch=218.0, delta_f=1122.0))
+    masculine = progress.overall_of(entry(0, pitch=132.0, delta_f=963.0))
+    assert feminine == 100.0 and masculine == 0.0                      # the report's anchors
+    middle = progress.overall_of(entry(0, pitch=162.0, delta_f=1030.0))
+    assert 100 * report.OVERALL_EDGES[0] < middle < 100 * report.OVERALL_EDGES[1]
+
+
+def test_report_view_charts_each_dimension_on_its_zones():
+    import progress
+    from profile_store import Profile
+    import tempfile
+    profile = Profile(tempfile.mkdtemp())
+    profile.set_target("pitch", (180, 220))
+    entries = [entry(d, pitch=150.0 + d, delta_f=1000.0 + d, pitch_floor=120.0, tier="good") for d in range(6)]
+    entries.append(entry(1, pitch=90.0, delta_f=900.0, tier="poor"))
+    entries.append(entry(2, pitch=300.0, delta_f=1200.0, mode="sing", task="free singing"))
+    view = progress.report_view(entries, profile)
+    keys = [k for k, _ in view["charts"]]
+    assert keys == progress.REPORT_KEYS and keys[0] == "overall"
+    charts = dict(view["charts"])
+    pitch = charts["pitch"]
+    assert len(pitch["values"]) == 6 and pitch["target"] == [180.0, 220.0] and pitch["log"]
+    assert pitch["y_range"] == (80, 400) and pitch["latest_zone"] == "overlap"
+    assert charts["h1h2"] is None and charts["overall"]["zones"] is progress.OVERALL_ZONES
+    assert view["task"] == "free speech" and "1 poor recording" in view["left_out"]
+    assert len(progress.report_view(entries, profile, include_poor=True)["charts"][1][1]["values"]) == 7
+
+
+def test_mini_gives_weekly_medians_for_the_last_weeks():
+    import progress
+    from profile_store import Profile
+    import tempfile
+    now = MONDAY + timedelta(days=20)
+    entries = [entry(d, pitch=150.0 + d, delta_f=1000.0, tier="good") for d in (0, 1, 15, 16)]
+    out = progress.mini(entries, Profile(tempfile.mkdtemp()), weeks=4, now=now)
+    pitch = out["series"][0]
+    assert pitch["key"] == "pitch" and len(pitch["values"]) == 4
+    assert pitch["values"] == [None, 150.5, None, 165.5] and pitch["latest"] == "166 Hz"
+    assert out["series"][2]["latest"] in ("overlap / androgynous", "typically masculine")
