@@ -179,3 +179,22 @@ def test_noise_floor_and_mic_check_persist(tmp_path):
     reloaded = Profile(tmp_path)
     assert reloaded.noise_floor == -61.5 and reloaded.mic_check == {"level_db": -30.0}
     assert reloaded.mic_check_asked
+
+
+def test_voice_goal_persists_and_validates(tmp_path):
+    profile = Profile(tmp_path)
+    assert profile.voice_goal is None                  # just exploring until chosen
+    profile.set_voice_goal("androgynous")
+    assert Profile(tmp_path).voice_goal == "androgynous"
+    profile.set_voice_goal(None)
+    assert Profile(tmp_path).voice_goal is None
+    try:
+        profile.set_voice_goal("female")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown goal must be refused")
+    data = json.loads((tmp_path / "profile.json").read_text(encoding="utf-8"))
+    data["voice_goal"] = "nonsense"                     # a hand-edited file falls back to None
+    (tmp_path / "profile.json").write_text(json.dumps(data), encoding="utf-8")
+    assert Profile(tmp_path).voice_goal is None
