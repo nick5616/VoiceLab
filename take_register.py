@@ -115,7 +115,7 @@ def label_rows(audio, tracks):
         frame = audio[max(0, center - register.FRAME // 2):center + register.FRAME // 2]
         if len(frame) < register.FRAME:
             continue
-        formants = [tracks[k][i] for k in ("f1", "f2", "f3")]
+        formants = register.frame_formants(tracks, i)
         features = register.frame_features(frame, SAMPLE_RATE, f0[i], formants,
                                            register.NOMINAL_BANDWIDTHS, None if cq is None else cq[i])
         for k in ("h1h2", "cpp"):            # reuse analyze_take's values when present

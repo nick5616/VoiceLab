@@ -51,12 +51,12 @@ DEFAULT_WEIGHTS = {"h1h2": 1.0, "h1a3": 1.3, "cpp": 0.0, "logf0": 0.3, "cq": -3.
 # logf0 (log2(f0/150) in z) is only a weak prior and its centre is unused
 DEFAULT_BIAS = 0.0
 Z_CLIP = 3.0
-HIGH_F0 = analysis.FORMANT_RELIABLE_MAX_F0       # above this, formant correction is untrustworthy
-HIGH_F0_H1H2_TRUST = 0.3                         # h1h2 weight multiplier above HIGH_F0 (synthetic)
-H1A3_F0_SLOPE = 30.0                             # dB per octave above HIGH_F0 added to the h1a3 centre:
-                                                 # uncorrected H1 rises with F1 proximity (synthetic)
-H1A3_SLOPE_MAX_F0 = 500.0                        # Hz; the centre stops rising here, so it cannot run away
-                                                 # and pin every high note to "chest" (synthetic)
+HIGH_F0 = analysis.F1_RELIABLE_MAX_F0            # above this F1 is withheld (tracks['f1_ok']) and H1 cannot be corrected
+HIGH_F0_H1H2_TRUST = 0.3                         # h1h2 weight multiplier above HIGH_F0 (synthetic). Integration
+                                                 # retune: with F1 withheld, the old +30 dB/octave h1a3 centre
+                                                 # rise read light 330-400 Hz phonation as chest (score 0.07,
+                                                 # was 0.7), so it was removed; at 0 the soprano vowels at
+                                                 # 260-400 Hz separate (heavy 0.1-0.2, light 0.7-0.8)
 HEAD_PRIOR_F0 = 500.0                            # Hz; above this the prior shifts toward head: M1 rarely
                                                  # exceeds ~500-700 Hz (Henrich 2006; unverified for any one voice)
 HEAD_PRIOR_LOGIT = 3.0                           # logit added per octave above HEAD_PRIOR_F0 (synthetic)
@@ -133,8 +133,6 @@ def _z(features):
         x = features.get(name)
         x = np.nan if x is None else float(x)
         centre = DEFAULT_CENTRES[name]
-        if name == "h1a3" and high:
-            centre += H1A3_F0_SLOPE * np.log2(min(f0, H1A3_SLOPE_MAX_F0) / HIGH_F0)
         v = (x - centre) / DEFAULT_SCALES[name] if not np.isnan(x) else np.nan
         if name == "h1h2" and high and not np.isnan(v):
             v *= HIGH_F0_H1H2_TRUST
@@ -321,6 +319,14 @@ def _frame_at(audio, t, sample_rate):
     return audio[max(0, center - half):center + half]
 
 
+def frame_formants(tracks, i):
+    """[F1, F2, F3] of frame i, F1 withheld (NaN) where the take marked it unreliable (tracks['f1_ok']).
+    Takes from before that mask existed keep their F1 as stored."""
+    f1_ok = tracks.get("f1_ok")
+    f1 = tracks["f1"][i] if f1_ok is None or f1_ok[i] > 0.5 else np.nan
+    return [f1, tracks["f2"][i], tracks["f3"][i]]
+
+
 def register_track(audio, sample_rate, tracks, model=None, cq_track=None):
     """Per-frame m2 score (NaN where unvoiced), aligned with tracks['times'].
     `tracks` is analyze_take()'s result['tracks']."""
@@ -333,7 +339,7 @@ def register_track(audio, sample_rate, tracks, model=None, cq_track=None):
         frame = _frame_at(audio, times[i], sample_rate)
         if len(frame) < FRAME:
             continue
-        formants = [tracks[k][i] for k in ("f1", "f2", "f3")]
+        formants = frame_formants(tracks, i)
         cq = None if cq_track is None else cq_track[i]
         features = frame_features(frame, sample_rate, f0[i], formants, NOMINAL_BANDWIDTHS, cq)
         for k, values in stored.items():      # reuse analyze_take's values when present
