@@ -14,7 +14,7 @@ COMPUTING_MODULES = {"analysis", "coach", "denoise", "egg", "isolation", "regist
 # percentiles or nanmin/nanmax, is allowed).
 READING_STATISTICS = {"median", "nanmedian", "mean", "nanmean", "std", "nanstd", "var", "nanvar", "average"}
 PURE = ["app_core", "live_session", "engine", "jobs", "playback", "display", "events", "exercise", "speech",
-        "voice_map", "mic_check", "progress", "take_view", "targets", "shift_session"]
+        "voice_map", "mic_check", "progress", "take_view", "targets", "shift_session", "report"]
 
 
 def imported_modules(path):

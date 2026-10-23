@@ -108,11 +108,12 @@ def output_latency():
         return 0.0
 
 
-def analyze_exercise_take(audio, targets, name, latency=0.0):
+def analyze_exercise_take(audio, targets, name, latency=0.0, ceiling=None):
     """analyze_take plus the exercise score. `latency` is the guide's output latency: the guide
     sounded that much after the recording started, so the singer is scored against the targets
-    shifted by it (the reported timing is then reaction time, not device lag)."""
-    result = analyze_take(audio, mode="sing")
+    shifted by it (the reported timing is then reaction time, not device lag). `ceiling` is the profile's
+    formant ceiling (None: chosen for the take)."""
+    result = analyze_take(audio, mode="sing", ceiling=ceiling)
     if "error" not in result:
         times, f0 = result["tracks"]["times"], result["tracks"]["f0"]
         heard = [(s + latency, d, m) for s, d, m in targets]
@@ -161,6 +162,7 @@ class ExerciseSession:
         self.cents_text, self.cents_color = "—", None    # the big readout; colour from tuning_color
         self.result = None
         self.job = None
+        self.ceiling = lambda: None      # the profile's formant ceiling, for the scoring analysis
 
     # --- CHOOSING ---
 
@@ -244,7 +246,8 @@ class ExerciseSession:
         self._set_running(False)
         if finished:
             self.job = self.runner.submit("exercise", "Scoring the exercise", analyze_exercise_take, audio,
-                                          self.targets, self.exercise_name(), self.latency, on_done=self._scored)
+                                          self.targets, self.exercise_name(), self.latency, self.ceiling(),
+                                          on_done=self._scored)
 
     def _set_running(self, running):
         self.running = running

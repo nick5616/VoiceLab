@@ -202,7 +202,7 @@ class LiveSession:
     def set_mode(self, mode):
         """"speak" or "sing": which meters show, the pitch scale, and the pitch tracker's mode."""
         self.mode = mode
-        if self.engine is not None and hasattr(self.engine, "set_mode"):
+        if self.engine is not None:
             self.engine.set_mode(mode)
         self.recent.clear()                  # the last few seconds were the other mode's
         self.recent_cents.clear()
@@ -370,7 +370,7 @@ class LiveSession:
     def register_features(self, frame, window=None):
         """Feature dict for the register score from a live frame (and the audio window, for H1-A3)."""
         f0, cq = frame["f0"], frame.get("cq", np.nan)
-        if window is None and self.engine is not None and hasattr(self.engine, "latest_window"):
+        if window is None and self.engine is not None:
             window = self.engine.latest_window()
         if window is not None and len(window) >= register.FRAME:
             features = register.frame_features(window[-register.FRAME:], SAMPLE_RATE, f0, frame["formants"],
@@ -458,7 +458,7 @@ class LiveSession:
     def _update_noise_report(self):
         """The noise report on the engine's last few seconds of audio (needs an engine)."""
         engine = self.engine
-        if engine is None or not hasattr(engine, "recent_audio"):
+        if engine is None:
             return
         audio = engine.recent_audio(NOISE_REPORT_SECONDS)
         if len(audio) < NOISE_REPORT_MIN_SECONDS * engine.sample_rate:

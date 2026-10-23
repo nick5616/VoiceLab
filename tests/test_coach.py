@@ -255,6 +255,8 @@ def test_real_takes_own_target_resonance_time_in_target():
     for path in REAL:
         audio, rate = soundfile.read(path)
         result = analysis.analyze_take(audio if audio.ndim == 1 else audio[:, 0], rate)
+        if result["delta_f"] is None:   # phase 9 spec 05: resonance is withheld when most F1 are unreadable
+            continue
         profile = Profile.__new__(Profile)
         profile.targets, profile.save = {}, lambda: None
         profile.set_targets_from_take(result)

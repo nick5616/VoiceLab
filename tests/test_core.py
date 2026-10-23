@@ -49,8 +49,12 @@ class FakeEngine:
         self.capturing = False
         return self.take
 
-    def open_stream(self, device=None, egg_channel=None):
+    def open_stream(self, device=None, egg_channel=None, noise_floor=None):
         self.opened.append((device, egg_channel))
+        self.floor_given = noise_floor
+
+    def noise_floor(self):
+        return self.analyzer.noise_floor
 
     def stop(self):
         self.stopped = True
@@ -127,15 +131,51 @@ def test_record_stop_adds_a_take(make_core):
     assert any(jobs and jobs[0]["kind"] == "analysis" for (jobs,) in core.heard["busy"])
     assert core.heard["busy"][-1] == ([],)
     assert len(core.profile.read_history()) == 1                # no folder: the history log keeps it
-    assert core.profile.formant_ceiling == take["formant_ceiling"]
+    assert core.profile.formant_ceiling is None and core.ceiling_candidates == [take]     # one of three
 
 
-def test_formant_ceiling_is_fixed_once(make_core):
+def test_formant_ceiling_is_chosen_once_from_own_usable_takes(make_core):
+    from analysis import FORMANT_CEILINGS
     core = make_core()
     take = record(core)
+    for skipped in (dict(take, source="teacher.wav"), dict(take, snr=6.0, level=-52.0),
+                    {k: v for k, v in take.items() if k != "tracks"}):
+        core.note_ceiling(skipped)                               # imports, poor takes, takes without tracks
+    assert len(core.ceiling_candidates) == 1 and core.profile.formant_ceiling is None
+    record(core)
+    assert core.profile.formant_ceiling is None
+    record(core)
     ceiling = core.profile.formant_ceiling
+    assert ceiling in FORMANT_CEILINGS and core.engine.analyzer.formant_ceiling == ceiling
+    assert core.ceiling_candidates == [] and Profile(core.profile.directory).formant_ceiling == ceiling
     core.note_ceiling(dict(take, formant_ceiling=ceiling + 150))
-    assert core.profile.formant_ceiling == ceiling == core.engine.analyzer.formant_ceiling
+    assert core.profile.formant_ceiling == ceiling                  # later takes don't move it
+    assert record(core)["formant_ceiling"] == ceiling               # every analysis is given it
+
+
+def test_vowel_check_ceiling_wins(make_core):
+    core = make_core()
+    core.events.emit("vowel_check_done", {"formant_ceiling": 4500})
+    assert core.profile.formant_ceiling == 4500 == core.engine.analyzer.formant_ceiling
+    for _ in range(app_core.CEILING_TAKES):
+        record(core)
+    assert core.profile.formant_ceiling == 4500                     # takes never override it
+    core.use_vowel_ceiling({"formant_ceiling": 5000})               # a later vowel check always does
+    assert core.profile.formant_ceiling == 5000
+    assert core.exercise.ceiling() == 5000                          # exercises are scored with it too
+
+
+def test_noise_floor_is_passed_on_and_saved_on_close(make_core):
+    core = make_core()
+    assert core.stream_options() == {"noise_floor": None}
+    core.engine.analyzer.noise_floor = -61.5
+    core.close()
+    assert core.profile.noise_floor == -61.5 and core.stream_options() == {"noise_floor": -61.5}
+    core.open_mic(None)
+    assert core.engine.floor_given == -61.5
+    core.engine.analyzer.noise_floor = None
+    core.close()
+    assert core.profile.noise_floor == -61.5                         # an unheard floor doesn't erase it
 
 
 def test_an_exercise_result_arriving_mid_analysis_keeps_record_locked(make_core):
@@ -304,7 +344,7 @@ def test_mic_opens_and_a_failing_egg_falls_back(make_core):
     assert message == "Listening on the system default mic" and core.engine.opened[-1] == (None, None)
     assert core.heard["mic_changed"][-1][0]["egg_channel"] is None
 
-    def open_stream(device=None, egg_channel=None):
+    def open_stream(device=None, egg_channel=None, noise_floor=None):
         core.engine.opened.append((device, egg_channel))
         if egg_channel is not None:
             raise sd.PortAudioError("Invalid number of channels")
@@ -314,7 +354,7 @@ def test_mic_opens_and_a_failing_egg_falls_back(make_core):
     assert core.profile.egg_channel is None and not core.live.egg_on and core.status[1] == "error"
     assert core.engine.opened[-2:] == [(None, 1), (None, None)]
 
-    def fail(device=None, egg_channel=None):
+    def fail(device=None, egg_channel=None, noise_floor=None):
         raise sd.PortAudioError("device unavailable")
     core.engine.open_stream = fail
     assert "Couldn't open Broken mic" in core.open_mic("Broken mic")
@@ -351,18 +391,30 @@ def test_labelling_needs_both_classes(make_core, tmp_path):
     assert "register_label" not in take
 
 
-def test_report_is_guarded(make_core):
+def test_report_compares_with_the_previous_take_of_the_same_task(make_core):
+    import json
     core = make_core()
-    take = record(core)
-    report = core.report(take["uid"])
-    assert report is None or isinstance(report, dict)
+    first = record(core)
+    core.set_mode("sing")
+    sung = record(core)
+    core.set_mode("speak")
+    core.set_reading(0)
+    passage = record(core)
+    core.set_reading(None)
+    latest = record(core)
+    assert core.previous_take(latest["uid"]) is first             # same task (free speech), not the sung take
+    assert core.previous_take(passage["uid"]) is first            # no earlier passage: the same mode
+    assert core.previous_take(sung["uid"]) is None and core.previous_take(first["uid"]) is None
+    report = core.report(latest["uid"])
+    assert report["mode"] == "speak" and report["headline"] and report["dimensions"]
+    json.dumps(report, default=float)                             # plain data
+    assert core.report("no such take") is None
 
 
-def test_close_saves_the_voice_map_and_noise_floor(make_core):
+def test_close_saves_the_voice_map(make_core):
     core = make_core()
-    core.engine.noise_floor = lambda: -61.5
     core.close()
-    assert core.engine.stopped and core.profile.noise_floor == -61.5 and core.profile.voice_map_path.exists()
+    assert core.engine.stopped and core.profile.voice_map_path.exists()
 
 
 def test_mic_check_session_runs_its_phases_without_a_ui():

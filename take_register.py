@@ -81,13 +81,9 @@ def finish_take(result, egg_samples=None, state=None, version=0):
 
 
 def analyze_with_options(audio, mode="speak", ceiling=None):
-    """analyze_take in the take's mode, with the profile's formant ceiling when analyze_take takes
-    one (spec 05); the result is stamped with the analysis version it was made with."""
-    import inspect
-    options = {}
-    if ceiling and "ceiling" in inspect.signature(analyze_take).parameters:
-        options["ceiling"] = ceiling
-    result = analyze_take(audio, mode=mode, **options)
+    """analyze_take in the take's mode, with the profile's formant ceiling (None: chosen per take);
+    the result is stamped with the analysis version it was made with."""
+    result = analyze_take(audio, mode=mode, ceiling=ceiling)
     if "error" not in result:
         result.update(analysis_version=ANALYSIS_VERSION, mode=mode)
     return result

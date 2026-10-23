@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         self.live_panel = LivePanel(core, self.edit_targets)
+        self.live_panel.mic_check_done.connect(core.save_mic_check)
         self.vowel_check = VowelCheck(core)
         self.exercise_view = ExerciseView(core)
         self.voice_map = VoiceMapView(core)
@@ -114,7 +115,6 @@ class MainWindow(QMainWindow):
         self.mic_check_btn.setStyleSheet(BUTTON_STYLE)
         self.mic_check_btn.setToolTip("Check your input level, noise and distance to the mic.")
         self.mic_check_btn.clicked.connect(self.mic_check)
-        self.mic_check_btn.setVisible(hasattr(self.live_panel, "show_mic_check"))
         self.folder_btn = QPushButton(qta.icon("fa5s.folder-open", color="white"), "")
         self.folder_btn.setStyleSheet(BUTTON_STYLE)
         self.folder_btn.clicked.connect(self.choose_takes_folder)
@@ -448,13 +448,7 @@ class MainWindow(QMainWindow):
             self._set_egg_choice(None)
 
     def mic_check(self):
-        show = getattr(self.live_panel, "show_mic_check", None)
-        if show is None:
-            self.set_status("The mic check isn't available in this build.")
-            return
-        result = show()
-        if isinstance(result, dict):
-            self.core.save_mic_check(result)
+        self.live_panel.show_mic_check()
 
     def first_run_mic_check(self):
         """Once, the first time VoiceLab opens a mic."""

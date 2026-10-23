@@ -65,7 +65,7 @@ def test_delta_f_recovers_formant_spacing():
 
 
 def test_formant_ceiling_adapts_to_smaller_tract():
-    for f0 in (200, 300):
+    for f0 in (150, 220):   # 300 Hz is above FORMANT_RELIABLE_MAX_F0 now
         # Leading silence, as in a real take, must not change the result.
         audio = np.concatenate([np.zeros(int(0.3 * SR)), synth_vowel(f0, scaled(MALE_FORMANTS, 1.18))])
         result = analysis.analyze_take(audio)
@@ -147,7 +147,7 @@ def test_vowel_check_recovers_vowel_space():
     assert result["skipped"] == []
     for word, (f1, f2, _) in HVD_FORMANTS.items():
         v = result["vowels"][word]
-        assert abs(v["f1"] - f1) / f1 < 0.125, word    # hid sits at 0.120: ceiling 6000 vs 5750 after the pitch retune
+        assert abs(v["f1"] - f1) / f1 < 0.125, word    # hid sits at 0.120: ceiling choice (5750 vs 6000) moves it; gated pitch did not fix this
         assert abs(v["f2"] - f2) / f2 < 0.08, word
 
 

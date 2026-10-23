@@ -19,6 +19,7 @@ import coach
 import isolation
 import profile_store
 import register
+import report
 import take_view
 import voice_map
 from analysis import SAMPLE_RATE, score_exercise
@@ -27,7 +28,7 @@ from egg import load_stereo_take
 from engine import device_index, input_channels, input_devices
 from events import Events
 from exercise import ExerciseSession
-from jobs import JobRunner, accepts
+from jobs import JobRunner
 from live_session import LiveSession
 from playback import Player
 from profile_store import TARGET_KEYS
@@ -40,7 +41,7 @@ from take_store import (ANALYSIS_VERSION, IMPORT_MAX_SECONDS, TakeStore, default
 
 TAKES_PAGE = 20                 # takes shown at first; older ones on request
 COMPARE_CHOICES = 15            # recent takes offered under "Compare with…"
-CEILING_TAKES = 3               # usable takes the profile's formant ceiling is chosen from (spec 05)
+CEILING_TAKES = 3               # usable takes the profile's formant ceiling is chosen from
 REST_NUDGE_MINUTES = 25         # first rest reminder, then every so often. Own judgement: vocal-hygiene
 #                                 advice commonly says to rest the voice regularly, but I could not confirm
 #                                 a specific interval (unverified)
@@ -201,6 +202,7 @@ class VoiceLabCore:
         self.player = Player()
         self.live = LiveSession(profile, profile.mode, engine=engine)
         self.exercise = ExerciseSession(engine, self.events, runner=self.runner)
+        self.exercise.ceiling = lambda: self.profile.formant_ceiling
         self.vowels = VowelCheckSession(engine, profile, self.events, runner=self.runner)
         self.voice_map = voice_map.MapSession(profile.voice_map_path)
         self.live.target_provider = self.exercise.current_target
@@ -283,17 +285,21 @@ class VoiceLabCore:
         self.events.emit("take_added", data)
 
     def report(self, uid):
-        """report.build_report for a take (spec 02), or None until that exists."""
-        try:
-            import report
-        except ImportError:
-            return None
-        build = getattr(report, "build_report", None)
+        """report.build_report for a take, compared with previous_take(); None for an unknown take."""
         data = self.take(uid)
-        if build is None or data is None:
+        if data is None:
             return None
-        earlier = [d for d in self._takes if d["time"] < data["time"] and default_mode(d) == default_mode(data)]
-        return build(data, self.profile, earlier[-1] if earlier else None)
+        return report.build_report(data, self.profile, self.previous_take(data))
+
+    def previous_take(self, uid):
+        """The latest earlier take made for the same task (profile_store.task_of), else in the same mode,
+        else None: what a report compares with."""
+        data = self.take(uid)
+        earlier = [d for d in self._takes if d is not data and d["time"] < data["time"]]
+        task = profile_store.task_of(data)
+        same = [d for d in earlier if profile_store.task_of(d) == task] or \
+            [d for d in earlier if default_mode(d) == default_mode(data)]
+        return same[-1] if same else None
 
     # --- RECORDING AND IMPORT ---
 
@@ -424,19 +430,18 @@ class VoiceLabCore:
         self.events.emit("mode_changed", mode)
 
     def note_ceiling(self, results):
-        """Fix the profile's formant ceiling once, from the first few usable takes (analysis.
-        choose_profile_ceiling, spec 05), rather than following every take's own: that jumped by
-        150 Hz between takes 13 s apart (audit). Until that exists, the first usable take's."""
-        if self.profile.formant_ceiling or not results.get("formant_ceiling") or results.get("source"):
+        """Fix the profile's formant ceiling once, from the first few usable recordings of your own voice
+        (analysis.choose_profile_ceiling), rather than following every take's own: that jumped by 150 Hz
+        between takes 13 s apart (audit). Once set it is stored in the profile and passed to every
+        analysis and to the live meters; only the vowel check, the best evidence, changes it."""
+        if self.profile.formant_ceiling or results.get("source") or "tracks" not in results:
             return
         if coach.take_quality(results, results.get("noise"))["tier"] == "poor":
             return
         self.ceiling_candidates.append(results)
-        choose = getattr(analysis, "choose_profile_ceiling", None)
-        if choose is None:
-            self.set_ceiling(results["formant_ceiling"])
-        elif len(self.ceiling_candidates) >= CEILING_TAKES:
-            self.set_ceiling(choose(self.ceiling_candidates))
+        if len(self.ceiling_candidates) >= CEILING_TAKES:
+            self.set_ceiling(analysis.choose_profile_ceiling(self.ceiling_candidates))
+            self.ceiling_candidates = []
 
     def set_ceiling(self, ceiling):
         if self.engine is not None:
@@ -444,8 +449,12 @@ class VoiceLabCore:
         self.profile.set_formant_ceiling(ceiling)
 
     def _vowel_check_done(self, result):
-        """The vowel check fits the formant ceiling jointly over eight vowels, the best evidence there is."""
         self.events.emit("progress_changed")
+        self.use_vowel_ceiling(result)
+
+    def use_vowel_ceiling(self, result):
+        """The vowel check fits the formant ceiling jointly over eight vowels, the best evidence there is:
+        it always replaces the profile's ceiling."""
         if result.get("formant_ceiling"):
             self.set_ceiling(result["formant_ceiling"])
 
@@ -808,16 +817,12 @@ class VoiceLabCore:
         return input_channels(device_index(name)) >= 2
 
     def stream_options(self):
-        """Keyword arguments for engine.open_stream: the noise floor from last time, if it takes one."""
-        if self.profile.noise_floor is not None and accepts(self.engine.open_stream, "noise_floor"):
-            return {"noise_floor": self.profile.noise_floor}
-        return {}
+        """Keyword arguments for engine.open_stream and engine.start: the noise floor from last time."""
+        return {"noise_floor": self.profile.noise_floor}
 
     def start_options(self):
-        """Keyword arguments for engine.start: the noise floor from last time, if it takes one."""
-        if self.profile.noise_floor is not None and accepts(self.engine.start, "noise_floor"):
-            return {"noise_floor": self.profile.noise_floor}
-        return {}
+        """Keyword arguments for engine.start (as stream_options)."""
+        return self.stream_options()
 
     def open_mic(self, name, egg_channel=None):
         """Listen on the mic called `name` (None: the system default), with an EGG on input channel
@@ -862,7 +867,7 @@ class VoiceLabCore:
 
     def _mic_info(self, name, egg_channel):
         return {"device": name, "egg_channel": egg_channel,
-                "capture": dict(getattr(self.engine, "capture_info", None) or {})}
+                "capture": dict(self.engine.capture_info or {})}
 
     def should_run_first_mic_check(self):
         """True once, the first time VoiceLab opens a mic."""
@@ -872,6 +877,7 @@ class VoiceLabCore:
         return False
 
     def save_mic_check(self, result):
+        """The mic check's result is kept in the profile, so the next launch needn't ask."""
         self.profile.set_mic_check(result)
         self._status("Mic check saved")
 
@@ -892,10 +898,10 @@ class VoiceLabCore:
 
     def close(self):
         """Stop listening and keep what should last: the Voice Map and the noise floor. Waits for the jobs."""
+        self.voice_map.save()
         if self.engine is not None:
             self.engine.stop()
-        self.voice_map.save()
-        floor = getattr(self.engine, "noise_floor", None)
-        if callable(floor):     # spec 02: the floor learned this session starts the next one
-            self.profile.set_noise_floor(floor())
+            floor = self.engine.noise_floor()
+            if floor is not None:       # the floor learned now starts the next session
+                self.profile.set_noise_floor(floor)
         self.runner.wait_all()

@@ -15,11 +15,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 import sounddevice as sd  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from analysis import midi_to_hz  # noqa: E402
-from engine import UPDATE_INTERVAL, LiveEngine  # noqa: E402
-from profile_store import Profile  # noqa: E402
+from conftest import wait_for  # noqa: E402
+from engine import UPDATE_INTERVAL  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
 
 VOICE = synth_vowel(140, MALE_FORMANTS, seconds=1.5, noise=0.05)
@@ -28,45 +28,6 @@ HOP = int(UPDATE_INTERVAL * SR)
 
 def silence(seconds):
     return 1e-4 * np.random.default_rng(0).standard_normal(int(seconds * SR))
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture
-def make_window(app, tmp_path, monkeypatch):
-    import main
-    monkeypatch.setattr(sd, "play", lambda *a, **k: None)
-    monkeypatch.setattr(sd, "stop", lambda *a, **k: None)
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    windows = []
-
-    def make(takes_dir=None):
-        profile = Profile(tmp_path / "home")
-        if takes_dir:
-            profile.set_takes_dir(takes_dir)
-        window = main.build(LiveEngine(), profile)
-        windows.append(window)
-        if takes_dir:
-            wait_for(lambda: not window.core.loading)
-        return window
-
-    yield make
-    for window in windows:
-        window.close()
-
-
-def wait_for(condition, timeout=60):
-    end = time.perf_counter() + timeout
-    while time.perf_counter() < end:
-        QApplication.processEvents()
-        if condition():
-            QApplication.processEvents()
-            return True
-        time.sleep(0.01)
-    return False
 
 
 def play(window, audio, on_frame=None):
@@ -361,7 +322,7 @@ def test_mic_that_fails_to_open(make_window, monkeypatch):
     window = make_window()
     window.mic_choice.addItem("Broken mic", "Broken mic")
 
-    def fail(device=None):
+    def fail(device=None, noise_floor=None):
         raise sd.PortAudioError("device unavailable")
     monkeypatch.setattr(window.engine, "open_stream", fail)
     window.mic_choice.setCurrentIndex(window.mic_choice.count() - 1)
@@ -403,7 +364,7 @@ def two_input_window(make_window, monkeypatch):
     def make(takes_dir=None):
         window = make_window(takes_dir)
 
-        def open_stream(device=None, egg_channel=None):
+        def open_stream(device=None, egg_channel=None, noise_floor=None):
             opened.append(egg_channel)
             window.engine.egg_channel = egg_channel
         monkeypatch.setattr(window.engine, "open_stream", open_stream)
@@ -533,7 +494,7 @@ def test_egg_that_fails_to_open_is_dropped_with_the_error(two_input_window):
     window = two_input_window()
     calls = []
 
-    def open_stream(device=None, egg_channel=None):
+    def open_stream(device=None, egg_channel=None, noise_floor=None):
         calls.append(egg_channel)
         if egg_channel is not None:
             raise sd.PortAudioError("Invalid number of channels")

@@ -40,6 +40,8 @@ EXERCISE_SUMMARY_KEYS = ["name", "notes_total", "notes_sung", "notes_in_tune",
                          "mean_abs_cents", "time_in_tune"]
 # Metrics measured as spreads, which can't go below zero.
 NONNEGATIVE_KEYS = {"pitch_range", "contour"}
+# Where the voice report's tips point (report.py); None = just exploring, describe without pushing.
+VOICE_GOALS = ("feminine", "androgynous", "masculine", None)
 
 
 def data_dir():
@@ -187,6 +189,7 @@ class Profile:
         self.noise_floor = None        # the engine's noise floor from the last session (spec 02)
         self.mic_check = None          # result of the last mic check (spec 06)
         self.mic_check_asked = False   # offered once on first launch
+        self.voice_goal = None         # one of VOICE_GOALS; None = just exploring (phase 10 spec 02)
         self.load()
 
     def load(self):
@@ -211,6 +214,8 @@ class Profile:
         self.noise_floor = data.get("noise_floor")
         self.mic_check = data.get("mic_check")
         self.mic_check_asked = data.get("mic_check_asked", False)
+        goal = data.get("voice_goal")
+        self.voice_goal = goal if goal in VOICE_GOALS else None
 
     def save(self):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -220,7 +225,8 @@ class Profile:
                 "takes_dir_asked": self.takes_dir_asked, "input_device": self.input_device,
                 "egg_channel": self.egg_channel, "register_model": self.register_model,
                 "register_version": self.register_version, "noise_floor": self.noise_floor,
-                "mic_check": self.mic_check, "mic_check_asked": self.mic_check_asked}
+                "mic_check": self.mic_check, "mic_check_asked": self.mic_check_asked,
+                "voice_goal": self.voice_goal}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -294,6 +300,13 @@ class Profile:
 
     def set_mic_check_asked(self):
         self.mic_check_asked = True
+        self.save()
+
+    def set_voice_goal(self, goal):
+        """"feminine" / "androgynous" / "masculine", or None for just exploring."""
+        if goal not in VOICE_GOALS:
+            raise ValueError(f"voice goal must be one of {VOICE_GOALS}, not {goal!r}")
+        self.voice_goal = goal
         self.save()
 
     def in_target(self, key, value):
