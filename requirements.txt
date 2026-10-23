@@ -8,4 +8,5 @@ scipy
 qtawesome
 mido
 pyworld
+setuptools<81
 pytest
