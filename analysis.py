@@ -25,8 +25,6 @@ PITCH_FLOOR, PITCH_CEILING = 60, 1200
 # with known formants read F1 within 10% up to 220 Hz, 13% of cases are worse at
 # 230 Hz and 40% at 250 Hz (errors up to +31% at 260 Hz); the old 350 Hz was far too generous.
 F1_RELIABLE_MAX_F0 = 230
-# register.py still reads this older, looser limit for its own weighting; it was not retuned here.
-FORMANT_RELIABLE_MAX_F0 = 350
 FORMANT_CEILINGS = np.arange(4000, 6501, 250)
 DEFAULT_FORMANT_CEILING = 5500
 # Adjacent real formants are rarely closer than this.
@@ -853,8 +851,8 @@ def take_confidence(summary, tracks, mode="speak"):
                 rules.insert(0, ("none", summary.get("resonance_note") or "not enough clear formant data"))
             if pitch is not None and pitch > FORMANT_CONFIDENCE_MAX_F0:
                 rules.insert(0, ("none", "pitch is too high to measure resonance (above about 250 Hz)"))
-        if metric == "h1h2" and pitch is not None and pitch > FORMANT_RELIABLE_MAX_F0:
-            rules.append(("low", "weight is hard to measure on high notes"))
+        if metric == "h1h2" and pitch is not None and pitch > F1_RELIABLE_MAX_F0:
+            rules.append(("low", "weight is hard to measure at this pitch (above about 230 Hz)"))
         if metric in SPREAD_LIMITS:
             if metric == "delta_f":       # ΔF spread over the steady vowel frames behind the reading
                 spread = (summary.get("delta_f_iqr") or np.nan) / (summary.get("delta_f") or np.nan)

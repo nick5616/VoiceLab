@@ -65,7 +65,7 @@ def test_delta_f_recovers_formant_spacing():
 
 
 def test_formant_ceiling_adapts_to_smaller_tract():
-    for f0 in (150, 220):   # 300 Hz is above FORMANT_RELIABLE_MAX_F0 now
+    for f0 in (150, 220):   # 300 Hz is above F1_RELIABLE_MAX_F0
         # Leading silence, as in a real take, must not change the result.
         audio = np.concatenate([np.zeros(int(0.3 * SR)), synth_vowel(f0, scaled(MALE_FORMANTS, 1.18))])
         result = analysis.analyze_take(audio)

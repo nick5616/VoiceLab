@@ -54,10 +54,16 @@ DEFAULT_WEIGHTS = {"h1h2": 1.0, "h1a3": 1.3, "cpp": 0.0, "logf0": 0.3, "cq": -3.
 # logf0 (log2(f0/150) in z) is only a weak prior and its centre is unused
 DEFAULT_BIAS = 0.0
 Z_CLIP = 3.0
-HIGH_F0 = analysis.FORMANT_RELIABLE_MAX_F0       # above this, formant correction is untrustworthy
+HIGH_F0 = analysis.F1_RELIABLE_MAX_F0            # above this F1 is withheld (tracks['f1_ok']) and H1 cannot be corrected
 HIGH_F0_H1H2_TRUST = 0.3                         # h1h2 weight multiplier above HIGH_F0 (synthetic)
-H1A3_F0_SLOPE = 30.0                             # dB per octave above HIGH_F0 added to the h1a3 centre:
-                                                 # uncorrected H1 rises with F1 proximity (synthetic)
+# Above H1A3_SLOPE_F0 the uncorrected H1 rises as f0 nears F1, so the h1a3 centre rises with f0.
+# Phase 9/10 integration (synthetic, sing mode): with F1 withheld above 230 Hz, starting the rise at
+# 230 Hz read light soprano vowels at 330-400 Hz as chest (0.07), and no rise at all read heavy
+# phonation at 450 Hz (male formants) as head (0.93). Starting it at the old 350 Hz keeps light/heavy
+# apart at 260-400 Hz (0.60-0.82 vs 0.04-0.17) and heavy 450 Hz at mix (0.57); light 450 Hz then
+# reads chest (0.21), a known gap.
+H1A3_F0_SLOPE = 30.0                             # dB per octave added to the h1a3 centre (synthetic)
+H1A3_SLOPE_F0 = 350.0                            # Hz; the rise starts here (synthetic, see above)
 H1A3_SLOPE_MAX_F0 = 500.0                        # Hz; the centre stops rising here, so it cannot run away
                                                  # and pin every high note to "chest" (synthetic)
 HEAD_PRIOR_F0 = 500.0                            # Hz; above this the prior shifts toward head: M1 rarely
@@ -153,8 +159,8 @@ def _z(features, centres=DEFAULT_CENTRES):
         x = features.get(name)
         x = np.nan if x is None else float(x)
         centre = centres[name]
-        if name == "h1a3" and high:
-            centre += H1A3_F0_SLOPE * np.log2(min(f0, H1A3_SLOPE_MAX_F0) / HIGH_F0)
+        if name == "h1a3" and f0 is not None and not np.isnan(f0) and f0 > H1A3_SLOPE_F0:
+            centre += H1A3_F0_SLOPE * np.log2(min(f0, H1A3_SLOPE_MAX_F0) / H1A3_SLOPE_F0)
         v = (x - centre) / DEFAULT_SCALES[name] if not np.isnan(x) else np.nan
         if name == "h1h2" and high and not np.isnan(v):
             v *= HIGH_F0_H1H2_TRUST
@@ -211,6 +217,8 @@ class RegisterModel:
         (SPEECH_*) while the model is uncalibrated; a calibrated model ignores the mode."""
         f0 = features.get("f0")
         if self.speech_default(mode):
+            if features.get("f1_believable") is False:     # speech keeps only fully corrected H1*-H2*
+                features = dict(features, h1h2=np.nan)
             x, _ = _vector(features, SPEECH_CENTRES)
             weights = np.array([SPEECH_WEIGHTS[n] for n in FEATURES])
             h1h2 = features.get("h1h2")
@@ -363,25 +371,31 @@ def _frame_at(audio, t, sample_rate):
     return audio[max(0, center - half):center + half]
 
 
+def frame_formants(tracks, i):
+    """[F1, F2, F3] of frame i, F1 withheld (NaN) where the take marked it unreliable (tracks['f1_ok']).
+    Takes from before that mask existed keep their F1 as stored."""
+    f1_ok = tracks.get("f1_ok")
+    f1 = tracks["f1"][i] if f1_ok is None or f1_ok[i] > 0.5 else np.nan
+    return [f1, tracks["f2"][i], tracks["f3"][i]]
+
+
 def take_frame_features(audio, sample_rate, tracks, i, cq=None):
-    """frame_features for frame i of an analysed take, or None if the frame is too near an edge.
-    analyze_take's own H1*-H2* and CPP are reused where present. Where the take says F1 isn't a
-    believable resonance (tracks["f1_ok"] false: snapped onto H1, or f0 too high for LPC), F1 is
-    left out of every correction and H1*-H2* is withheld, as analyze_take does: a snapped F1
-    over-corrects H1*-H2* by about 14 dB (phase 9 audit)."""
+    """frame_features for frame i of an analysed take (F1 masked as in frame_formants), or None if
+    the frame is too near an edge. analyze_take's own H1*-H2* and CPP are reused where present.
+    "f1_believable" says whether F1 was kept: where it wasn't, H1*-H2* is corrected for F2 only.
+    Speech scoring drops those frames' H1*-H2*, as analyze_take does: on the user's takes at
+    200-213 Hz they read about 20 dB (raw H1 boosted by the nearby F1) and turned 36-43% of
+    frames "head" (own measurement)."""
     frame = _frame_at(audio, tracks["times"][i], sample_rate)
     if len(frame) < FRAME:
         return None
-    f1_ok = tracks.get("f1_ok")
-    believable = f1_ok is None or bool(f1_ok[i])
-    formants = [tracks["f1"][i] if believable else np.nan, tracks["f2"][i], tracks["f3"][i]]
+    formants = frame_formants(tracks, i)
     features = frame_features(frame, sample_rate, tracks["f0"][i], formants, NOMINAL_BANDWIDTHS, cq)
     for k in ("h1h2", "cpp"):                 # reuse analyze_take's values when present
         values = tracks.get(k)
         if values is not None and not np.isnan(values[i]):
             features[k] = float(values[i])
-    if not believable:
-        features["h1h2"] = np.nan
+    features["f1_believable"] = not np.isnan(formants[0])
     return features
 
 
