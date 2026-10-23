@@ -400,7 +400,7 @@ def test_recording_has_a_register_row_and_old_takes_still_load(make_window, tmp_
 
     # Sung: uncalibrated speech is scored with the speech defaults (spec 10-01), which call this
     # synthetic light voice at 140 Hz chest; the sung register still reads it as head.
-    window.live_panel.set_mode("sing", user=True)
+    window.core.set_mode("sing")
     card = record(window, np.concatenate([silence(0.3), HEAD_VOICE[:int(2 * SR)], silence(0.5)]))
     reg = card.data["register"]
     assert reg["head_share"] > 0.7 and not reg["calibrated"]
