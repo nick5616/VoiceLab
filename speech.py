@@ -35,8 +35,8 @@ HEARD_SECONDS = 0.2
 END_SILENCE_SECONDS = 0.4
 VOWEL_PROMPT = "Vowel check"
 VOWEL_INTRO = ("Say 8 short words, one at a time. Each is captured when you "
-               "pause. Use your practice voice; keep pitch under ~350 Hz.")
-NO_VOWELS = "No vowels could be measured. Try a bit louder, and keep your pitch under ~350 Hz."
+               "pause. Use your practice voice; keep pitch under ~230 Hz.")
+NO_VOWELS = "No vowels could be measured. Try a bit louder, and keep your pitch under ~230 Hz."
 
 
 def passage(index):

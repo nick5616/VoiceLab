@@ -102,7 +102,7 @@ def test_high_pitch_with_dark_resonance_is_not_feminine():
 
 
 def test_pitch_alone_cannot_push_past_overlap_when_resonance_is_masculine():
-    for f0 in (185, 210, 245):
+    for f0 in (185, 210, 225):              # resonance is withheld above coach.FORMANT_MAX_F0 (230)
         for df in (900, 960, 995):
             take = make_take(f0=f0, df=df, wobble=4)                    # lively intonation too
             rep = report.build_report(take, goal="feminine")

@@ -9,7 +9,7 @@ A real-time vocal analysis tool for singers, voice actors, people doing gender-a
 | **Pitch**                  | Fundamental frequency (F0), shown as note name, cents and Hz                                        | Yes  |
 | **Resonance (ΔF)**         | Formant dispersion over F1–F4 and the apparent vocal tract length it implies (dark → bright)        | Yes  |
 | **Fold Contact (H1*–H2*)** | First-minus-second harmonic level, corrected for F1/F2. A proxy for vocal weight (heavy → light)    | Yes  |
-| **Clarity (CPP)**          | Cepstral peak prominence over 0–4 kHz: how periodic the voice is (breathy/rough → clear)            | Yes  |
+| **Clarity (CPP)**          | How periodic the voice is (breathy/rough → clear). Live: a fast per-frame cepstral peak over 0–4 kHz. Takes: smoothed CPPS from Praat, the measure published norms use. The two scales differ (the live number reads several dB higher), so compare like with like. Both read low in background noise | Yes  |
 | **Ring (2–4 kHz)**         | Harmonic energy in the singer's-formant region relative to 0–2 kHz (muffled → ringing)              | Yes  |
 | **Intonation Range**       | 5th–95th percentile pitch spread in semitones (flat → expressive). The live meter uses the last 6 s | Yes  |
 | **Register**               | Estimate of chest (M1) versus head (M2) voice, with a "mix" zone between and a "fry" flag. See [Register](#register) | Yes  |
@@ -23,8 +23,9 @@ Each take also shows an interactive graph: pitch track on top, F1/F2/F3 formant 
 - **Resonance** uses ΔF rather than individual formants because single formants mostly reflect which vowel you're saying. In a 2025 study a single speaker deliberately varied pitch, resonance and weight; ΔF tracked resonance with 94% ranking accuracy and stayed largely independent of the other two ([Netzorg et al., Interspeech 2025](https://www.isca-archive.org/interspeech_2025/netzorg25_interspeech.pdf)).
 - **Weight** has no reliable acoustic-only measure. The same study found that only electroglottograph contact quotient and loudness tracked it, while spectral slope also moved with resonance. With an EGG connected, **contact quotient** covers weight directly (see [EGG](#egg)). Without one, Fold Contact, Clarity and Level are proxies, and are best used to compare your own takes against each other.
 - **Register** is an estimate, not a measurement. No validated, speaker-independent way exists to tell chest from head voice from a microphone alone, so VoiceLab combines a few noisy cues and says so ("estimate") until you calibrate it on your own labelled takes.
-- **Formant ceiling** (the frequency range Praat searches for formants) is chosen per take. VoiceLab tests several ceilings and rejects any that produce fake formants: ones with very wide bandwidths, or two sitting almost on top of each other. Of the rest it keeps the one with the smoothest tracks. The live meters then use that ceiling.
-- **High pitch**: above ~350 Hz the harmonics are too far apart for formant tracking, so resonance is greyed out rather than reporting a wrong number.
+- **Formant ceiling** (the frequency range Praat searches for formants) is chosen once for your voice, not per take. Per-take choice made two takes recorded 13 s apart differ by 150 Hz in ΔF. VoiceLab sets it from the vowel check, or from your first few good takes, by testing ceilings from 4–6.5 kHz and rejecting any that produce fake formants. Takes and the live meters then all use that one ceiling.
+- **Resonance is measured on steady vowels**, each vowel counted once, so a passage with more "ee"s doesn't read brighter than one with more "ah"s. Where too few steady vowels exist, the take says so instead of guessing.
+- **High pitch**: above ~230 Hz the harmonics are too far apart for the first formant to be tracked. F1 locks onto a harmonic, which made resonance read wrong on real takes at 200–215 Hz. Readings that depend on F1 are withheld there and shown as "—" with the reason, rather than a wrong number.
 
 ## Requirements
 
@@ -107,22 +108,36 @@ It covers pitch, resonance, the vowel check's vowel-balanced ΔF, Fold Contact, 
 
 If the input overloads, a red **CLIPPING** badge appears in the live panel, and the take card says how many times it happened. Clipping squares off the waveform, adding harshness that inflates Ring and lowers Clarity, so lower the mic gain or move back a little.
 
-### Noise check
+### Noise and how much to trust a take
 
-The badge in the live panel's header shows your **voice-to-noise ratio (SNR)** over the last 10 s. It's measured in the voice band (0–4 kHz), where VoiceLab measures, from the pauses between phrases, so it shows "SNR —" until you've paused. Below 30 dB it turns orange: Clarity, Fold Contact and Ring become unreliable in noise, while pitch and resonance hold up better ([review](https://pmc.ncbi.nlm.nih.gov/articles/PMC11673399)). Takes recorded below 30 dB carry the same warning.
+**Every take gets a quality rating: good, fair or poor, with its reasons**, e.g. "quiet: a little closer to the mic", "desk rumble" or "steady electrical whine detected". It comes from the voice level, the voice-to-noise ratio (SNR), clipping, and how much of the pitch signal looked like noise rather than voice. A reading the recording can't support shows **"—" and the reason** instead of a bar. For example, Clarity and the Heavy ↔ Light weight reading need about 20 dB SNR, because at 16 dB Clarity already reads 4–5 dB low. A poor take only suggests a re-record, and Progress leaves poor takes out unless you tick them back in.
 
-**High-pitched mic hiss or whine is handled by keeping measurements where the voice is.** Every measurement works around it:
+The **noise badge** in the live panel names the problem: whine, rumble, "quiet: move closer", clipping, or the SNR when nothing specific stands out. Click it to open the **mic check**: 3 s of silence and then a 3 s "ah". It reports your noise floor, voice level and SNR, any rumble or whine, and the audio path. It then suggests what to change. Run it once when you set up, and again after you change mic, port or position.
 
-| Measurement     | How it avoids the hiss                                                                                                |
-| --------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Pitch           | Tracked on a 0–4 kHz copy of the signal. On raw audio, hiss made Praat drop up to 85% of voiced frames.               |
-| Clarity (CPP)   | Computed over 0–4 kHz only. At 20 dB SNR of hiss it stays within ~1 dB of the clean value, versus 4–6 dB low over the full band. |
-| Ring            | Sums only the harmonic peaks at multiples of your pitch, so noise between harmonics isn't counted.                    |
-| Formants        | Already limited by the formant ceiling (≈5–6.5 kHz).                                                                  |
+What VoiceLab does about noise, measured on real takes from a cheap USB desk mic:
 
-When most of the noise sits above 4 kHz, the badge tooltip and take cards say so, and show the full-band SNR for reference.
+| Problem | What it did | What VoiceLab does now |
+| --- | --- | --- |
+| Desk rumble and mains hum (most of the noise power was below 1 kHz) | The pitch tracker read rumble, and a subharmonic of the whine, as "voice". 15–45% of voiced frames were fake, so intonation range read 44–49 semitones. | A frame counts as voice only when it is clearly periodic, clearly above the take's noise floor, and part of a run. Doubtful octaves are cross-checked with a second tracker (WORLD harvest). On the real takes, agreement with an independent reference went from 75% to 94%, fake voice in silence to 0%, and intonation range to 2.5–15 semitones. |
+| Steady whine at exact multiples of 1 kHz (strongest at 4 kHz) | It sits on the 4th formant and skewed resonance by up to ~20 Hz. | The tones are found in the pauses and subtracted precisely. The voice's own harmonics are protected, and there is no notch filter, because a notch at 4 kHz would cut into a real formant of a brighter voice. This cut the 4 kHz line by 21–30 dB on real takes. |
+| Broadband hiss | It lowers Clarity and the weight reading. | Nothing to remove without harming the voice, so those readings are withheld when the SNR is too low. |
 
-VoiceLab deliberately doesn't run noise suppression on your voice. Denoisers remove breath noise and fine harmonic detail along with the room noise, which would make a breathy voice measure clearer than it is. Spectral subtraction of a learned noise profile was also tested, and it made Clarity less accurate, not more.
+VoiceLab still doesn't run general noise suppression on your voice. Denoisers remove breath noise and fine harmonic detail along with the room noise, which would make a breathy voice measure clearer than it is. Spectral gating was tested, and it moved F1 by up to 100 Hz on real takes.
+
+**Audio path.** VoiceLab opens your mic through Windows' WASAPI at the mic's own sample rate, and resamples once in-app. Many USB mics, including the one these measurements came from, only run at 48 kHz. Windows' older MME path (the fallback) converts the rate itself and adds about 90 ms of delay. The live panel says "slow audio path" when it had to fall back.
+
+### Your mic
+
+The biggest improvement is usually the setup, not the software:
+
+- **Get closer.** Sit about 10–15 cm from the mic, slightly off to the side so your breath doesn't hit it. Each halving of distance gives about 6 dB more voice over the same noise. The takes these measurements came from sat at −38 to −47 dBFS, which is very quiet.
+- **Then raise the input level** (Windows Sound settings → your mic → Properties → Levels) so your voice peaks well below clipping. Raising the level without moving closer turns the noise up too.
+- **Put the mic on something soft** or an arm, off the desk, to cut rumble from typing and the desk itself.
+- **Try a different USB port**, ideally one on the back of the PC (on the motherboard), or a short powered hub. Keep the cable away from power adapters and wireless dongles.
+- **Turn off Windows audio "enhancements"** and any automatic gain for the mic.
+- **The real fix for noise** is a small USB audio interface with an XLR microphone. It has a proper preamp and no USB whine.
+
+**About the whine.** A steady high-pitched tone in your recordings isn't caused by a missing DAC. A DAC turns digital audio into sound for playback; recording goes the other way, through an ADC, and a USB mic has its own. Tones at exact multiples of 1 kHz match USB interference. USB sends data every millisecond, and cheap USB mics can pick that up in their own electronics. It is already in the recording, which is why VoiceLab finds and subtracts it. To find out whether it comes from the mic or the PC, record 10 s of silence on this mic and 10 s on another one in the same spot. Then compare them in the mic check.
 
 ### Register
 

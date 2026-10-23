@@ -15,6 +15,7 @@ sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(_
 from PyQt6.QtWidgets import QMessageBox  # noqa: E402
 
 import app_core  # noqa: E402
+import coach  # noqa: E402
 import mic_noise  # noqa: E402
 import profile_store  # noqa: E402
 from analysis import FORMANT_CEILINGS, analyze_take  # noqa: E402
@@ -148,7 +149,7 @@ def test_high_pitch_marks_only_resonance_untrusted(make_window):
     data.update(pitch=420.0, uid="high-1", file=None)
     card = window.add_card(data)
     assert isinstance(card.bars["delta_f"], UntrustedMetric)
-    assert "above about 250 Hz" in card.bars["delta_f"].title.text()
+    assert f"above about {coach.FORMANT_MAX_F0:.0f} Hz" in card.bars["delta_f"].title.text()
     assert not isinstance(card.bars["pitch"], UntrustedMetric)
 
 

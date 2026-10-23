@@ -48,6 +48,22 @@ def test_round_trip(tmp_path, take):
     assert len(audio) == len(VOICE) and np.max(np.abs(audio - VOICE)) < 1e-3
 
 
+def test_noise_report_round_trips_as_plain_json(tmp_path):
+    import mic_noise
+    noisy = mic_noise.at_level(VOICE, -42) + mic_noise.mic_noise(len(VOICE))
+    result = analysis.analyze_take(np.concatenate([mic_noise.mic_noise(SR), noisy]))
+    noise = result["noise"]
+    store = TakeStore(tmp_path)
+    store.save(fresh(result, time="2026-10-18T10:40:00"), title="noisy")
+    sidecar = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert all(isinstance(v, (int, float, list, type(None))) for v in sidecar["noise"].values())
+    got = store.load_all()[0][0]["noise"]
+    assert got["lines"] and all(len(line) == 2 for line in got["lines"])
+    for key, value in noise.items():
+        if key != "lines" and value is not None and np.isfinite(value):
+            assert got[key] == pytest.approx(float(value)), key
+
+
 def test_names_dont_collide(tmp_path, take):
     store = TakeStore(tmp_path)
     a, b = fresh(take, time="2026-10-18T10:00:00"), fresh(take, time="2026-10-18T10:00:00")
