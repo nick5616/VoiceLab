@@ -20,15 +20,11 @@ from pathlib import Path
 
 import numpy as np
 
-import analysis
-from analysis import SAMPLE_RATE, analyze_take
+from analysis import ANALYSIS_VERSION, SAMPLE_RATE, analyze_take
 from egg import load_stereo_take
 from profile_store import _clean
 
 FORMAT_VERSION = 1
-# Analysis a sidecar was made with. analysis.ANALYSIS_VERSION (spec 05) once it exists; until then 1,
-# which every take stored before phase 9 (no analysis_version) is below.
-ANALYSIS_VERSION = getattr(analysis, "ANALYSIS_VERSION", 1)
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
 IMPORT_MAX_SECONDS = 90         # longer files are trimmed to keep analysis quick
 # analyze_take reports these as NaN when unmeasured; JSON stores them as null.

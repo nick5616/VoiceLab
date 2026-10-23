@@ -1,4 +1,3 @@
-import inspect
 import sys
 import time
 from datetime import datetime
@@ -41,21 +40,13 @@ AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 EGG_CHOICES = [("none", None), ("channel 1", 0), ("channel 2", 1)]    # the EGG input channel
 WIDE_LAYOUT_WIDTH = 1100        # from this window width, live and takes sit side by side...
 TAKES_COLUMN_WIDTH = 480        # ...if the takes still get about this much
-CEILING_TAKES = 3               # usable takes the profile's formant ceiling is chosen from (spec 05)
+CEILING_TAKES = 3               # usable takes the profile's formant ceiling is chosen from
 REST_NUDGE_MINUTES = 25         # first rest reminder, then every so often. Own judgement: vocal-hygiene
 #                                 advice commonly says to rest the voice regularly, but I could not confirm
 #                                 a specific interval (unverified)
 SESSION_TICK_MS = 15000
 # What a take keeps through re-analysis: who it is, not what was measured.
 KEPT_KEYS = ("uid", "time", "title", "dated", "file", "source", "register_label", "egg_channel", "task")
-
-
-def accepts(fn, name):
-    """True if the callable takes a parameter called `name` (spec 05 and 06 add some after this was written)."""
-    try:
-        return name in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 def import_and_analyze(path, isolate, egg_channel=None, state=None, version=0, mode="speak", ceiling=None):
@@ -197,6 +188,8 @@ class MainWindow(QMainWindow):
 
         self.live_panel = LivePanel(engine.analyzer.spectrum_freqs, profile, self.edit_targets)
         self.live_panel.window_provider = engine.latest_window
+        self.live_panel.engine = engine
+        self.live_panel.mic_check_done.connect(self.save_mic_check)
         self.engine.frame_ready.connect(self.live_panel.update_frame)
         self.vowel_check = VowelCheck(engine, profile)
         self.vowel_check.running_changed.connect(self.update_record_enabled)
@@ -270,7 +263,6 @@ class MainWindow(QMainWindow):
         self.mic_check_btn.setStyleSheet(BUTTON_STYLE)
         self.mic_check_btn.setToolTip("Check your input level, noise and distance to the mic.")
         self.mic_check_btn.clicked.connect(self.mic_check)
-        self.mic_check_btn.setVisible(hasattr(self.live_panel, "show_mic_check"))
         self.folder_btn = QPushButton(qta.icon("fa5s.folder-open", color="white"), "")
         self.folder_btn.setStyleSheet(BUTTON_STYLE)
         self.folder_btn.clicked.connect(self.choose_takes_folder)
@@ -335,34 +327,28 @@ class MainWindow(QMainWindow):
         if self.store:
             self.load_takes()
 
-    # --- ENGINE, MODE AND TARGETS (calls into spec 05 and 06 are guarded until they merge) ---
+    # --- ENGINE, MODE AND TARGETS ---
 
     def change_mode(self, mode):
         """The mode picked on the live panel: remembered, and told to the engine and the Voice Map."""
         self.profile.set_mode(mode)
         self.voice_map.mode = mode
-        if hasattr(self.engine, "set_mode"):
-            self.engine.set_mode(mode)
+        self.engine.set_mode(mode)
 
     def apply_targets(self):
-        if hasattr(self.live_panel, "set_targets"):
-            self.live_panel.set_targets(self.profile.targets)
+        self.live_panel.set_targets(self.profile.targets)
 
     def stream_options(self):
-        """Keyword arguments for engine.open_stream: the noise floor from last time, if it takes one."""
-        if self.profile.noise_floor is not None and accepts(self.engine.open_stream, "noise_floor"):
-            return {"noise_floor": self.profile.noise_floor}
-        return {}
+        """Keyword arguments for engine.open_stream: the noise floor from last time."""
+        return {"noise_floor": self.profile.noise_floor}
 
     def mic_check(self):
-        show = getattr(self.live_panel, "show_mic_check", None)
-        if show is None:
-            self.set_status("The mic check isn't available in this build.")
-            return
-        result = show()
-        if isinstance(result, dict):
-            self.profile.set_mic_check(result)
-            self.set_status("Mic check saved")
+        self.live_panel.show_mic_check()
+
+    def save_mic_check(self, result):
+        """The mic check's result is kept in the profile, so the next launch needn't ask."""
+        self.profile.set_mic_check(result)
+        self.set_status("Mic check saved")
 
     def first_run_mic_check(self):
         """Once, the first time VoiceLab opens a mic."""
@@ -380,19 +366,18 @@ class MainWindow(QMainWindow):
         self.profile.set_formant_ceiling(ceiling)
 
     def note_ceiling(self, results):
-        """Fix the profile's formant ceiling once, from the first few usable takes (analysis.
-        choose_profile_ceiling, spec 05), rather than following every take's own: that jumped by
-        150 Hz between takes 13 s apart (audit). Until that exists, the first usable take's."""
-        if self.profile.formant_ceiling or not results.get("formant_ceiling") or results.get("source"):
+        """Fix the profile's formant ceiling once, from the first few usable recordings of your own voice
+        (analysis.choose_profile_ceiling), rather than following every take's own: that jumped by 150 Hz
+        between takes 13 s apart (audit). Once set it is stored in the profile and passed to every
+        analysis and to the live meters; only the vowel check, the best evidence, changes it."""
+        if self.profile.formant_ceiling or results.get("source") or "tracks" not in results:
             return
         if coach.take_quality(results, results.get("noise"))["tier"] == "poor":
             return
         self.ceiling_candidates.append(results)
-        choose = getattr(analysis, "choose_profile_ceiling", None)
-        if choose is None:
-            self.set_ceiling(results["formant_ceiling"])
-        elif len(self.ceiling_candidates) >= CEILING_TAKES:
-            self.set_ceiling(choose(self.ceiling_candidates))
+        if len(self.ceiling_candidates) >= CEILING_TAKES:
+            self.set_ceiling(analysis.choose_profile_ceiling(self.ceiling_candidates))
+            self.ceiling_candidates = []
 
     # --- SESSION ---
 
@@ -1056,9 +1041,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.engine.stop()
         self.voice_map.save()
-        floor = getattr(self.engine, "noise_floor", None)
-        if callable(floor):     # spec 02: the floor learned this session starts the next one
-            self.profile.set_noise_floor(floor())
+        floor = self.engine.noise_floor()
+        if floor is not None:       # the floor learned now starts the next session
+            self.profile.set_noise_floor(floor)
         for worker in (self.analysis_worker, self.load_worker, self.register_worker, self.reanalysis_worker,
                        self.voicemap_worker):
             if worker is not None:
@@ -1076,9 +1061,7 @@ if __name__ == "__main__":
     window = MainWindow(engine, profile)
     window.show()
     try:
-        start_options = {"noise_floor": profile.noise_floor} if \
-            profile.noise_floor is not None and accepts(engine.start, "noise_floor") else {}
-        engine.start(device_index(profile.input_device), **start_options)
+        engine.start(device_index(profile.input_device), noise_floor=profile.noise_floor)
     except sd.PortAudioError as e:
         # Still usable without a mic: imported files can be analysed and shifted.
         window.record_btn.setEnabled(False)
