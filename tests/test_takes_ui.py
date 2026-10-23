@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+import coach  # noqa: E402
 import profile_store  # noqa: E402
 import progress  # noqa: E402
 import take_view  # noqa: E402
@@ -136,7 +137,7 @@ def test_high_pitch_marks_only_resonance_untrusted(make_core):
     core._add(data)
     card = TakeCard(core, data["uid"])
     assert card.metric_cards["delta_f"].unavailable
-    assert "250 Hz" in card.metric_cards["delta_f"].headline.text()
+    assert f"{coach.FORMANT_MAX_F0:.0f} Hz" in card.metric_cards["delta_f"].headline.text()
     assert not card.metric_cards["pitch"].unavailable
 
 
