@@ -68,7 +68,7 @@ python main.py
 
 1. The **Live** panel listens as soon as the app opens. Pick a view, and the meters underneath stay visible on every tab:
    - **Pitch**: scrolling pitch trace on a note-name axis that follows your range.
-   - **Spectrum**: a scrolling spectrogram with F1–F4 tracks overlaid, and the current spectrum on the right with harmonics (blue dots) and formants (dashed lines) on the same frequency axis. Use it for vowel shaping and formant tuning, for example lining up a harmonic with F1. Formant tracks are hidden above ~350 Hz, but you can still see harmonics brighten as they pass through a resonance.
+   - **Spectrum**: a scrolling spectrogram with F1–F4 tracks overlaid, and the current spectrum on the right with harmonics (blue dots) and formants (dashed lines) on the same frequency axis. Use it for vowel shaping and formant tuning, for example lining up a harmonic with F1. F1 drops out wherever it can't be told apart from the pitch, usually above ~230 Hz, and resonance isn't judged there, but you can still see harmonics brighten as they pass through a resonance.
    - **Pitch × Resonance**: your live position with a 3-second trail, rough population regions as orientation (not targets), and each recorded take as a numbered point.
 2. Click the red microphone button to record a take, speak or sing, then click stop.
 3. The app analyzes the take and adds a card to the top of the list.
