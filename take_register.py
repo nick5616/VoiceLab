@@ -8,7 +8,7 @@ import numpy as np
 
 import egg
 import register
-from analysis import SAMPLE_RATE, analyze_take
+from analysis import SAMPLE_RATE, analyze_take, grade, take_confidence
 from take_store import ANALYSIS_VERSION
 
 LABELS = ("chest", "head")      # what a take can be labelled as, for calibration
@@ -19,6 +19,9 @@ LABELS = ("chest", "head")      # what a take can be labelled as, for calibratio
 # 160 Hz (15% at 200 Hz with the mic noise model), far over the 2% bar, so it stays off until the
 # pulse test is redone.
 FRY_FROM_AUDIO = False
+SPEECH_UNCALIBRATED = "register needs a few labelled takes to be reliable for speech"
+ROUGH_SPEECH = "a rough reading: label a few takes chest or head to calibrate it to your voice"
+UNCALIBRATED = "an estimate until a few takes are labelled chest or head"
 
 
 def register_model(state):
@@ -46,29 +49,69 @@ def add_egg(result, egg_samples):
     return result
 
 
-def score_register(audio, tracks, model):
-    """(per-frame score, fry flags, summary) for a take, using its cq track if it has one."""
+def register_confidence(summary, acoustic=None):
+    """(level, reason) for a take's register summary. `acoustic` is the recording's own grade,
+    analysis.take_confidence's ("level", "reason") for "register", when known.
+    Speech with an uncalibrated model is "none" unless the shares give a clear speech_label (then at
+    most "low"); singing with an uncalibrated model is at most "low": its default centres were set
+    on synthetic vowels and have not been checked on real singing."""
+    rules = [acoustic]
+    if np.isnan(summary.get("median_score", np.nan)) and not summary.get("fry_share"):
+        rules.append(("none", "no voiced frames to judge"))
+    if not summary.get("calibrated"):
+        if summary.get("mode") == "speak":
+            rules.append(("low", ROUGH_SPEECH) if summary.get("speech_label") else ("none", SPEECH_UNCALIBRATED))
+        else:
+            rules.append(("low", UNCALIBRATED))
+    return grade(rules)
+
+
+def score_register(audio, tracks, model, mode=None, acoustic=None):
+    """(per-frame score, fry flags, summary) for a take, using its cq track if it has one. `mode` is the
+    take's mode ("speak" scores with the speech defaults while the model is uncalibrated); the summary
+    carries "confidence" and "confidence_reason" (see register_confidence)."""
     times = tracks["times"]
-    scores = register.register_track(audio, SAMPLE_RATE, tracks, model, tracks.get("cq"))
+    scores = register.register_track(audio, SAMPLE_RATE, tracks, model, tracks.get("cq"), mode=mode)
     pulses = (audio, SAMPLE_RATE, times) if FRY_FROM_AUDIO else ()
     fry = register.is_fry(tracks["f0"], frame_rate(times), *pulses)
-    summary = register.take_register_summary(tracks, scores, fry, model)
+    summary = register.take_register_summary(tracks, scores, fry, model, mode=mode)
     voiced = ~np.isnan(np.asarray(tracks["f0"], dtype=float))
     seconds = float(voiced.sum() / frame_rate(times))
     summary["voiced_seconds"] = seconds
     summary["breaks_per_min"] = len(summary["breaks"]) * 60 / seconds if seconds > 0 else None
+    summary["confidence"], summary["confidence_reason"] = register_confidence(summary, acoustic)
     return scores, fry, summary
 
 
+def acoustic_grade(take):
+    """The recording's part of a take's register grade, (level, reason): analysis.take_confidence's
+    "register" entry, recomputed from the take's summary and tracks (None for a take without tracks)."""
+    if not take.get("tracks") or "f0" not in take["tracks"]:
+        return None
+    levels, reasons = take_confidence(take, take["tracks"], take.get("mode") or "speak")
+    return levels["register"], reasons["register"]
+
+
+def store_register(take, scores, fry, summary):
+    """Put a score_register result on a take: tracks['register'], tracks['fry'], take['register'], and
+    the register grade in take['confidence'] (and its "reasons") when the take has one."""
+    take["tracks"]["register"] = scores
+    take["tracks"]["fry"] = np.asarray(fry).astype(float)
+    take["register"] = summary
+    if isinstance(take.get("confidence"), dict):
+        take["confidence"]["register"] = summary["confidence"]
+        take["confidence"].setdefault("reasons", {})["register"] = summary["confidence_reason"]
+    return take
+
+
 def add_register(result, state=None, version=0):
-    """Store tracks['register'], tracks['fry'] and result['register'] for a take.
+    """Store tracks['register'], tracks['fry'] and result['register'] for a take, in the take's mode,
+    and its register grade in result['confidence'] (level, and the reason under "reasons").
     `state` is the profile's register model dict (None: the default model)."""
-    scores, fry, summary = score_register(result["audio"], result["tracks"], register_model(state))
+    scores, fry, summary = score_register(result["audio"], result["tracks"], register_model(state),
+                                          mode=result.get("mode"), acoustic=acoustic_grade(result))
     summary["model_version"] = version
-    result["tracks"]["register"] = scores
-    result["tracks"]["fry"] = fry.astype(float)
-    result["register"] = summary
-    return result
+    return store_register(result, scores, fry, summary)
 
 
 def finish_take(result, egg_samples=None, state=None, version=0):
@@ -107,7 +150,6 @@ def is_stale(data, version):
 def label_rows(audio, tracks):
     """[(features, tracks index)] of the voiced, non-fry frames of a take, for fitting."""
     f0 = np.asarray(tracks["f0"], dtype=float)
-    times = np.asarray(tracks["times"], dtype=float)
     fry = tracks.get("fry")
     cq = tracks.get("cq")
     audio = np.asarray(audio, dtype=float).flatten()
@@ -115,18 +157,9 @@ def label_rows(audio, tracks):
     for i in np.flatnonzero(~np.isnan(f0)):
         if fry is not None and fry[i] > 0.5:
             continue
-        center = int(times[i] * SAMPLE_RATE)
-        frame = audio[max(0, center - register.FRAME // 2):center + register.FRAME // 2]
-        if len(frame) < register.FRAME:
-            continue
-        formants = [tracks[k][i] for k in ("f1", "f2", "f3")]
-        features = register.frame_features(frame, SAMPLE_RATE, f0[i], formants,
-                                           register.NOMINAL_BANDWIDTHS, None if cq is None else cq[i])
-        for k in ("h1h2", "cpp"):            # reuse analyze_take's values when present
-            values = tracks.get(k)
-            if values is not None and not np.isnan(values[i]):
-                features[k] = float(values[i])
-        rows.append(features)
+        features = register.take_frame_features(audio, SAMPLE_RATE, tracks, i, None if cq is None else cq[i])
+        if features is not None:
+            rows.append(features)
     return rows
 
 

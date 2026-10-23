@@ -183,7 +183,7 @@ def melody_contour(midis, note_seconds, offset_cents=0.0):
 
 
 def test_vibrato_rate_and_extent():
-    result = analysis.analyze_take(synth_vowel(vibrato_contour(220, 2.0), MALE_FORMANTS))
+    result = analysis.analyze_take(synth_vowel(vibrato_contour(220, 2.0), MALE_FORMANTS), mode="sing")
     singing = result["singing"]
     assert singing["held_notes"] == 1 and singing["vibrato_notes"] == 1
     assert abs(singing["vibrato_rate"] - 5.5) < 0.3
@@ -192,7 +192,7 @@ def test_vibrato_rate_and_extent():
 
 
 def test_straight_tone_has_no_vibrato():
-    singing = analysis.analyze_take(synth_vowel(220, MALE_FORMANTS, seconds=2.0))["singing"]
+    singing = analysis.analyze_take(synth_vowel(220, MALE_FORMANTS, seconds=2.0), mode="sing")["singing"]
     assert singing["vibrato_notes"] == 0 and singing["vibrato_rate"] is None
     assert singing["drift"] < 3
     assert singing["tuning_offset"] < 5  # 220 Hz is exactly A3
@@ -201,7 +201,7 @@ def test_straight_tone_has_no_vibrato():
 def test_notes_are_segmented_without_splitting_vibrato():
     contour = np.concatenate([vibrato_contour(220, 1.0), vibrato_contour(277.2, 1.0),
                               vibrato_contour(329.6, 1.0)])
-    singing = analysis.analyze_take(synth_vowel(contour, MALE_FORMANTS))["singing"]
+    singing = analysis.analyze_take(synth_vowel(contour, MALE_FORMANTS), mode="sing")["singing"]
     assert singing["notes"] == 3
 
 

@@ -28,6 +28,9 @@ Evidence behind the default model:
 All numeric thresholds and weights are marked "(lit.)" when set from the
 figures above, otherwise "(synthetic)" = chosen empirically on the synthetic
 vowels of tests/test_analysis.py::synth_vowel. None is validated on real voices.
+On real speech those defaults read nearly everything as head, so an uncalibrated model scores
+speak-mode takes with the SPEECH_* defaults instead (see there), and take_register grades the
+result "none" unless it is clear-cut.
 """
 import warnings
 
@@ -62,6 +65,23 @@ HEAD_PRIOR_F0 = 500.0                            # Hz; above this the prior shif
 HEAD_PRIOR_LOGIT = 3.0                           # logit added per octave above HEAD_PRIOR_F0 (synthetic)
 HEAD_PRIOR_MAX_OCTAVES = 1.5                     # prior stops growing here
 HIGH_MIX_BAND = (0.2, 0.8)                       # wider mix band above HEAD_PRIOR_F0: less certain (synthetic)
+# Speech (speak mode) with an uncalibrated model. Phase 10 measurement on the user's 10 real speech
+# takes (147-213 Hz, all ordinary speech): the default model read 81-100% head on every one. H1-A3
+# was the main cause: real speech reads 21-34 dB (take medians) against a centre of 5 dB set on the
+# synthetic vowels above (which read -5 to 10 dB), so it pinned the logit at +3.5 to +3.9 on every
+# take; H1*-H2* (take medians 7-21 dB on frames with a believable F1, vs a 3 dB centre) added up to
+# +1.4. Desk rumble was not a cause: H1 sat 29-35 dB above the noise in its band, and removing that
+# noise moved H1-H2 by 0.2 dB at most (median).
+# No speech centre for H1-A3 could be sourced, and its absolute level depends on the mic and the
+# vowel, so speech leaves it out; H1*-H2* is re-centred above the user's modal speech, where
+# women's modal H1-H2 sits several dB above men's (Klatt & Klatt 1990; Hanson & Chuang 1999,
+# direction verified, values unverified); and a prior toward M1 reflects that speech is produced
+# mostly in M1 by men and women (Roubeau, Henrich & Castellengo 2009; from memory, unverified).
+SPEECH_CENTRES = dict(DEFAULT_CENTRES, h1h2=12.0)   # dB; above the median of 8 of the 10 takes (own measurement)
+SPEECH_WEIGHTS = dict(DEFAULT_WEIGHTS, h1a3=0.0)    # H1-A3 has no sourced speech centre (see above)
+SPEECH_PRIOR_LOGIT = -1.5     # toward chest; a frame then needs H1*-H2* near 25 dB to read head (own judgement)
+SPEECH_PRIOR_MAX_F0 = 350.0   # Hz; above this speech is no longer "ordinary" and the prior fades out
+SPEECH_PRIOR_FADE_OCTAVES = 0.5   # ... over this many octaves (own judgement)
 MIN_CALIBRATION_FRAMES = 200                     # voiced frames per class (~2 s at 10 ms)
 PRIOR_STRENGTH = 30.0                            # ridge pull toward default weights, in frame-equivalents
 FIT_ITERATIONS = 200
@@ -120,7 +140,7 @@ def frame_features(frame, sample_rate, f0, formants, bandwidths, cq=None):
     return out
 
 
-def _z(features):
+def _z(features, centres=DEFAULT_CENTRES):
     """Standardized, clipped feature values; NaN where missing. Reliability scaling is applied here."""
     f0 = features.get("f0")
     high = f0 is not None and not np.isnan(f0) and f0 > HIGH_F0
@@ -132,7 +152,7 @@ def _z(features):
             continue
         x = features.get(name)
         x = np.nan if x is None else float(x)
-        centre = DEFAULT_CENTRES[name]
+        centre = centres[name]
         if name == "h1a3" and high:
             centre += H1A3_F0_SLOPE * np.log2(min(f0, H1A3_SLOPE_MAX_F0) / HIGH_F0)
         v = (x - centre) / DEFAULT_SCALES[name] if not np.isnan(x) else np.nan
@@ -142,9 +162,9 @@ def _z(features):
     return z
 
 
-def _vector(features):
+def _vector(features, centres=DEFAULT_CENTRES):
     """(z vector with 0 for missing, True if the score is measurable)."""
-    z = _z(features)
+    z = _z(features, centres)
     measurable = any(not np.isnan(z[n]) for n in ("h1h2", "h1a3", "cq"))
     return np.array([0.0 if np.isnan(z[n]) else z[n] for n in FEATURES]), measurable
 
@@ -154,6 +174,15 @@ def head_prior(f0):
     if f0 is None or np.isnan(f0) or f0 <= HEAD_PRIOR_F0:
         return 0.0
     return HEAD_PRIOR_LOGIT * min(np.log2(f0 / HEAD_PRIOR_F0), HEAD_PRIOR_MAX_OCTAVES)
+
+
+def speech_prior(f0):
+    """Logit added toward chest for speech: SPEECH_PRIOR_LOGIT up to SPEECH_PRIOR_MAX_F0, fading to 0
+    over SPEECH_PRIOR_FADE_OCTAVES above it."""
+    if f0 is None or np.isnan(f0) or f0 <= SPEECH_PRIOR_MAX_F0:
+        return SPEECH_PRIOR_LOGIT
+    fade = np.log2(f0 / SPEECH_PRIOR_MAX_F0) / SPEECH_PRIOR_FADE_OCTAVES
+    return SPEECH_PRIOR_LOGIT * max(0.0, 1.0 - fade)
 
 
 def mix_band(f0=None):
@@ -173,12 +202,25 @@ class RegisterModel:
         self.bias = DEFAULT_BIAS
         self.calibrated = False
 
-    def score(self, features):
-        """P(M2) in [0, 1], or NaN if not measurable."""
+    def speech_default(self, mode):
+        """True when this uncalibrated model scores speech with the speech centres and prior."""
+        return mode == "speak" and not self.calibrated
+
+    def score(self, features, mode=None):
+        """P(M2) in [0, 1], or NaN if not measurable. mode="speak" uses the speech defaults
+        (SPEECH_*) while the model is uncalibrated; a calibrated model ignores the mode."""
+        f0 = features.get("f0")
+        if self.speech_default(mode):
+            x, _ = _vector(features, SPEECH_CENTRES)
+            weights = np.array([SPEECH_WEIGHTS[n] for n in FEATURES])
+            h1h2 = features.get("h1h2")
+            if (h1h2 is None or np.isnan(h1h2)) and features.get("cq") is None:
+                return np.nan          # H1-A3 alone doesn't count in speech
+            return float(_sigmoid(self.bias + weights @ x + speech_prior(f0) + head_prior(f0)))
         x, measurable = _vector(features)
         if not measurable:
             return np.nan
-        return float(_sigmoid(self.bias + self.weights @ x + head_prior(features.get("f0"))))
+        return float(_sigmoid(self.bias + self.weights @ x + head_prior(f0)))
 
     def confidence(self, features):
         """0..1: low near a score of 0.5 or when features are missing."""
@@ -321,25 +363,39 @@ def _frame_at(audio, t, sample_rate):
     return audio[max(0, center - half):center + half]
 
 
-def register_track(audio, sample_rate, tracks, model=None, cq_track=None):
+def take_frame_features(audio, sample_rate, tracks, i, cq=None):
+    """frame_features for frame i of an analysed take, or None if the frame is too near an edge.
+    analyze_take's own H1*-H2* and CPP are reused where present. Where the take says F1 isn't a
+    believable resonance (tracks["f1_ok"] false: snapped onto H1, or f0 too high for LPC), F1 is
+    left out of every correction and H1*-H2* is withheld, as analyze_take does: a snapped F1
+    over-corrects H1*-H2* by about 14 dB (phase 9 audit)."""
+    frame = _frame_at(audio, tracks["times"][i], sample_rate)
+    if len(frame) < FRAME:
+        return None
+    f1_ok = tracks.get("f1_ok")
+    believable = f1_ok is None or bool(f1_ok[i])
+    formants = [tracks["f1"][i] if believable else np.nan, tracks["f2"][i], tracks["f3"][i]]
+    features = frame_features(frame, sample_rate, tracks["f0"][i], formants, NOMINAL_BANDWIDTHS, cq)
+    for k in ("h1h2", "cpp"):                 # reuse analyze_take's values when present
+        values = tracks.get(k)
+        if values is not None and not np.isnan(values[i]):
+            features[k] = float(values[i])
+    if not believable:
+        features["h1h2"] = np.nan
+    return features
+
+
+def register_track(audio, sample_rate, tracks, model=None, cq_track=None, mode=None):
     """Per-frame m2 score (NaN where unvoiced), aligned with tracks['times'].
-    `tracks` is analyze_take()'s result['tracks']."""
+    `tracks` is analyze_take()'s result['tracks']; `mode` is the take's ("speak" uses the speech defaults)."""
     model = model or RegisterModel()
     audio = np.asarray(audio, dtype=float).flatten()
     times, f0 = np.asarray(tracks["times"]), np.asarray(tracks["f0"])
     scores = np.full(len(times), np.nan)
-    stored = {k: tracks.get(k) for k in ("h1h2", "cpp")}
     for i in np.flatnonzero(~np.isnan(f0)):
-        frame = _frame_at(audio, times[i], sample_rate)
-        if len(frame) < FRAME:
-            continue
-        formants = [tracks[k][i] for k in ("f1", "f2", "f3")]
-        cq = None if cq_track is None else cq_track[i]
-        features = frame_features(frame, sample_rate, f0[i], formants, NOMINAL_BANDWIDTHS, cq)
-        for k, values in stored.items():      # reuse analyze_take's values when present
-            if values is not None and not np.isnan(values[i]):
-                features[k] = float(values[i])
-        scores[i] = model.score(features)
+        features = take_frame_features(audio, sample_rate, tracks, i, None if cq_track is None else cq_track[i])
+        if features is not None:
+            scores[i] = model.score(features, mode=mode)
     return scores
 
 
@@ -378,9 +434,35 @@ def find_breaks(times, scores):
     return [float(times[i]) for i in peaks]
 
 
-def take_register_summary(tracks, scores, fry, model=None):
+SPEECH_MOSTLY_CHEST = 0.6     # chest share for "mostly chest" (own judgement) ...
+SPEECH_MOSTLY_CHEST_HEAD = 0.1   # ... with at most this head share ...
+SPEECH_CHEST_MAX_F0 = 220.0   # ... and a median pitch at or below this (Hz). Above it, light M1 and M2
+                              # speech overlap in pitch and these features can't tell them apart: a
+                              # falsetto-like synthetic at 250-400 Hz reads H1-A3 28-40 dB, inside the
+                              # user's modal speech (21-34 dB), and above 230 Hz H1*-H2* is withheld
+                              # (analysis.F1_RELIABLE_MAX_F0); own measurement.
+                              # Speech at 140-220 Hz is taken as M1 (spec premise; Roubeau et al. 2009, unverified)
+SPEECH_LIGHTER_HEAD = 0.2     # head share for "some lighter phonation" (own judgement)
+SPEECH_LABEL_SECONDS = 2.0    # voiced seconds needed for either label (as analysis.SECONDS_STEPS["register"])
+
+
+def speech_label(summary, seconds, median_f0):
+    """"mostly chest" | "some lighter phonation" | None: the only register wording an uncalibrated
+    model gives speech, and only when the shares are clear-cut."""
+    if seconds < SPEECH_LABEL_SECONDS:
+        return None
+    if summary["head_share"] >= SPEECH_LIGHTER_HEAD:
+        return "some lighter phonation"
+    if (summary["chest_share"] >= SPEECH_MOSTLY_CHEST and summary["head_share"] < SPEECH_MOSTLY_CHEST_HEAD
+            and median_f0 <= SPEECH_CHEST_MAX_F0):
+        return "mostly chest"
+    return None
+
+
+def take_register_summary(tracks, scores, fry, model=None, mode=None):
     """{'chest_share', 'mix_share', 'head_share', 'fry_share' (of voiced time, summing to 1),
-        'median_score', 'breaks': [times in s of abrupt M1<->M2 switches], 'calibrated': bool}"""
+        'median_score', 'breaks': [times in s of abrupt M1<->M2 switches], 'calibrated': bool,
+        'mode', 'speech_label': see speech_label (speak mode with an uncalibrated model, else None)}"""
     scores = np.asarray(scores, dtype=float)
     fry = np.asarray(fry, dtype=bool)
     f0 = np.asarray(tracks["f0"], dtype=float)
@@ -388,7 +470,8 @@ def take_register_summary(tracks, scores, fry, model=None):
     n = int(counted.sum())
     summary = {"chest_share": 0.0, "mix_share": 0.0, "head_share": 0.0, "fry_share": 0.0,
                "median_score": float("nan"), "breaks": [],
-               "calibrated": bool(model.is_calibrated()) if model else False}
+               "calibrated": bool(model.is_calibrated()) if model else False,
+               "mode": mode, "speech_label": None}
     if n == 0:
         return summary
     breathy = counted & ~fry
@@ -401,4 +484,8 @@ def take_register_summary(tracks, scores, fry, model=None):
     summary["mix_share"] = 1.0 - summary["fry_share"] - summary["chest_share"] - summary["head_share"]
     summary["median_score"] = float(np.median(s)) if len(s) else float("nan")
     summary["breaks"] = find_breaks(tracks["times"], np.where(fry, np.nan, scores))
+    if mode == "speak" and not summary["calibrated"]:
+        times = np.asarray(tracks["times"], dtype=float)
+        step = float(np.median(np.diff(times))) if len(times) > 1 else 0.01
+        summary["speech_label"] = speech_label(summary, n * step, float(np.median(f0[counted])))
     return summary
