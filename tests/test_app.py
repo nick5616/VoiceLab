@@ -377,13 +377,15 @@ def test_live_register_follows_open_quotient(make_window):
     window = make_window()
     meter = window.live_panel.meters["register"]
     assert "(estimate)" in meter.label
+    # Sung register: uncalibrated speech uses the speech defaults (spec 10-01), which call this
+    # synthetic light voice at 140 Hz chest.
+    window.core.set_mode("sing")
+    assert not meter.isHidden()
     play(window, np.concatenate([silence(1.0), CHEST_VOICE[:int(1.5 * SR)]]))
     assert meter.bar.position < 0.35 and "chest" in meter.title.text() and "estimate" in meter.title.text()
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.5 * SR)]]))
     assert meter.bar.position > 0.65 and "head" in meter.title.text()
     assert meter.bar.band == (0.35, 0.65)                 # the mix zone
-    window.core.set_mode("sing")
-    assert not meter.isHidden()
 
 
 def test_recording_has_a_register_row_and_old_takes_still_load(make_window, tmp_path):

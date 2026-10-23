@@ -385,7 +385,7 @@ class LiveSession:
 
     def _update_register(self, frame, window):
         """Chest <-> head meter: the register model's M2 score, smoothed; "fry" when the pitch says so."""
-        score = self.register_model.score(self.register_features(frame, window))
+        score = self.register_model.score(self.register_features(frame, window), mode=self.mode)
         recent = np.full(FRY_CHECK_FRAMES, np.nan)     # padded: is_fry needs at least 5 frames
         tail = list(self.recent_f0)[-FRY_CHECK_FRAMES:]
         recent[len(recent) - len(tail):] = tail

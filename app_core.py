@@ -34,8 +34,8 @@ from playback import Player
 from profile_store import TARGET_KEYS
 from progress import collect_entries
 from speech import READING_PASSAGES, VowelCheckSession
-from take_register import (analyze_recording, analyze_with_options, finish_take, fit_labelled, is_stale, label_rows,
-                           register_model, score_register)
+from take_register import (acoustic_grade, analyze_recording, analyze_with_options, finish_take, fit_labelled,
+                           is_stale, label_rows, register_model, score_register, store_register)
 from take_store import (ANALYSIS_VERSION, IMPORT_MAX_SECONDS, TakeStore, default_mode, is_outdated, load_audio,
                         new_uid)
 
@@ -157,7 +157,8 @@ def rescore_register(takes, store, state, version, progress=None):
         if progress:
             progress(done, len(takes))
         try:
-            scores, fry, summary = score_register(_take_audio(data, store), data["tracks"], model)
+            scores, fry, summary = score_register(_take_audio(data, store), data["tracks"], model,
+                                                  mode=default_mode(data), acoustic=acoustic_grade(data))
         except Exception:  # a missing or unreadable file shouldn't stop the others
             failed.append(data["uid"])
             continue
@@ -705,8 +706,7 @@ class VoiceLabCore:
             data = by_uid.get(uid)
             if data is None:
                 continue
-            data["tracks"]["register"], data["tracks"]["fry"] = scores, fry.astype(float)
-            data["register"] = summary
+            store_register(data, scores, fry, summary)
             if data.get("file") and self.store:
                 try:
                     self.store.write_sidecar(data)
