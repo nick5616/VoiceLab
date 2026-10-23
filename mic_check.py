@@ -1,19 +1,16 @@
 """Mic check: record a few seconds of silence and a sustained "ah", and say what to fix.
 
-analyze_check() and mic_advice() are plain functions; MicCheckDialog drives the recording through
+analyze_check() and mic_advice() are plain functions; MicCheckSession drives the recording through
 an engine (anything with sample_rate, capture_info, is_capturing, start_take and stop_take), so
-tests can use a fake and no audio hardware is ever opened by this module.
+tests can use a fake and no audio hardware is ever opened by this module. No UI toolkit.
 """
 import time
 from datetime import datetime
 
 import numpy as np
-from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 import coach
 import denoise
-from ui_common import BUTTON_STYLE, OFF_TARGET_COLOR, ON_TARGET_COLOR
 
 PHASE_SECONDS = 3.0         # silence, then "ah" (spec 06)
 LEAD_SECONDS = 1.0          # time to settle after pressing Start, so the click isn't recorded
@@ -43,6 +40,11 @@ INTERFACE_ADVICE = ("For a lasting improvement, a USB audio interface with an XL
 NO_VOICE_ADVICE = ("I could not hear your \"ah\". Check that the right mic is chosen and its "
                    "input level is not muted, then try again.")
 GOOD_ADVICE = "Your input looks good. Keep about this distance when you record."
+INTRO = ("This takes about 8 seconds. Sit where you normally record, with the "
+         "mic where you normally keep it. First you stay quiet, then you "
+         "say a steady \"ah\".")
+BUSY = "A recording is in progress. Finish it first, then run the mic check."
+PHASE_TEXT = {"lead": "Get ready... stay quiet", "silence": "Stay quiet", "voice": "Say a steady \"ahhh\""}
 
 
 def analyze_check(silence, voice, sample_rate, capture_info=None):
@@ -126,106 +128,72 @@ def summary_lines(result):
     return lines
 
 
-class MicCheckDialog(QDialog):
-    """Guides a 3 s silence + 3 s "ah" recording and shows what it found. `result` holds the dict
-    afterwards and finished_check carries it. Nothing here opens an audio device."""
+class MicCheckSession:
+    """A 3 s silence + 3 s "ah" recording through `engine`, and what it found. start() and next() return how
+    long the phase lasts (the UI calls next() then); `result` holds analyze_check's dict at the end.
+    Nothing here opens an audio device."""
 
-    finished_check = pyqtSignal(dict)
-
-    def __init__(self, engine, parent=None, seconds=PHASE_SECONDS, lead_seconds=LEAD_SECONDS):
-        super().__init__(parent)
+    def __init__(self, engine, seconds=PHASE_SECONDS, lead_seconds=LEAD_SECONDS, clock=time.monotonic):
         self.engine = engine
         self.seconds, self.lead_seconds = seconds, lead_seconds
+        self.clock = clock
         self.phase = "idle"             # idle, lead, silence, voice, done
         self.result = None
         self.silence = None
-        self.setWindowTitle("Mic check")
-        self.setMinimumWidth(460)
-        layout = QVBoxLayout(self)
-        self.instruction = QLabel("This takes about 8 seconds. Sit where you normally record, with the "
-                                  "mic where you normally keep it. First you stay quiet, then you "
-                                  "say a steady \"ah\".")
-        self.instruction.setWordWrap(True)
-        self.status = QLabel("")
-        self.status.setStyleSheet("font-size: 16px; font-weight: bold;")
-        self.report = QLabel("")
-        self.report.setWordWrap(True)
-        layout.addWidget(self.instruction)
-        layout.addWidget(self.status)
-        layout.addWidget(self.report)
-        row = QHBoxLayout()
-        self.start_btn = QPushButton("Start")
-        self.close_btn = QPushButton("Close")
-        for btn in (self.start_btn, self.close_btn):
-            btn.setStyleSheet(BUTTON_STYLE)
-        self.start_btn.clicked.connect(self.start)
-        self.close_btn.clicked.connect(self.reject)
-        row.addStretch()
-        row.addWidget(self.start_btn)
-        row.addWidget(self.close_btn)
-        layout.addLayout(row)
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self._next)
-        self._tick = QTimer(self)
-        self._tick.setInterval(100)
-        self._tick.timeout.connect(self._show_countdown)
-        self._ends_at = 0.0
+        self.message = ""               # why start() refused
+        self.ends_at = 0.0
 
     def start(self):
-        """Begin the check (refused while a take is being recorded)."""
+        """Begin the check: seconds until next() is due, or None (refused while a take is being recorded)."""
         if self.engine.is_capturing():
-            self.status.setText("A recording is in progress. Finish it first, then run the mic check.")
-            return
-        self.result, self.silence = None, None
-        self.report.setText("")
-        self.start_btn.setEnabled(False)
-        self._enter("lead", self.lead_seconds)
+            self.message = BUSY
+            return None
+        self.result, self.silence, self.message = None, None, ""
+        return self._enter("lead", self.lead_seconds)
 
     def _enter(self, phase, seconds):
         self.phase = phase
-        self._ends_at = time.monotonic() + seconds
-        self._timer.start(int(seconds * 1000))
-        self._tick.start()
-        self._show_countdown()
+        self.ends_at = self.clock() + seconds
+        return seconds
 
-    def _show_countdown(self):
-        left = max(0.0, self._ends_at - time.monotonic())
-        text = {"lead": "Get ready... stay quiet", "silence": "Stay quiet",
-                "voice": "Say a steady \"ahhh\""}.get(self.phase, "")
-        self.status.setText(f"{text}  ({left:.0f} s)" if left >= 0.5 else text)
-
-    def _next(self):
+    def next(self):
+        """End the current phase and start the next: its length in seconds, or None when the check is done."""
         if self.phase == "lead":
             self.engine.start_take()
-            self._enter("silence", self.seconds)
-        elif self.phase == "silence":
+            return self._enter("silence", self.seconds)
+        if self.phase == "silence":
             self.silence = self.engine.stop_take()
             self.engine.start_take()
-            self._enter("voice", self.seconds)
-        elif self.phase == "voice":
-            self._tick.stop()
-            voice = self.engine.stop_take()
-            self._finish(voice)
+            return self._enter("voice", self.seconds)
+        if self.phase == "voice":
+            self._finish(self.engine.stop_take())
+        return None
 
     def _finish(self, voice):
         self.phase = "done"
-        self.start_btn.setEnabled(True)
-        self.start_btn.setText("Run again")
         self.result = analyze_check(self.silence, voice, self.engine.sample_rate,
                                     getattr(self.engine, "capture_info", None))
-        color = ON_TARGET_COLOR if self.result["ok"] else OFF_TARGET_COLOR
-        self.status.setText("Done")
-        text = "<br>".join(summary_lines(self.result))
-        text += f"<p style='color:{color}'>" + "<br><br>".join(self.result["advice"]) + "</p>"
-        self.report.setText(text)
-        self.finished_check.emit(self.result)
 
-    def reject(self):
-        """Closing mid-check stops the recording and throws it away."""
-        self._timer.stop()
-        self._tick.stop()
+    def status_text(self):
+        """What to do now, with the seconds left in the phase; "Done" at the end; why start() refused."""
+        if self.message:
+            return self.message
+        if self.phase == "done":
+            return "Done"
+        if self.phase == "idle":
+            return ""
+        left = max(0.0, self.ends_at - self.clock())
+        text = PHASE_TEXT.get(self.phase, "")
+        return f"{text}  ({left:.0f} s)" if left >= 0.5 else text
+
+    def report(self):
+        """{"lines": the measured numbers, "advice": [str], "ok": bool}, or None before the end."""
+        if self.result is None:
+            return None
+        return {"lines": summary_lines(self.result), "advice": self.result["advice"], "ok": self.result["ok"]}
+
+    def cancel(self):
+        """Stop mid-check: the recording is thrown away."""
         if self.phase in ("silence", "voice"):
             self.engine.stop_take()
         self.phase = "idle"
-        super().reject()

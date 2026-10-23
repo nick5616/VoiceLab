@@ -234,3 +234,70 @@ def test_two_channel_open_failure_raises(monkeypatch):
     monkeypatch.setattr(engine_module.sd, "InputStream", fail)
     with pytest.raises(engine_module.sd.PortAudioError):
         LiveEngine().open_stream(egg_channel=0)
+
+
+def test_engine_mode_noise_floor_and_recent_audio():
+    eng = LiveEngine()
+    eng.set_mode("sing")
+    assert eng.analyzer.mode == "sing" and eng.noise_floor() is None
+    eng.analyzer.noise_floor = -57.0
+    assert eng.noise_floor() == -57.0
+    assert len(eng.recent_audio()) == 0
+    ramp = np.arange(int(8 * SR)) / SR
+    for i in range(0, len(ramp), 512):
+        eng.feed(ramp[i:i + 512])
+    recent = eng.recent_audio(2.0)
+    assert len(recent) == 2 * SR and np.allclose(recent, ramp[-2 * SR:])
+    assert len(eng.recent_audio()) == 6 * SR
+
+
+def test_open_stream_seeds_the_noise_floor(monkeypatch):
+    opened = []
+
+    class Stream:
+        latency = 0.01
+
+        def __init__(self, **kwargs):
+            opened.append(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+    monkeypatch.setattr(engine_module.sd, "InputStream", Stream)
+    monkeypatch.setattr(engine_module, "_find_wasapi", lambda device: None)
+    monkeypatch.setattr(engine_module, "_host_api_name", lambda device: "MME")
+    eng = LiveEngine()
+    eng.open_stream(None, noise_floor=-58.5)
+    assert eng.noise_floor() == -58.5 and opened
+    eng.open_stream(None)
+    assert eng.noise_floor() == -58.5                             # not reset by reopening
+
+
+def test_subscribers_get_frames_from_the_analysis_thread():
+    """No Qt: the analysis thread publishes each live frame to subscribers (no stream is opened here)."""
+    import threading
+    eng = LiveEngine()
+    eng.feed(egg.synth_egg(200, 0.2, 0.5)[:len(eng.latest_window())])
+    frames, threads, got = [], set(), threading.Event()
+
+    def on_frame(frame):
+        frames.append(frame)
+        threads.add(threading.current_thread().name)
+        got.set()
+    unsubscribe = eng.subscribe(on_frame)
+    eng._worker.start()
+    try:
+        assert got.wait(5)
+    finally:
+        eng.stop()
+    unsubscribe()
+    count = len(frames)
+    eng.publish({"f0": 1.0})
+    assert count >= 1 and len(frames) == count and threads == {"live-analysis"}
+    assert "f0" in frames[0] and np.isnan(frames[0]["cq"])
+    assert not hasattr(engine_module, "QObject")

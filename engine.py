@@ -1,4 +1,5 @@
-"""Always-on microphone stream feeding both the live meters and take recording."""
+"""Always-on microphone stream feeding both the live meters and take recording. No UI: subscribers get
+each live frame on the analysis thread (a UI moves it to its own thread)."""
 import math
 import threading
 import time
@@ -6,10 +7,9 @@ import time
 import numpy as np
 import sounddevice as sd
 from scipy import signal
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 import egg
-from analysis import SAMPLE_RATE, FrameAnalyzer, analyze_take
+from analysis import SAMPLE_RATE, FrameAnalyzer
 
 UPDATE_INTERVAL = 0.025   # live meter refresh (s)
 BLOCK_SIZE = 512          # frames per callback at the app rate; scaled for the device's native rate
@@ -66,11 +66,10 @@ def _find_wasapi(device):
     return None
 
 
-class LiveEngine(QObject):
-    frame_ready = pyqtSignal(dict)
+class LiveEngine:
+    """The mic stream, its buffers and the live analysis. subscribe(fn) gets every live frame."""
 
     def __init__(self, sample_rate=SAMPLE_RATE):
-        super().__init__()
         self.sample_rate = sample_rate
         self.analyzer = FrameAnalyzer(sample_rate, UPDATE_INTERVAL)
         self._ring = np.zeros(int(sample_rate * FrameAnalyzer.WINDOW_SECONDS))
@@ -86,8 +85,26 @@ class LiveEngine(QObject):
         self._stream = None
         self._resamplers = None     # (mic, egg) when the stream runs at another rate than sample_rate
         self.capture_info = {}      # how the stream was opened: host_api, native_rate, latency, ...
+        self._subscribers = []
         self._worker = _LiveWorker(self)
-        self._worker.frame_ready.connect(self.frame_ready)
+
+    def subscribe(self, fn):
+        """Call fn(frame) for every live frame, on the analysis thread; returns an unsubscribe function."""
+        with self._lock:
+            self._subscribers.append(fn)
+
+        def unsubscribe():
+            with self._lock:
+                if fn in self._subscribers:
+                    self._subscribers.remove(fn)
+        return unsubscribe
+
+    def publish(self, frame):
+        """Deliver a frame to the subscribers, as the analysis thread does (tests feed frames this way)."""
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for fn in subscribers:
+            fn(frame)
 
     def start(self, device=None, noise_floor=None):
         """Open the mic (device index, or None for the system default) and
@@ -164,8 +181,7 @@ class LiveEngine(QObject):
             self._stream = None
 
     def stop(self):
-        self._worker.running = False
-        self._worker.wait()
+        self._worker.stop()
         self._close_stream()
 
     def _on_audio(self, indata, frames, time_info, status):
@@ -286,13 +302,26 @@ def device_index(name):
     return next((i for i, n in input_devices() if n == name), None)
 
 
-class _LiveWorker(QThread):
-    frame_ready = pyqtSignal(dict)
+class _LiveWorker:
+    """The analysis thread: analyses the latest window every UPDATE_INTERVAL and publishes the frame."""
 
     def __init__(self, engine):
-        super().__init__()
         self.engine = engine
         self.running = False
+        self._thread = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self.run, daemon=True, name="live-analysis")
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
 
     def frame(self):
         """Analyse the latest window; adds the EGG keys cq and egg_f0 (NaN without an EGG)."""
@@ -306,32 +335,11 @@ class _LiveWorker(QThread):
         return frame
 
     def run(self):
-        self.running = True
         while self.running:
             started = time.perf_counter()
             try:
-                self.frame_ready.emit(self.frame())
+                self.engine.publish(self.frame())
             except Exception as e:  # keep the meters alive on odd frames
                 print(f"Live analysis error: {e}")
             elapsed = time.perf_counter() - started
             time.sleep(max(0.0, UPDATE_INTERVAL - elapsed))
-
-
-class AnalysisWorker(QThread):
-    """Runs fn(*args) off the UI thread and emits its result dict."""
-    finished_analysis = pyqtSignal(dict)
-
-    def __init__(self, fn, *args):
-        super().__init__()
-        self.fn, self.args = fn, args
-
-    def run(self):
-        try:
-            result = self.fn(*self.args)
-        except Exception as e:
-            result = {"error": f"Error: {e}"}
-        self.finished_analysis.emit(result)
-
-
-def take_analysis_worker(audio, sample_rate=SAMPLE_RATE):
-    return AnalysisWorker(analyze_take, audio, sample_rate)

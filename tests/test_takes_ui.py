@@ -1,5 +1,6 @@
 """Takes, targets and practice UI (spec 07): re-analysis, the take card's quality and advice, targets,
-progress, playback and the session reminder. Offscreen Qt, no mic and no speakers."""
+progress, playback and the session reminder, as the window shows them. Offscreen Qt, no mic and no
+speakers. The same logic is checked without a UI in test_core.py."""
 import copy
 import hashlib
 import json
@@ -13,16 +14,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 from PyQt6.QtWidgets import QMessageBox  # noqa: E402
 
-import main  # noqa: E402
+import app_core  # noqa: E402
 import mic_noise  # noqa: E402
 import profile_store  # noqa: E402
 from analysis import FORMANT_CEILINGS, analyze_take  # noqa: E402
 from profile_store import Profile  # noqa: E402
-from progress import ProgressDialog, change_text, select  # noqa: E402
-from take_card import AnalysisGraph, TakeCard, UntrustedMetric  # noqa: E402
+from progress import change_text, select  # noqa: E402
+from ui.progress_dialog import ProgressDialog  # noqa: E402
+from ui.take_card import AnalysisGraph, TakeCard, UntrustedMetric  # noqa: E402
 from take_register import analyze_recording, finish_take  # noqa: E402
 from take_store import ANALYSIS_VERSION, TakeStore, is_outdated  # noqa: E402
-from targets_dialog import TargetsDialog  # noqa: E402
+from ui.targets_dialog import TargetsDialog  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
 from conftest import wait_for  # noqa: E402
 from test_app import record  # noqa: E402
@@ -55,7 +57,7 @@ def test_old_take_is_reanalysed_without_touching_the_wav(make_window, tmp_path):
     before, mtime = sha(wav), wav.stat().st_mtime_ns
     window = make_window(folder)
     assert is_outdated(window.cards[0].data)
-    assert wait_for(lambda: not window.reanalysis_active())
+    assert wait_for(lambda: not window.core.reanalysis_active())
     card = window.cards[0]
     assert card.data["analysis_version"] == ANALYSIS_VERSION and not is_outdated(card.data)
     assert card.data["pitch_range"] < 20                       # the stored 47 st was ghosts
@@ -72,7 +74,7 @@ def test_reanalysis_runs_one_at_a_time_and_reports_progress(make_window, tmp_pat
         old_take(folder, day=day)
     window = make_window(folder)
     seen = []
-    assert wait_for(lambda: (seen.append(window.status_label.text()), not window.reanalysis_active())[1])
+    assert wait_for(lambda: (seen.append(window.status_label.text()), not window.core.reanalysis_active())[1])
     assert any("1 of 3" in text for text in seen) and any("3 of 3" in text for text in seen)
     assert all(not is_outdated(card.data) for card in window.cards)
 
@@ -83,12 +85,12 @@ def test_current_takes_are_left_alone(make_window, tmp_path):
     take["analysis_version"] = ANALYSIS_VERSION
     TakeStore(folder).save(take | {"time": "2026-09-01T10:00:00"})
     window = make_window(folder)
-    assert not window.outdated_takes() and window.reanalysis_worker is None
+    assert not window.core.outdated_takes() and window.core.jobs["reanalysis"] is None
 
 
 def test_sung_take_is_analysed_in_sing_mode(make_window):
     window = make_window()
-    window.live_panel.set_mode("sing", user=True)
+    window.live_panel.mode_buttons["sing"].click()
     assert window.profile.mode == "sing" and window.voice_map.mode == "sing"
     high = synth_vowel(700, MALE_FORMANTS, seconds=2, noise=0.02)
     card = record(window, high)
@@ -109,7 +111,7 @@ def test_card_shows_tier_reasons_and_advice(make_window):
     pitch, delta_f = card.data["pitch"], card.data["delta_f"]
     window.profile.set_target("pitch", [pitch * 0.9, pitch * 1.1])
     window.profile.set_target("delta_f", [delta_f + 150, delta_f + 300])
-    window.refresh_profile()
+    window.core.refresh_profile()
     texts = [m["text"] for m in card.advice]
     assert 1 <= len(card.advice) <= 3
     if card.quality["trust"]["pitch"] and card.quality["trust"]["delta_f"] and tier != "poor":
@@ -337,7 +339,7 @@ def test_graph_click_maps_to_seconds(make_window):
 
 def test_session_length_and_rest_reminder(make_window):
     window = make_window()
-    clock = window.session_clock = FakeClock()
+    clock = window.core.clock = FakeClock()
     assert window.session_label.isHidden() and window.rest_label.isHidden()
     record(window, VOICE)
     assert not window.session_label.isHidden() and window.session_label.text() == "Session 0 min"
@@ -359,8 +361,8 @@ def test_voice_map_rebuilds_from_takes(make_window, tmp_path, monkeypatch):
     window = make_window(folder)
     record(window, VOICE)
     window.voice_map.clear()
+    assert window.voice_map.data.counts.sum() == 0
     window.voice_map.rebuild_requested.emit()
-    assert wait_for(lambda: window.voicemap_worker is not None and not window.voicemap_worker.isRunning())
     assert wait_for(lambda: "rebuilt" in window.status_label.text())
     assert window.voice_map.data.counts.sum() > 50
 
@@ -368,7 +370,7 @@ def test_voice_map_rebuilds_from_takes(make_window, tmp_path, monkeypatch):
 def test_formant_ceiling_is_fixed_once(make_window):
     window = make_window()
     assert window.profile.formant_ceiling is None
-    for _ in range(main.CEILING_TAKES - 1):
+    for _ in range(app_core.CEILING_TAKES - 1):
         record(window, VOICE)
         assert window.profile.formant_ceiling is None            # not enough takes to choose from yet
     record(window, VOICE)
@@ -376,7 +378,7 @@ def test_formant_ceiling_is_fixed_once(make_window):
     assert ceiling in FORMANT_CEILINGS
     assert window.engine.analyzer.formant_ceiling == ceiling      # the live meters use it
     assert Profile(window.profile.directory).formant_ceiling == ceiling      # kept in the profile
-    window.note_ceiling(dict(window.cards[-1].data, formant_ceiling=ceiling + 150))
+    window.core.note_ceiling(dict(window.cards[-1].data, formant_ceiling=ceiling + 150))
     assert window.profile.formant_ceiling == ceiling              # later takes don't move it
     after = record(window, VOICE)
     assert after.data["formant_ceiling"] == ceiling               # and every analysis is given it
@@ -385,12 +387,12 @@ def test_formant_ceiling_is_fixed_once(make_window):
 
 def test_vowel_check_ceiling_wins(make_window):
     window = make_window()
-    window.use_vowel_ceiling({"formant_ceiling": 4500})
+    window.core.events.emit("vowel_check_done", {"formant_ceiling": 4500, "vowels": {}})
     assert window.profile.formant_ceiling == 4500 and window.engine.analyzer.formant_ceiling == 4500
-    for _ in range(main.CEILING_TAKES):
+    for _ in range(app_core.CEILING_TAKES):
         record(window, VOICE)
     assert window.profile.formant_ceiling == 4500                 # takes never override it
-    window.use_vowel_ceiling({"formant_ceiling": 5000})           # a later vowel check always does
+    window.core.use_vowel_ceiling({"formant_ceiling": 5000})      # a later vowel check always does
     assert window.profile.formant_ceiling == 5000
 
 
@@ -400,7 +402,7 @@ def test_mic_check_result_is_stored(make_window, monkeypatch):
     assert live.engine is window.engine
     monkeypatch.setattr(live, "show_mic_check", lambda: live.mic_check_done.emit({"level_db": -30.0}))
     window.first_run_mic_check()
-    assert window.profile.mic_check == {"level_db": -30.0}
+    assert window.profile.mic_check == {"level_db": -30.0} and window.status_label.text() == "Mic check saved"
     window.profile.mic_check = None
     window.first_run_mic_check()                                     # asked once, never again by itself
     assert window.profile.mic_check is None
@@ -411,7 +413,7 @@ def test_noise_floor_is_saved_on_close_and_kept_without_one(make_window):
     window.engine.analyzer.noise_floor = -61.5
     window.close()
     assert window.profile.noise_floor == -61.5
-    assert window.stream_options() == {"noise_floor": -61.5}
+    assert window.core.stream_options() == {"noise_floor": -61.5}
     window.engine.analyzer.noise_floor = None
     window.close()
     assert window.profile.noise_floor == -61.5                       # an unheard floor doesn't erase it

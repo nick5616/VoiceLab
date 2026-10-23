@@ -1,4 +1,5 @@
-"""Fixtures shared by the app-level tests: a Qt application and a main window with no mic or speakers."""
+"""Fixtures shared by the app-level tests: a Qt application and a main window (built as main.py builds it,
+on a VoiceLabCore) with no mic or speakers."""
 import os
 import sys
 import time
@@ -43,10 +44,10 @@ def make_window(app, tmp_path, monkeypatch):
         profile = Profile(tmp_path / "home")
         if takes_dir:
             profile.set_takes_dir(takes_dir)
-        window = main.MainWindow(LiveEngine(), profile)
+        window = main.build(LiveEngine(), profile)
         windows.append(window)
         if takes_dir:
-            wait_for(lambda: window.load_worker is None or not window.load_worker.isRunning())
+            wait_for(lambda: not window.core.loading)
         return window
 
     yield make

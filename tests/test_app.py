@@ -1,8 +1,9 @@
 """End-to-end checks of the app window, driven without a mic or speakers.
 
 Audio is fed straight into the LiveEngine and each live frame is analysed and
-delivered in-line, so the tests don't depend on real time; background analysis
-still runs on its worker threads.
+delivered in-line (engine.publish), so the tests don't depend on real time; background
+analysis still runs on the core's job threads. The window is built as main.py builds it:
+a VoiceLabCore with its events on the Qt main thread.
 """
 import os
 import sys
@@ -37,7 +38,7 @@ def play(window, audio, on_frame=None):
         engine.feed(audio[i:i + HOP])
         if on_frame:
             on_frame(i / SR)
-        engine.frame_ready.emit(engine.analyzer.analyze(engine.latest_window()))
+        engine.publish(engine.analyzer.analyze(engine.latest_window()))
     QApplication.processEvents()
 
 
@@ -84,11 +85,11 @@ def test_takes_folder_crud(make_window, tmp_path):
     assert loaded.data["title"] == "bright ee"
     assert abs(loaded.data["pitch"] - 140) < 3
     assert len(loaded.audio()) == len(card.data["audio"])
-    assert len(again.progress_entries()) == 1
+    assert len(again.core.progress_entries()) == 1
 
     again.delete_take(loaded)
     assert again.cards == [] and list(folder.iterdir()) == []
-    assert again.progress_entries() == []
+    assert again.core.progress_entries() == []
 
 
 def test_session_takes_are_saved_when_a_folder_is_chosen(make_window, tmp_path):
@@ -99,11 +100,11 @@ def test_session_takes_are_saved_when_a_folder_is_chosen(make_window, tmp_path):
 
     folder = tmp_path / "chosen"
     window.set_takes_folder(folder)
-    wait_for(lambda: not window.load_worker.isRunning())
+    wait_for(lambda: not window.core.loading)
     assert len(window.cards) == 1 and window.cards[0].data["file"]
     assert (folder / window.cards[0].data["file"]).exists()
     assert window.profile.read_history() == []          # moved, not duplicated
-    assert len(window.progress_entries()) == 1
+    assert len(window.core.progress_entries()) == 1
 
 
 def test_folder_reload_picks_up_outside_changes(make_window, tmp_path):
@@ -123,7 +124,7 @@ def test_folder_reload_picks_up_outside_changes(make_window, tmp_path):
     (folder / "teacher.wav").unlink()
     (folder / "teacher.json").unlink()
     window.load_takes()
-    wait_for(lambda: not window.load_worker.isRunning())
+    wait_for(lambda: not window.core.loading)
     assert window.cards == []
 
 
@@ -139,12 +140,12 @@ def test_older_takes_page_in(make_window, tmp_path):
     assert "5 more" in window.more_btn.text()
     window.show_older_takes()
     assert len(window.cards) == 25 and not window.more_btn.isVisibleTo(window)
-    assert len(window.progress_entries()) == 25
+    assert len(window.core.progress_entries()) == 25
 
 
 def test_exercise_is_scored_logged_and_charted(make_window):
     window = make_window()
-    window.live_panel.set_mode("sing", user=True)
+    window.core.set_mode("sing")
     ex = window.exercise_view
     targets = ex.build_targets()
     lead = targets[0][0]
@@ -154,7 +155,7 @@ def test_exercise_is_scored_logged_and_charted(make_window):
     assert not window.record_btn.isEnabled()
 
     def clock(t):                                        # the exercise runs on audio time
-        ex.t0 = time.perf_counter() - t
+        window.core.exercise.t0 = time.perf_counter() - t
     play(window, audio, on_frame=clock)
     assert wait_for(lambda: window.cards), ex.status.text()
     score = window.cards[-1].data["exercise"]
@@ -172,8 +173,8 @@ def test_exercise_finishing_mid_analysis_keeps_record_locked(make_window):
     window.toggle_recording()
     play(window, VOICE)
     window.toggle_recording()                            # take analysis running
-    window.exercise_view.take_ready.emit({"error": "exercise result arrives first"})
-    assert window.analyzing and not window.record_btn.isEnabled()
+    window.core.events.emit("exercise_scored", {"error": "exercise result arrives first"})
+    assert window.core.analyzing and not window.record_btn.isEnabled()
     assert wait_for(lambda: window.cards)
     assert window.record_btn.isEnabled()
 
@@ -183,7 +184,7 @@ def test_vowel_check(make_window):
     vc = window.vowel_check
     vowels = {"heed": (270, 2290), "hid": (390, 1990), "head": (530, 1840), "had": (660, 1720),
               "hod": (730, 1090), "hud": (640, 1190), "hood": (440, 1020), "who'd": (300, 870)}
-    vc.start()
+    window.core.vowels.start()
     for f1, f2 in vowels.values():
         forms = [(f1, 80), (f2, 100), (2500, 120), (3500, 150), (4500, 200)]
         play(window, np.concatenate([synth_vowel(130, forms, seconds=0.5), silence(0.6)]))
@@ -232,7 +233,7 @@ def wheel_over(widget, steps=-1):
 
 def test_wheel_scrolls_takes_from_anywhere(make_window, tmp_path):
     import analysis
-    from take_card import AnalysisGraph
+    from ui.take_card import AnalysisGraph
     from take_store import TakeStore
     folder = tmp_path / "takes"
     store, base = TakeStore(folder), analysis.analyze_take(VOICE)
@@ -257,9 +258,9 @@ def test_wheel_scrolls_takes_from_anywhere(make_window, tmp_path):
 
 def wide_width(window):
     """A width that gets the side-by-side layout (depends on the fonts)."""
-    import main
-    return max(main.WIDE_LAYOUT_WIDTH,
-               window.live_panel.minimumSizeHint().width() + main.TAKES_COLUMN_WIDTH) + 50
+    from ui import main_window
+    return max(main_window.WIDE_LAYOUT_WIDTH,
+               window.live_panel.minimumSizeHint().width() + main_window.TAKES_COLUMN_WIDTH) + 50
 
 
 def test_layout_follows_window_width(make_window):
@@ -273,7 +274,7 @@ def test_layout_follows_window_width(make_window):
     QApplication.processEvents()
     assert window.splitter.orientation() == Qt.Orientation.Vertical
     assert window.live_panel.meter_grid.columns == 2          # meters two-up at 800 px
-    window.live_panel.set_mode("sing", user=True)
+    window.core.set_mode("sing")
     shown = [m for m in window.live_panel.meters.values() if not m.isHidden()]
     assert len(shown) == 7 and window.live_panel.meter_grid.grid.count() == 7
 
@@ -321,7 +322,7 @@ def test_mic_that_fails_to_open(make_window, monkeypatch):
     window = make_window()
     window.mic_choice.addItem("Broken mic", "Broken mic")
 
-    def fail(device=None):
+    def fail(device=None, noise_floor=None):
         raise sd.PortAudioError("device unavailable")
     monkeypatch.setattr(window.engine, "open_stream", fail)
     window.mic_choice.setCurrentIndex(window.mic_choice.count() - 1)
@@ -349,21 +350,21 @@ def play_with_egg(window, audio, egg_samples):
     engine = window.engine
     for i in range(0, len(audio) - HOP + 1, HOP):
         engine.feed(audio[i:i + HOP], egg_samples[i:i + HOP])
-        engine.frame_ready.emit(engine._worker.frame())
+        engine.publish(engine._worker.frame())
     QApplication.processEvents()
 
 
 @pytest.fixture
 def two_input_window(make_window, monkeypatch):
     """A window whose mic has two inputs; opening the stream just records the EGG channel."""
-    import main
-    monkeypatch.setattr(main, "input_channels", lambda index: 2)
+    import app_core
+    monkeypatch.setattr(app_core, "input_channels", lambda index: 2)
     opened = []
 
     def make(takes_dir=None):
         window = make_window(takes_dir)
 
-        def open_stream(device=None, egg_channel=None):
+        def open_stream(device=None, egg_channel=None, noise_floor=None):
             opened.append(egg_channel)
             window.engine.egg_channel = egg_channel
         monkeypatch.setattr(window.engine, "open_stream", open_stream)
@@ -381,7 +382,7 @@ def test_live_register_follows_open_quotient(make_window):
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.5 * SR)]]))
     assert meter.bar.position > 0.65 and "head" in meter.title.text()
     assert meter.bar.band == (0.35, 0.65)                 # the mix zone
-    window.live_panel.set_mode("sing", user=True)
+    window.core.set_mode("sing")
     assert not meter.isHidden()
 
 
@@ -421,7 +422,7 @@ def test_labelled_takes_calibrate_the_register_and_persist(make_window, tmp_path
     window.label_register(cards["2026-09-02"], "head")
     assert wait_for(lambda: window.profile.register_model is not None)
     assert "calibrated to your voice" in window.status_label.text()
-    assert window.live_panel.register_model.is_calibrated()
+    assert window.core.live.register_model.is_calibrated()
     assert window.live_panel.meters["register"].label == "Register"
     version = window.profile.register_version
     assert wait_for(lambda: all((c.data.get("register") or {}).get("model_version") == version
@@ -433,7 +434,7 @@ def test_labelled_takes_calibrate_the_register_and_persist(make_window, tmp_path
     assert '"register_label": "head"' in head_json.read_text()
 
     again = make_window(folder)                             # a new window starts calibrated
-    assert again.live_panel.register_model.is_calibrated()
+    assert again.core.live.register_model.is_calibrated()
     assert again.profile.register_model == window.profile.register_model
     assert {c.data["register_label"] for c in again.cards} == {"chest", "head"}
     window.label_register(cards["2026-09-02"], None)
@@ -441,8 +442,8 @@ def test_labelled_takes_calibrate_the_register_and_persist(make_window, tmp_path
 
 
 def test_without_an_egg_there_is_no_cq(make_window, monkeypatch):
-    import main
-    monkeypatch.setattr(main, "input_channels", lambda index: 1)
+    import app_core
+    monkeypatch.setattr(app_core, "input_channels", lambda index: 1)
     window = make_window()
     window.show()
     window.update_egg_choice()
@@ -465,14 +466,14 @@ def test_egg_session_records_stereo_and_shows_cq(two_input_window, tmp_path):
     window.egg_choice.setCurrentIndex(window.egg_choice.findData(1))     # EGG on channel 2
     assert two_input_window.opened[-1] == 1 and window.profile.egg_channel == 1
     live = window.live_panel
-    assert live.egg_on and not live.egg_badge.isHidden() and not live.meters["cq"].isHidden()
+    assert window.core.live.egg_on and not live.egg_badge.isHidden() and not live.meters["cq"].isHidden()
 
     voice = synth_vowel(140, MALE_FORMANTS, seconds=1.5, noise=0.05)
     egg_samples = synth_egg(140, 1.5, 0.5)
     window.toggle_recording()
     play_with_egg(window, voice, egg_samples)
     assert "Contact quotient" in live.meters["cq"].title.text()
-    assert abs(live.smoothed["cq"] - 0.5) < 0.05
+    assert abs(window.core.live.smoothed["cq"] - 0.5) < 0.05
     keys = [window.voice_map.metric.itemData(i) for i in range(window.voice_map.metric.count())]
     assert "cq" in keys
     window.toggle_recording()
@@ -487,7 +488,7 @@ def test_egg_session_records_stereo_and_shows_cq(two_input_window, tmp_path):
     again = two_input_window(folder)                        # reloads with the EGG intact
     loaded = again.cards[0]
     assert abs(loaded.data["cq"] - 0.5) < 0.05 and "cq" in loaded.bars
-    assert len(again.store.egg(loaded.data)) == len(loaded.audio())
+    assert len(again.core.store.egg(loaded.data)) == len(loaded.audio())
     assert np.max(np.abs(loaded.audio() - voice[:len(loaded.audio())])) < 1e-3     # mic, not a mix
     assert window.profile.egg_channel == 1 and again.profile.egg_channel == 1
 
@@ -496,7 +497,7 @@ def test_egg_that_fails_to_open_is_dropped_with_the_error(two_input_window):
     window = two_input_window()
     calls = []
 
-    def open_stream(device=None, egg_channel=None):
+    def open_stream(device=None, egg_channel=None, noise_floor=None):
         calls.append(egg_channel)
         if egg_channel is not None:
             raise sd.PortAudioError("Invalid number of channels")
@@ -504,7 +505,7 @@ def test_egg_that_fails_to_open_is_dropped_with_the_error(two_input_window):
     window.egg_choice.setCurrentIndex(window.egg_choice.findData(0))
     assert "Invalid number of channels" in window.status_label.text()
     assert window.egg_choice.currentData() is None and window.profile.egg_channel is None
-    assert not window.live_panel.egg_on and calls == [0, None]       # fell back to the mic alone
+    assert not window.core.live.egg_on and calls == [0, None]       # fell back to the mic alone
 
 
 def test_a_dead_egg_channel_is_explained(two_input_window):
@@ -520,7 +521,6 @@ def test_a_dead_egg_channel_is_explained(two_input_window):
 
 def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monkeypatch):
     import isolation
-    import main
     import soundfile as sf
     from egg import synth_egg
     from PyQt6.QtWidgets import QFileDialog
@@ -544,21 +544,21 @@ def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monk
 
     mono = str(tmp_path / "mono.wav")
     sf.write(mono, voice, SR)
-    assert main.MainWindow.choose_egg_channel(window, mono) == (True, None)    # no question for mono
+    from ui.main_window import MainWindow
+    assert MainWindow.choose_egg_channel(window, mono) == (True, None)    # no question for mono
 
 
 def test_live_register_reads_fry_when_the_pitch_says_so(make_window):
     window = make_window()
-    live = window.live_panel
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.0 * SR)]]))
     engine = window.engine
     for _ in range(8):                                    # frames at 50 Hz, below the fry limit
         engine.feed(VOICE[:HOP])
         frame = engine.analyzer.analyze(engine.latest_window())
-        live.update_frame(dict(frame, f0=50.0))
+        engine.publish(dict(frame, f0=50.0))
     time.sleep(0.25)                                      # live text changes at most every 0.2 s
-    live.update_frame(dict(frame, f0=50.0))
-    assert "fry" in live.meters["register"].title.text()
+    engine.publish(dict(frame, f0=50.0))
+    assert "fry" in window.live_panel.meters["register"].title.text()
 
 
 def test_old_voice_map_loads_and_gains_cq(tmp_path):
