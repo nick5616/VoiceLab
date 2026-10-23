@@ -25,8 +25,6 @@ PITCH_FLOOR, PITCH_CEILING = 60, 1200
 # with known formants read F1 within 10% up to 220 Hz, 13% of cases are worse at
 # 230 Hz and 40% at 250 Hz (errors up to +31% at 260 Hz); the old 350 Hz was far too generous.
 F1_RELIABLE_MAX_F0 = 230
-# register.py still reads this older, looser limit for its own weighting; it was not retuned here.
-FORMANT_RELIABLE_MAX_F0 = 350
 FORMANT_CEILINGS = np.arange(4000, 6501, 250)
 DEFAULT_FORMANT_CEILING = 5500
 # Adjacent real formants are rarely closer than this.
@@ -108,7 +106,7 @@ def vocal_tract_length_cm(df):
     return SPEED_OF_SOUND_CM / (2 * df)
 
 
-ANALYSIS_VERSION = 9           # stored on every take result so older takes can be re-analysed
+ANALYSIS_VERSION = 10          # stored on every take result so older takes can be re-analysed (10: phase 10)
 F1_MIN_HZ = 250                # an "F1" below this is rumble or H1, not a resonance (audit: snapped F1 median 246 Hz)
 F1_F0_RATIO = 1.3              # ... and one closer than this to f0 has snapped onto H1 (audit: 43-44% of frames at 202-212 Hz)
 NUCLEUS_STEADY = 0.15          # a steady frame's F1 and F2 move less than this over +/-1 frame
@@ -694,6 +692,189 @@ class FrameAnalyzer:
         return result
 
 
+# --- DISPLAY FORMANT TRACKS ---
+
+# The raw tracks keep every frame for analysis; the *_smooth ones are for drawing. A frame is trusted
+# when it is voiced, its F1 is believable (see f1_missing: not snapped onto H1, f0 low enough for LPC),
+# every formant has a real bandwidth and F1-F3 are apart.
+SMOOTH_FORMANT_FRAMES = 7     # median over 70 ms: shorter than a vowel nucleus (own judgement)
+MIN_FORMANT_RUN = 5           # frames (50 ms); shorter trusted stretches are not drawn
+SMOOTH_TRACK_KEYS = ("f1_smooth", "f2_smooth", "f3_smooth", "delta_f_smooth")
+
+
+def trusted_formant_frames(f0, freqs, bws):
+    """Boolean per frame: formants worth drawing (see the rules above)."""
+    f0 = np.asarray(f0, dtype=float)
+    freqs, bws = np.asarray(freqs, dtype=float), np.asarray(bws, dtype=float)
+    with np.errstate(invalid="ignore"):
+        ok = ~np.isnan(f0) & ~f1_missing(freqs[:, 0], f0)
+        ok &= ~np.isnan(freqs[:, :3]).any(axis=1)
+        ok &= (bws[:, :3] < MAX_FORMANT_BANDWIDTH).all(axis=1)
+        ok &= (np.diff(freqs[:, :3], axis=1) >= MIN_FORMANT_GAP).all(axis=1)
+    for start, stop in _runs(ok):
+        if stop - start < MIN_FORMANT_RUN:
+            ok[start:stop] = False
+    return ok
+
+
+def smooth_track(values, trusted, frames=SMOOTH_FORMANT_FRAMES):
+    """Median-filtered copy of `values` within each trusted run; NaN elsewhere."""
+    values = np.asarray(values, dtype=float)
+    out = np.full(len(values), np.nan)
+    ok = trusted & ~np.isnan(values)
+    for start, stop in _runs(ok):
+        if stop - start >= MIN_FORMANT_RUN:
+            out[start:stop] = median_filter(values[start:stop], size=frames, mode="nearest")
+    return out
+
+
+def smooth_formant_tracks(f0, freqs, bws):
+    """{"f1_smooth", "f2_smooth", "f3_smooth", "delta_f_smooth"}: display-ready, NaN where untrusted."""
+    trusted = trusted_formant_frames(f0, freqs, bws)
+    out = {f"f{k + 1}_smooth": smooth_track(freqs[:, k], trusted) for k in range(3)}
+    out["delta_f_smooth"] = smooth_track(delta_f(*np.asarray(freqs, dtype=float).T), trusted)
+    return out
+
+
+# --- CONFIDENCE ---
+
+# How far each reading of a take can be believed: "high" | "medium" | "low" | "none", with a reason.
+# coach.take_quality stays the gate (trusted or not); this grades the readings for the report and UI.
+# A metric takes the lowest level any rule gives it.
+CONFIDENCE_LEVELS = ("none", "low", "medium", "high")
+# Voice-band SNR (dB) under which a metric drops to none / low / medium.
+SNR_STEPS = {
+    "pitch": (5, 10, 15),        # pitch holds at 8 dB SNR on synthetic voice (test_pitch); own judgement
+    "pitch_floor": (5, 10, 15),
+    "pitch_range": (5, 10, 15),
+    "contour": (5, 10, 15),
+    "singing": (5, 10, 15),
+    "delta_f": (5, 10, 20),      # coach.FORMANT_MIN_SNR = 10 (own judgement)
+    "h1h2": (5, 20, MIN_RELIABLE_SNR),   # coach.CPP_MIN_SNR = 20: at 16 dB CPP reads 4-5 dB low (audit)
+    "cpp": (5, 20, MIN_RELIABLE_SNR),
+    "ring": (5, 15, 25),         # coach.RING_MIN_SNR = 15 (own judgement)
+    "register": (5, 15, MIN_RELIABLE_SNR),   # built on H1*-H2*; coach distrusts it under 15 dB
+}
+# Seconds of usable frames under which a metric drops to none / low / medium (own judgement: about a
+# word, a phrase and a few sentences of voiced speech; the real takes hold 1.7-23 s of voice).
+SECONDS_STEPS = {
+    "pitch": (0.2, 1.0, 3.0),
+    "pitch_floor": (1.0, 3.0, 8.0),
+    "pitch_range": (1.0, 3.0, 8.0),
+    "contour": (1.0, 3.0, 8.0),
+    "delta_f": (0.1, 1.0, 3.0),  # trusted formant frames; 10 frames is the least analyze_take reports
+    "h1h2": (0.2, 1.0, 3.0),
+    "cpp": (0.2, 1.0, 3.0),
+    "ring": (0.2, 1.0, 3.0),
+    "register": (0.5, 2.0, 5.0),
+    "singing": (0.6, 1.2, 3.0),  # one held note (MIN_SUNG_SECONDS) .. two of them .. a phrase
+}
+# Frame spread (interquartile range) over which a reading drops one level: the frames disagree.
+# Own measurement on the 10 real speech takes: ΔF IQR (delta_f_iqr) 6-15 % of ΔF, H1*-H2* IQR
+# 4-9 dB, CPP IQR 3-6 dB; these limits sit above all of them.
+SPREAD_LIMITS = {"delta_f": 0.25, "h1h2": 14.0, "cpp": 7.0}   # ΔF relative, others dB
+FORMANT_CONFIDENCE_MAX_F0 = 250   # Hz median f0; F1 snaps to H1 above this (coach.FORMANT_MAX_F0, audit)
+CLIP_MEDIUM_EVENTS, CLIP_LOW_EVENTS = 5, 30    # coach.CLIP_FAIR_EVENTS / CLIP_POOR_EVENTS
+GHOST_MEDIUM, GHOST_LOW = 0.15, 0.40           # coach.MAX_GHOST_FRACTION / POOR_GHOST_FRACTION
+POOR_SNR_DB = 10                               # dB; coach.POOR_SNR, for the wording only
+PITCHY = ("pitch", "pitch_floor", "pitch_range", "contour", "singing")
+QUALITY = ("h1h2", "cpp", "ring", "register")
+
+
+def _level_index(level):
+    return CONFIDENCE_LEVELS.index(level)
+
+
+def _steps(value, steps, what):
+    """(level, reason) for a value against (none, low, medium) thresholds, higher is better. `what` is
+    the reason, or {level: reason}."""
+    if value is None or np.isnan(value):
+        return None
+    for level, limit in zip(CONFIDENCE_LEVELS, steps):
+        if value < limit:
+            return level, what[level] if isinstance(what, dict) else what
+    return None
+
+
+SECONDS_REASONS = {"none": "too little voiced sound to judge", "low": "only a little voiced sound",
+                   "medium": "a longer take would make this more certain"}
+FORMANT_REASONS = {"none": "too few clear formant readings to judge resonance",
+                   "low": "only a few clear formant readings",
+                   "medium": "a longer take would make this more certain"}
+
+
+def grade(rules):
+    """The lowest (level, reason) of a list of rule results (None = no objection)."""
+    worst = ("high", "clear recording with plenty of voice")
+    for rule in rules:
+        if rule is not None and _level_index(rule[0]) < _level_index(worst[0]):
+            worst = rule
+    return worst
+
+
+def _iqr(values):
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    return float(np.subtract(*np.percentile(values, [75, 25]))) if len(values) >= 10 else np.nan
+
+
+def take_confidence(summary, tracks, mode="speak"):
+    """({metric: level}, {metric: reason}) for an analyze_take result's readings. analyze_take stores
+    them as result["confidence"] = {metric: level, ..., "reasons": {metric: reason}}."""
+    f0 = np.asarray(tracks["f0"], dtype=float)
+    times = np.asarray(tracks["times"], dtype=float)
+    step = float(np.median(np.diff(times))) if len(times) > 1 else 0.01
+    voiced_s = float((~np.isnan(f0)).sum() * step)
+    snr = summary.get("snr")
+    snr = np.nan if snr is None else float(snr)
+    pitch = summary.get("pitch")
+    clips = summary.get("clip_events") or 0
+    ghosts = summary.get("ghost_fraction") or 0.0
+    formant_s = float((~np.isnan(tracks.get("delta_f_smooth", tracks["delta_f"]))).sum() * step)
+    levels, reasons = {}, {}
+    for metric in SNR_STEPS:
+        formants = metric == "delta_f"
+        rules = [_steps(snr, SNR_STEPS[metric], "background noise is close to the voice level"
+                        if snr < POOR_SNR_DB else "background noise makes this reading less precise"),
+                 _steps(formant_s if formants else voiced_s, SECONDS_STEPS[metric],
+                        FORMANT_REASONS if formants else SECONDS_REASONS)]
+        if metric in PITCHY and ghosts >= GHOST_LOW:
+            rules.append(("low", "much of the pitch signal looked like noise"))
+        elif metric in PITCHY and ghosts > GHOST_MEDIUM:
+            rules.append(("medium", "some pitch readings looked like noise"))
+        if metric in QUALITY and clips >= CLIP_LOW_EVENTS:
+            rules.append(("low", "the recording clipped"))
+        elif metric in QUALITY and clips >= CLIP_MEDIUM_EVENTS:
+            rules.append(("medium", "a few loud peaks clipped"))
+        if metric == "delta_f":          # first, so their reason wins over "too few readings"
+            if summary.get("delta_f") is None:
+                rules.insert(0, ("none", summary.get("resonance_note") or "not enough clear formant data"))
+            if pitch is not None and pitch > FORMANT_CONFIDENCE_MAX_F0:
+                rules.insert(0, ("none", "pitch is too high to measure resonance (above about 250 Hz)"))
+        if metric == "h1h2" and pitch is not None and pitch > F1_RELIABLE_MAX_F0:
+            rules.append(("low", "weight is hard to measure at this pitch (above about 230 Hz)"))
+        if metric in SPREAD_LIMITS:
+            if metric == "delta_f":       # ΔF spread over the steady vowel frames behind the reading
+                spread = (summary.get("delta_f_iqr") or np.nan) / (summary.get("delta_f") or np.nan)
+            else:
+                spread = _iqr(tracks.get(metric, []))
+            if spread > SPREAD_LIMITS[metric]:
+                rules.append(("medium", "the readings varied a lot through the take"))
+        if metric in ("h1h2", "cpp", "ring") and summary.get(metric) is not None and np.isnan(summary[metric]):
+            rules.append(("none", "not measured"))
+        if metric == "singing":
+            singing = summary.get("singing")
+            if mode != "sing":
+                rules.append(("none", "singing is only judged in sing mode"))
+            elif not singing:
+                rules.append(("none", "no held notes"))
+            elif not singing.get("tuning_judged", True):
+                rules.append(("low", "too few held notes to judge tuning"))
+        # For "register" this is the recording's part; take_register adds the model's.
+        levels[metric], reasons[metric] = grade(rules)
+    return levels, reasons
+
+
 # --- TAKE ANALYSIS ---
 
 def _clean_for_formants(audio, sample_rate, voiced, lines=None):
@@ -792,14 +973,15 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE, mode="speak", ceiling=None):
     snr, snr_full = snr_pair(frame_levels(audio, sample_rate, times),
                              frame_levels(audio, sample_rate, times, band=True), voiced)
     noise = dict(noise, lines=[[float(hz), float(db)] for hz, db in noise["lines"]])
-    return {
+    result = {
         "analysis_version": ANALYSIS_VERSION,
+        "mode": mode,
         "sample_rate": sample_rate,
         "noise": noise,
         "snr": snr,              # voice band: what the measurements see
         "snr_full": snr_full,    # full band: includes hiss above the voice band
         "clip_events": clip_events(audio),
-        "singing": singing_stats(times, f0),
+        "singing": singing_stats(times, f0) if mode == "sing" else None,   # speech is never "singing"
         "pitch": median_f0,
         "pitch_floor": float(np.percentile(f0[voiced], 10)),   # low floor reads as male
         "voiced_fraction": pitch["voiced_fraction"],
@@ -836,8 +1018,12 @@ def analyze_take(audio, sample_rate=SAMPLE_RATE, mode="speak", ceiling=None):
             "steady": steady,
             "h1h2": h1h2_track,
             "cpp": cpp_track,
+            **smooth_formant_tracks(f0, freqs, bws),
         },
     }
+    levels, reasons = take_confidence(result, result["tracks"], mode)
+    result["confidence"] = dict(levels, reasons=reasons)
+    return result
 
 
 def choose_profile_ceiling(results):
@@ -892,6 +1078,12 @@ MIN_SUNG_SECONDS = 0.6        # a take has singing if it holds a steady note thi
 SUNG_SPREAD_CENTS = 100       # ... whose pitch std is under this
 SUNG_MIN_HZ = 75              # ... and above desk rumble (judgment, unverified)
 INTERVAL_GAP_SECONDS = 0.5    # notes further apart than this don't form an interval
+# Tuning centre, interval error and drift need this much held material. Own measurement on the 10 real
+# speech takes: their longest "note" is 0.29-0.61 s, and only one take holds one note of 0.6 s or more
+# (0.61 s on 09-21-26, the stretch that read as "1 held note, 3 cents below A440"); a sung scale or
+# phrase has several held notes or one long one. 1.5 s is about 2.5 x the longest speech "note".
+TUNING_MIN_HELD_NOTES = 2
+TUNING_LONG_NOTE_SECONDS = 1.5
 
 
 def hz_to_midi(f0):
@@ -1081,12 +1273,14 @@ def singing_stats(times, f0):
     notes = segment_notes(f0, frame_rate)
     if not notes or not _has_singing(f0, notes, frame_rate):
         return None
-    midis, held = [], []
+    midis, held, longest = [], [], 0.0
     for a, b in notes:
         midi = hz_to_midi(f0[a:b])
         midis.append(float(np.nanmedian(midi)))
         if (b - a) / frame_rate >= HELD_NOTE_SECONDS:
             held.append(vibrato_stats(100 * midi, frame_rate))
+            longest = max(longest, (b - a) / frame_rate)
+    enough = len(held) >= TUNING_MIN_HELD_NOTES or longest >= TUNING_LONG_NOTE_SECONDS
 
     def median_of(key):
         values = [h[key] for h in held if h[key] is not None and not np.isnan(h[key])]
@@ -1109,11 +1303,12 @@ def singing_stats(times, f0):
         "vibrato_rate": median_of("rate"),
         "vibrato_extent": median_of("extent"),
         "vibrato_regularity": median_of("regularity"),
-        "drift": median_of("drift"),
-        "tonic_offset": tonic,
-        "tuning_spread": spread,
-        "tuning_offset": spread,           # old key, now the spread about the singer's own tonic
-        "interval_error": float(np.median(errors)) if errors else None,
+        "drift": median_of("drift") if enough else None,
+        "tonic_offset": tonic if enough else None,
+        "tuning_spread": spread if enough else None,
+        "tuning_offset": spread if enough else None,   # old key, now the spread about the singer's own tonic
+        "interval_error": float(np.median(errors)) if errors and enough else None,
+        "tuning_judged": bool(enough),     # False: too little held singing for tuning, steps or drift
     }
 
 

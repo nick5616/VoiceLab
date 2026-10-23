@@ -92,10 +92,10 @@ def on_mic(voice, level=-42, seed=0):
     return mic_noise.at_level(voice, level) + mic_noise.mic_noise(len(voice), seed)
 
 
-def sing(contour, lead=0.0, mic=True):
+def sing(contour, lead=0.0, mic=True, mode="speak"):
     voice = synth_vowel(contour, MALE_FORMANTS)
     audio = np.concatenate([np.zeros(int(lead * SR)), voice])
-    return analysis.analyze_take(on_mic(audio) if mic else audio)
+    return analysis.analyze_take(on_mic(audio) if mic else audio, mode=mode)
 
 
 def score(result, targets):
@@ -209,7 +209,7 @@ def test_speech_like_contour_gets_no_singing_stats():
 
 def test_tuning_is_judged_from_the_singers_own_tonic():
     midis = np.array([60, 62, 64, 65, 67, 65, 64, 62, 60]) + 0.4        # every note 40 cents sharp
-    stats = sing(melody_contour(midis, 0.7))["singing"]
+    stats = sing(melody_contour(midis, 0.7), mode="sing")["singing"]
     assert stats is not None and stats["notes"] == 9
     assert abs(stats["tonic_offset"] - 40) < 10 or abs(stats["tonic_offset"] + 60) < 10
     assert stats["tuning_spread"] < 10 and stats["interval_error"] < 10

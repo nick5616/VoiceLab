@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
+import report
 from profile_store import summarize
 
 MIN_TREND_TAKES = 5            # fewer takes than this say nothing about a trend (spec 07)
@@ -57,6 +58,41 @@ SERIES = {
     "cq": ("Contact quotient (EGG)", "", "take", _get("cq"), None),
 }
 SING_ONLY = {"register_breaks"}        # series that only mean something when singing
+
+
+def overall_of(entry):
+    """The report's overall placement of a stored take, 0 (fully masculine) - 100 (fully feminine), from
+    its summary: pitch and resonance are both needed (report.MAJOR), the floor and intonation join in
+    with their report.WEIGHTS. None for sung takes or without both. Unlike the report it can't see
+    which readings the take trusted, so poor takes (left out by default) can mislead."""
+    if entry.get("mode") == "sing" or entry.get("exercise"):
+        return None
+    scores = {key: report.score(key, entry.get(key)) for key, weight in report.WEIGHTS.items() if weight}
+    scores = {key: s for key, s in scores.items() if s is not None}
+    if any(key not in scores for key in report.MAJOR):
+        return None
+    total = sum(report.WEIGHTS[key] for key in scores)
+    point = sum(report.WEIGHTS[key] * s for key, s in scores.items()) / total
+    return 100 * (point + 1) / 2
+
+
+SERIES["pitch_floor"] = ("Pitch floor", "Hz", "take", _get("pitch_floor"), "pitch_floor")
+SERIES["overall"] = ("Overall placement", "%", "take", overall_of, None)
+# --- REPORT DIMENSIONS (spec 06) ---
+OVERALL_KEY = "overall"
+REPORT_KEYS = [OVERALL_KEY, "pitch", "delta_f", "pitch_range", "pitch_floor", "h1h2", "cpp"]   # one chart
+#                 each; pitch and resonance lead, as on the take card (they carry the placement)
+OVERALL_ZONES = {"name": "Overall placement", "unit": "%", "scale": (0, 100), "log": False,
+                 "zones": [{"id": "masculine", "label": report.ZONE_LABELS["masculine"], "lo": 0.0,
+                            "hi": 100 * report.OVERALL_EDGES[0]},
+                           {"id": "overlap", "label": report.ZONE_LABELS["overlap"],
+                            "lo": 100 * report.OVERALL_EDGES[0], "hi": 100 * report.OVERALL_EDGES[1]},
+                           {"id": "feminine", "label": report.ZONE_LABELS["feminine"],
+                            "lo": 100 * report.OVERALL_EDGES[1], "hi": 100.0}]}
+OVERALL_EXPLANATION = ("Where pitch and resonance together place each take, from typically masculine "
+                       "to typically feminine; the same placement as the take report's overall bar.")
+MINI_WEEKS = 8                  # weeks the dashboard's sparklines cover
+MINI_KEYS = ("pitch", "delta_f", OVERALL_KEY)
 
 
 def collect_entries(history, folder_takes=()):
@@ -272,3 +308,88 @@ def view(entries, profile, mode=None, days=None, include_imported=False, include
         charts[key] = chart(key, times, values, *reference(profile, key)) if len(values) else None
     return {"tasks": tasks, "task": task, "charts": charts, "empty": not any(charts.values()),
             "left_out": left_out_text(entries, task, include_poor)}
+
+
+# --- THE PROGRESS SCREEN AND THE DASHBOARD'S SPARKLINES (spec 06) ---
+
+def zones_of(key):
+    """The zones a dimension's chart shades (report.ZONES, or the overall scale), or None."""
+    return OVERALL_ZONES if key == OVERALL_KEY else report.zones(key)
+
+
+def explanation(key):
+    return OVERALL_EXPLANATION if key == OVERALL_KEY else report.EXPLANATIONS.get(key, "")
+
+
+def zone_chart(key, times, values, baseline=None, target=None):
+    """chart() for a report dimension, on its zones: adds "zones", "log", "explanation", "latest_zone"
+    and a y_range that always shows the whole zone scale (so the bands sit still from week to week),
+    widened only when a take falls outside it."""
+    out = chart(key, times, values, baseline, target)
+    spec = zones_of(key)
+    lo, hi = spec["scale"]
+    span = [*values, *([baseline] if baseline is not None else []), *(target or [])]
+    out.update(zones=spec, log=spec["log"], explanation=explanation(key), name=report.NAMES.get(key, out["name"]),
+               y_range=(min(lo, min(span)), max(hi, max(span))),
+               latest_zone=report.zone_of(key, out["medians"][-1]) if key != OVERALL_KEY else
+               _overall_zone(out["medians"][-1]))
+    if key == OVERALL_KEY:                  # a placement is said as its zone, not as a percentage
+        first, _, rest = out["change"].partition(" · ")
+        week = first.rsplit(" ", 1)[0]
+        out["change"] = f"{week}: {report.ZONE_LABELS[out['latest_zone']]}" + (f" · {rest}" if rest else "")
+    return out
+
+
+def _overall_zone(value):
+    edges = [100 * e for e in report.OVERALL_EDGES]
+    return "masculine" if value < edges[0] else "feminine" if value > edges[1] else "overlap"
+
+
+def report_view(entries, profile, task_choice=None, include_poor=False, days=None):
+    """Everything the Progress screen shows: {"tasks", "task", "charts": [(key, zone chart or None)] in
+    REPORT_KEYS order (speak takes, like with like), "more": {key: chart} of every other series with
+    data, "empty", "left_out"}. Poor takes are left out unless include_poor; imported files always."""
+    tasks = task_counts(entries, include_poor)
+    task = pick_task(tasks, task_choice)
+    charts = []
+    for key in REPORT_KEYS:
+        times, values = select(entries, key, mode="speak", days=days, include_poor=include_poor, task=task)
+        charts.append((key, zone_chart(key, times, values, *reference(profile, key)) if len(values) else None))
+    more = {}
+    for key in SERIES:
+        if key in REPORT_KEYS:
+            continue
+        times, values = select(entries, key, days=days, include_poor=include_poor, task=task)
+        if len(values):
+            more[key] = chart(key, times, values, *reference(profile, key))
+    return {"tasks": tasks, "task": task, "charts": charts, "more": more,
+            "empty": not any(c for _, c in charts) and not more,
+            "left_out": left_out_text(entries, task, include_poor)}
+
+
+def mini(entries, profile, weeks=MINI_WEEKS, now=None):
+    """The dashboard's sparklines: {"task", "weeks", "series": [{"key", "name", "values" (weekly
+    median per week, oldest first, None for weeks without takes), "latest" (text), "zone", "target",
+    "count"}]} over the last `weeks` weeks, for the most common task, good and fair speak takes."""
+    now = now or datetime.now()
+    task = pick_task(task_counts(entries))
+    this_week = week_start(now.timestamp())
+    starts = [this_week - WEEK * i for i in range(weeks - 1, -1, -1)]
+    series = []
+    for key in MINI_KEYS:
+        times, values = select(entries, key, mode="speak", task=task, days=7 * weeks, now=now)
+        groups = weekly_groups(times, values)
+        medians = [float(np.median(groups[s])) if s in groups else None for s in starts]
+        known = [m for m in medians if m is not None]
+        latest = None
+        if known:
+            last = known[-1]
+            latest = f"{last:.0f}{'' if SERIES[key][1] == '%' else ' '}{SERIES[key][1]}"
+            if key == OVERALL_KEY:
+                latest = report.ZONE_LABELS[_overall_zone(last)]
+        zone = (None if not known else _overall_zone(known[-1]) if key == OVERALL_KEY
+                else report.zone_of(key, known[-1]))
+        series.append({"key": key, "name": "Resonance" if key == "delta_f" else SERIES[key][0],
+                       "values": medians, "latest": latest, "zone": zone,
+                       "target": reference(profile, key)[1], "count": len(values)})
+    return {"task": task, "weeks": weeks, "series": series}

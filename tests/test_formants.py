@@ -78,7 +78,7 @@ def test_take_reports_spread_and_higher_formants():
     assert result["delta_f_iqr"] >= 0 and result["vowel_frames"] >= analysis.NUCLEUS_MIN_FRAMES
     assert abs(result["f3"] / 2550 - 1) < 0.15 and 3000 < result["f4"] < 4000
     assert result["vtl_apparent_cm"] == result["vtl"] == analysis.vocal_tract_length_cm(result["delta_f"])
-    assert result["analysis_version"] == analysis.ANALYSIS_VERSION == 9
+    assert result["analysis_version"] == analysis.ANALYSIS_VERSION == 10
 
 
 def test_fixed_ceiling_is_used_and_default_is_on_the_grid():

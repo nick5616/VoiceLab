@@ -209,3 +209,16 @@ def test_is_fry_handles_short_arrays():
         assert register.is_fry(np.full(n, 110.0), 100).sum() == 0
         assert register.is_fry(np.full(n, np.nan), 100).shape == (n,)
     assert register.is_fry(np.array([55.0, 56.0, 57.0, 55.0]), 100).all()
+
+
+def test_f1_the_take_marked_unreliable_is_withheld_from_the_features():
+    tracks = {"f1": np.array([500.0, 210.0]), "f2": np.array([1500.0, 1500.0]), "f3": np.array([2500.0, 2500.0]),
+              "f1_ok": np.array([1.0, 0.0])}
+    assert register.frame_formants(tracks, 0) == [500.0, 1500.0, 2500.0]
+    assert np.isnan(register.frame_formants(tracks, 1)[0])
+    old = {k: v for k, v in tracks.items() if k != "f1_ok"}                  # a take from before the mask existed
+    assert register.frame_formants(old, 1)[0] == 210.0
+
+
+def test_f1_limit_is_the_analysis_one():
+    assert register.HIGH_F0 == analysis.F1_RELIABLE_MAX_F0

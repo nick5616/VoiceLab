@@ -22,7 +22,7 @@ FORMANT_SERIES = ("f1", "f2", "f3", "pitch")    # theme series colours for F1-F4
 
 PLANE_TRAIL_SECONDS = 3
 PLANE_TRAIL_GAP_SECONDS = 0.5     # unmeasurable for this long starts a fresh trail
-PLANE_PITCH_RANGE = (75, 400)     # Hz; resonance isn't measured above ~350 Hz anyway
+PLANE_PITCH_RANGE = (75, 400)     # Hz; resonance isn't judged above ~230 Hz anyway (analysis.F1_RELIABLE_MAX_F0)
 PLANE_RESONANCE_RANGE = (900, 1350)
 # Rough guides from typical adult speaking F0 and vocal tract lengths
 # (about 16-18 cm vs 14-15.8 cm). Real voices vary and overlap widely, so these

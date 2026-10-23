@@ -355,14 +355,16 @@ def test_live_register_follows_open_quotient(make_window):
     window.core.live.text_interval = 0
     card = cards(window)["register"]
     assert "(estimate)" in window.core.live.label("register")
+    # Sung register: uncalibrated speech uses the speech defaults (spec 10-01), which call this
+    # synthetic light voice at 140 Hz chest.
+    window.core.set_mode("sing")
+    play(window, VOICE[:HOP * 2])
+    assert "register" in window.dashboard.live.cards.visible_keys()
     play(window, np.concatenate([silence(1.0), CHEST_VOICE[:int(1.5 * SR)]]))
     assert card.bar.value < 35 and "chest" in card.text
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.5 * SR)]]))
     assert card.bar.value > 65 and "head" in card.text
     assert [(z["id"], z["lo"], z["hi"]) for z in card.bar.zones][1] == ("mix", 35.0, 65.0)   # the mix zone
-    window.core.set_mode("sing")
-    play(window, VOICE[:HOP * 2])
-    assert "register" in window.dashboard.live.cards.visible_keys()
 
 
 def test_recording_has_a_register_row_and_old_takes_still_load(make_window, tmp_path):
@@ -378,6 +380,9 @@ def test_recording_has_a_register_row_and_old_takes_still_load(make_window, tmp_
     assert "register" in first["tracks"]
     assert '"register"' in (folder / first["file"]).with_suffix(".json").read_text()
 
+    # Sung: uncalibrated speech is scored with the speech defaults (spec 10-01), which call this
+    # synthetic light voice at 140 Hz chest; the sung register still reads it as head.
+    window.core.set_mode("sing")
     take = record_take(window, np.concatenate([silence(0.3), HEAD_VOICE[:int(2 * SR)], silence(0.5)]))
     reg = take["register"]
     assert reg["head_share"] > 0.7 and not reg["calibrated"]

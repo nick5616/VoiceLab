@@ -15,13 +15,14 @@ Thresholds without a literature source come from the phase 9 audits of the user'
 import numpy as np
 
 import profile_store
+from analysis import F1_RELIABLE_MAX_F0
 
 # --- TAKE QUALITY ---
 
 CPP_MIN_SNR = 20            # dB voice band; at 16 dB CPP reads 4-5 dB low (audit)
 RING_MIN_SNR = 15           # dB voice band; own judgement (ring is a band-energy ratio)
 FORMANT_MIN_SNR = 10        # dB voice band; own judgement
-FORMANT_MAX_F0 = 250        # Hz; F1 snaps to H1 above this (audit)
+FORMANT_MAX_F0 = F1_RELIABLE_MAX_F0   # Hz; F1 snaps to H1 above this, same limit as analysis
 GOOD_SNR = 20               # dB voice band for a "good" take
 POOR_SNR = 10               # dB; below the worst real take (11.5 dB)
 QUIET_DBFS = -40            # voiced level; the user's takes sit at -38 to -47
@@ -124,7 +125,8 @@ def _trust(summary, snr, voiced, ghosts, poor):
         distrust(["pitch_floor", "pitch_range", "contour"], "not enough voiced sound")
     f0 = _num(summary.get("pitch"))
     if f0 is not None and f0 > FORMANT_MAX_F0:
-        distrust(["delta_f"], "brightness can't be measured reliably above about 250 Hz")
+        distrust(["delta_f"], "brightness can't be measured reliably above about "
+                              f"{FORMANT_MAX_F0:.0f} Hz")
     if snr is not None:
         if snr < CPP_MIN_SNR:
             distrust(["h1h2", "cpp"], "too much background noise to judge weight and clarity")
@@ -278,6 +280,12 @@ RULES = [
      lambda c: "You came in a little ahead of the guide. Try waiting for the beat and letting the "
                "note start gently."),
 ]
+# Rules that only make sense in one mode; the rest apply in both. Resonance and pitch targets
+# and the sentence-ending advice are speech targets; tuning and timing are exercise results.
+RULE_MODES = {"brighten_resonance": "speak", "raise_pitch": "speak", "one_thing_at_a_time": "speak",
+              "low_pitch_floor": "speak", "flat_intonation": "speak",
+              "tense_high_notes": "sing", "sing_flat": "sing", "sing_sharp": "sing",
+              "sing_late": "sing", "sing_early": "sing"}
 # What to say when a target exists but the take cannot support judging it.
 METRIC_NAMES = {"pitch": "pitch", "delta_f": "brightness (resonance)", "h1h2": "weight",
                 "cpp": "clarity", "ring": "ring", "pitch_range": "pitch range", "register": "register"}
@@ -295,7 +303,7 @@ def advice(summary, targets, baseline=None, mode="speak", quality=None):
                  "text": f"This take is hard to judge: {reason}. A quick re-record will give "
                          "you much more useful feedback."}]
     for key, _, severity, applies, text in sorted(RULES, key=lambda r: r[1]):
-        if applies(context):
+        if RULE_MODES.get(key, mode) == mode and applies(context):
             messages.append({"key": key, "text": text(context), "severity": severity})
     untrusted = [METRIC_NAMES[m] for m in METRIC_NAMES
                  if (targets or {}).get(m) is not None and not quality["trust"].get(m, True)]

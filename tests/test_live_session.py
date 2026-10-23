@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
+import coach  # noqa: E402
 import display  # noqa: E402
 import live_session  # noqa: E402
 import mic_noise  # noqa: E402
@@ -185,9 +186,9 @@ def test_too_high_for_formants_gives_a_reason(session):
     assert snapshot["plane"]["delta_f"] is None and snapshot["plane"]["f0"] is not None
 
 
-def test_light_heavy_reading_is_cautioned_above_250_hz(session):
+def test_light_heavy_reading_is_cautioned_at_high_pitch(session):
     snapshot = feed_frames(session, [frame(f0=300)] * 20)
-    assert "rough above 250 Hz" in snapshot["metrics"]["h1h2"]["title"]
+    assert f"rough above {coach.FORMANT_MAX_F0:.0f} Hz" in snapshot["metrics"]["h1h2"]["title"]
     snapshot = feed_frames(session, [frame(f0=140)] * 20)
     assert "rough" not in snapshot["metrics"]["h1h2"]["title"]
 

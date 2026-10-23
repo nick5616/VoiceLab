@@ -2,8 +2,9 @@
 editor from these. No UI toolkit."""
 import numpy as np
 
+import report
 from analysis import hz_to_note
-from display import METRIC_DEFS, format_value
+from display import METRIC_DEFS, MODE_SCALES, format_value
 from profile_store import TARGET_KEYS, TARGET_PRESETS, target_from_value
 
 # Targets editor: key -> (spinbox min, max, decimals, unit)
@@ -126,3 +127,28 @@ def save(profile, ranges):
     """Save the targets: {key: (low, high) or None (no target)}."""
     for key, rng in ranges.items():
         profile.set_target(key, tuple(rng) if rng is not None else None)
+
+
+# --- THE TARGETS PANEL (spec 06) ---
+PLAIN_NAMES = {"pitch": "Pitch", "delta_f": "Resonance", "h1h2": "Vocal weight", "cpp": "Clarity",
+               "ring": "Ring", "pitch_range": "Intonation", "register": "Register"}
+END_LABELS = {"ring": ("Muffled", "Brilliant"), "register": ("Chest", "Head")}   # no descenders: the bar
+#                                                                                   clips them (spec 04)
+GOAL_TEXT = {"feminine": "feminine", "androgynous": "androgynous", "masculine": "masculine", None: "just exploring"}
+
+
+def bar_spec(profile, key):
+    """The bar a target is shown on, in the shape of report.ZONES: the report's zones for the speak
+    dimensions (so you see where the target sits among them), else the metric's plain scale."""
+    spec = report.zones(key)
+    if spec and not (key == "pitch" and profile.mode == "sing"):
+        return dict(spec, ends=None)
+    lo, hi = (MODE_SCALES.get(key, {}).get(profile.mode) or METRIC_DEFS[key][1:3])
+    return {"name": label(key), "unit": TARGET_EDIT[key][3], "scale": (lo, hi), "log": key == "pitch",
+            "zones": [], "ends": END_LABELS.get(key, METRIC_DEFS[key][3:5])}
+
+
+def goal_text(profile):
+    """The voice goal, as the targets panel states it."""
+    return (f"Your voice goal: {GOAL_TEXT.get(profile.voice_goal, 'just exploring')}. It shapes the tips in your "
+            "reports; change it in Settings.")
