@@ -8,8 +8,11 @@ JSON-serialisable.
 
 The zones describe tendencies of cisgender speakers' voices and how listeners hear them; they
 overlap a lot, and VoiceLab's home-mic measurements are approximate. Sources sit next to the
-numbers. Two own measurements calibrate them in VoiceLab's units (scripts and outputs in
-C:/tmp/phase10-work/02-report/):
+numbers. Three own measurements calibrate them in VoiceLab's units (scripts and outputs in
+C:/tmp/phase10-work/02-report/ and 07-zones/):
+- "LibriSpeech": tools/calibrate_zones.py on the dev-clean and test-clean sets (openslr.org/12,
+  CC BY 4.0): 40 men and 40 women reading audiobooks aloud, about 55 s each, measured as 2-3 takes
+  with a profile formant ceiling, as the app does. The running-speech edges come from it.
 - "H95": the published Hillenbrand et al. (1995) data, 45 men and 48 women saying 12 hVd words;
   hand-measured values from its vowdata.dat, and analysis.analyze_take run on its recordings.
 - "ARCTIC": analyze_take on 10 read sentences each from the CMU ARCTIC speakers (5 men: bdl, rms,
@@ -39,109 +42,151 @@ def _zones(scale, edges, feminine_high=True):
             for i, zone in enumerate(order)]
 
 
+# LibriSpeech calibration (tools/calibrate_zones.py; outputs in C:/tmp/phase10-work/07-zones/): 40
+# men and 40 women from dev-clean + test-clean, ~55 s each as 2-3 takes, profile formant ceiling,
+# per-speaker medians. Edge rule where the groups differ ("decile rule"): men's 90th and women's
+# 10th percentile, in whichever order they fall, so 90% of each group lands in its own zone and the
+# overlap holds values that neither group, or both, commonly reach; widened, where narrower, to the
+# 90th-percentile take-to-take spread of one speaker (a steady voice shouldn't jump across the
+# overlap between takes); rounded to 5 Hz. Dimensions without a group difference keep an overlap
+# over nearly everyone. Limits: SPEAKERS.TXT gives sex, not gender identity or how a voice is heard;
+# no speaker is known to be trans; it is audiobook reading, livelier than talk, on good mics.
 ZONES = {
-    # Speaking f0. Below 145 Hz typically masculine, 145-180 Hz overlap, above 180 typically feminine.
-    # 145-165 Hz is the classic "gender-ambiguous range" (Oates & Dacakis 1983, via Dacakis, PEVOC 7),
-    # which Dacakis' later listener studies found "far wider than originally believed"; listeners
-    # misjudged men's voices shifted to 165 Hz and up (Gelfer & Bennett 2013, J Voice 27(5)); trans
-    # women heard as men spoke at up to ~181 Hz and those heard as women from ~164 Hz (Gelfer &
-    # Schofield 2000, J Voice 14(1); figures via secondary sources, the abstract only says the
-    # female-perceived group was higher). H95 hand-measured: men 106-154 Hz (10th-90th pct of
-    # talkers, median 131), women 195-248 Hz (median 220); VoiceLab on H95 agrees (medians 132 and
-    # 218 Hz). ARCTIC running speech: men 97-126 Hz, women 184-187 Hz.
+    # Speaking f0. LibriSpeech: men median 122 Hz (IQR 107-133, 10th-90th 100-144), women 194 Hz
+    # (IQR 179-207, 10th-90th 169-221); a woman is the likelier above ~159 Hz (equal likelihood of
+    # normal fits). Decile rule 144 / 169 -> 145 / 170 Hz (one speaker's take-to-take spread, 90th
+    # pct 28 Hz ~ 3 st, about equals that width): men 90/5/5% masculine/overlap/feminine, women
+    # 0/12/88%; the old 180 Hz edge left 28% of the women in the overlap. Literature agrees:
+    # 145-165 Hz is the classic "gender-ambiguous range" (Oates & Dacakis 1983, via Dacakis, PEVOC
+    # 7), which Dacakis' later listener studies found "far wider than originally believed";
+    # listeners misjudged men's voices shifted to 165 Hz and up (Gelfer & Bennett 2013, J Voice
+    # 27(5)); trans women heard as women spoke from ~164 Hz, while some heard as men spoke at up to
+    # ~181 Hz (Gelfer & Schofield 2000, J Voice 14(1); figures via secondary sources), where
+    # resonance decides, as the overall placement does. H95 hand-measured: men median 131 Hz, women
+    # 220 Hz (single words); ARCTIC running speech: men 97-126 Hz, women 184-187 Hz. Home-mic noise
+    # moved it under 0.5 st (LibriSpeech, 40 speakers).
     "pitch": {"name": "Pitch", "unit": "Hz", "scale": SPEAK_PITCH_SCALE, "log": True,
-              "zones": _zones(SPEAK_PITCH_SCALE, (145, 180)),
-              "source": "Oates & Dacakis 1983 (145-165 Hz ambiguous range, via Dacakis PEVOC 7); "
-                        "Gelfer & Schofield 2000; Gelfer & Bennett 2013; Hillenbrand et al. 1995 "
-                        "data (own computation: men median 131 Hz, women 220 Hz)",
-              "note": "The overlap is wide: at 145-180 Hz listeners lean on resonance to decide "
+              "zones": _zones(SPEAK_PITCH_SCALE, (145, 170)),
+              "source": "Own measurement with VoiceLab on LibriSpeech read speech, 40 men and 40 "
+                        "women (medians 122 and 194 Hz; edges = men's 90th and women's 10th "
+                        "percentile); Oates & Dacakis 1983 (145-165 Hz ambiguous range, via Dacakis "
+                        "PEVOC 7); Gelfer & Schofield 2000; Gelfer & Bennett 2013; Hillenbrand et "
+                        "al. 1995 data",
+              "note": "The overlap is wide: at 145-170 Hz listeners lean on resonance to decide "
                       "(Gelfer & Bennett 2013), and shifting pitch alone rarely changes how a "
                       "voice is heard (Hillenbrand & Clark 2009)."},
-    # The low points (10th percentile of voiced f0). No study found gives norms for them. ARCTIC
-    # running speech: men 80-107 Hz, women 158 and 168 Hz; H95 single words read higher (men
-    # median 121 Hz, women 206 Hz). Edges between the two groups; small sample. Low dips and creak
-    # are heard as a lower voice (Holmberg et al. 2010 advise avoiding vocal fry).
+    # The low points (10th percentile of voiced f0). No study found gives norms for them.
+    # LibriSpeech: men median 96 Hz (IQR 88-109, 10th-90th 83-113), women 164 Hz (IQR 148-174,
+    # 10th-90th 141-180). Decile rule 113 / 141 -> 115 / 140 Hz (take-to-take spread, 90th pct 13
+    # Hz, is narrower): men 92/5/2%, women 0/5/95%; the old 125 / 155 Hz edges (7 ARCTIC speakers)
+    # left 38% of the women in the overlap. Low dips and creak are heard as a lower voice
+    # (Holmberg et al. 2010 advise avoiding vocal fry).
     "pitch_floor": {"name": "Pitch floor", "unit": "Hz", "scale": SPEAK_PITCH_SCALE, "log": True,
-                    "zones": _zones(SPEAK_PITCH_SCALE, (125, 155)),
-                    "source": "Own measurement with VoiceLab on CMU ARCTIC read speech (5 men "
-                              "80-107 Hz, 2 women 158-168 Hz); Holmberg et al. 2010 (avoid vocal fry)",
-                    "note": "No study gives norms for the low points, our check had only 7 "
-                            "speakers, and they move with pitch, so they count only a little in "
-                            "the overall placement."},
+                    "zones": _zones(SPEAK_PITCH_SCALE, (115, 140)),
+                    "source": "Own measurement with VoiceLab on LibriSpeech read speech, 40 men and "
+                              "40 women (medians 96 and 164 Hz; edges = men's 90th and women's "
+                              "10th percentile); Holmberg et al. 2010 (avoid vocal fry)",
+                    "note": "No study gives norms for the low points, and they move with pitch, so "
+                            "they count only a little in the overall placement."},
     # 10th-90th percentile pitch spread in semitones. Listeners heard speakers with a larger
     # utterance semitone range and more upward intonation as female, though the groups' actual
     # intonation did not differ significantly (Hancock, Colton & Douglas 2014, J Voice 28(2));
-    # intonation is associated with perceived gender (Leung, Oates & Chan 2018). ARCTIC read
-    # speech found no difference either (men 5.3-7.3 st, women 4.5-5.0 st). So the edges mark
-    # "flat" and "very melodic" speech (own judgement, unverified), not a measured sex difference.
-    "pitch_range": {"name": "Intonation", "unit": "st", "scale": (0, 12), "log": False,
-                    "zones": _zones((0, 12), (4, 8)),
+    # intonation is associated with perceived gender (Leung, Oates & Chan 2018). LibriSpeech finds no
+    # production difference either, if anything the reverse: men median 8.5 st (IQR 6.7-9.7), women
+    # 7.8 st (IQR 6.2-9.2), AUC 0.40; the old 8 st edge put 65% of the men in "feminine". So the
+    # zones mark unusual speech only, with the direction from perception: above 12.5 st is more
+    # melodic than 95% of the 80 readers (pooled 95th pct 12.7 st); below 4 st is flatter than all
+    # but one (kept from before, as free talk runs flatter than reading aloud: ARCTIC sentences
+    # 4.5-7.3 st; own judgement).
+    "pitch_range": {"name": "Intonation", "unit": "st", "scale": (0, 16), "log": False,
+                    "zones": _zones((0, 16), (4, 12.5)),
                     "source": "Perceptual direction: Hancock, Colton & Douglas 2014; Leung, Oates & "
-                              "Chan 2018. Edges (4 and 8 semitones): own judgement, unverified",
+                              "Chan 2018. Edges: own measurement with VoiceLab on LibriSpeech read "
+                              "speech, 80 speakers (no sex difference; 4 st about the flattest, "
+                              "12.5 st the 95th percentile), and own judgement",
                     "note": "A cue in how listeners hear a voice more than a difference between "
-                            "groups: measured melody barely differs between women and men "
-                            "(Hancock et al. 2014; our own check). It counts only a little."},
-    # Formant dispersion over F1-F4 as analysis.delta_f measures it. ARCTIC running speech: men
-    # 917-968 Hz (median 963), women 1087 and 1162 Hz. H95 single words read ~90 Hz higher (VoiceLab
-    # on H95: men median 1058, 75th / 90th pct 1080 / 1126; women median 1212, 5th / 10th pct 1149 /
-    # 1161; hand-measured men 1013, women 1169, i.e. tract length 17.3 vs 14.8 cm). Speech edges =
-    # the word edges (1090 / 1150) moved down that 90 Hz; they also separate every ARCTIC speaker.
-    # VoiceLab reads 34-47 Hz above the hand measurements, more with a high formant ceiling
-    # (+130-170 Hz at 6250-6500 Hz). Resonance matters about as much as pitch: both are needed to
-    # change the perceived sex of a sentence (Hillenbrand & Clark 2009); formants decide in the
-    # 145-165 Hz range (Gelfer & Bennett 2013) and contribute more than earlier thought (Leung et al.
-    # 2021, JSLHR 64(7)); f0 and tract length shift judgements with no sharp threshold (Neuhaus,
-    # Scherer & Whitfield 2024, J Voice).
+                            "groups: 40 women and 40 men reading aloud used the same amount of "
+                            "melody. The zones only mark unusually flat or lively speech, and it "
+                            "counts only a little."},
+    # Formant dispersion over F1-F4 as analysis.delta_f measures it. LibriSpeech, profile ceiling:
+    # men median 977 Hz (IQR 942-1010, 10th-90th 923-1039), women 1113 Hz (IQR 1087-1145, 10th-90th
+    # 1050-1200); AUC 0.94, best single cut 1044 Hz (94% balanced accuracy), equal likelihood ~1048
+    # Hz. The decile rule's 1039 / 1050 Hz are only 11 Hz apart, so widened to one speaker's
+    # take-to-take spread (90th pct 59 Hz) around their middle: 1015 / 1075 Hz (the 3:1 likelihood
+    # points, 1017 / 1077, agree): men 78/20/2%, women 5/15/80%. The old 1000 / 1060 edges (7
+    # ARCTIC speakers) put 30% of the men in the overlap. With each take's own ceiling instead:
+    # medians 975 / 1119 Hz. H95 single words read ~90 Hz higher (VoiceLab on H95: men median 1058,
+    # women 1212; hand-measured 1013 / 1169 Hz, i.e. tract length 17.3 vs 14.8 cm); VoiceLab reads
+    # 34-47 Hz above the hand measurements, more with a high formant ceiling (+130-170 Hz at
+    # 6250-6500 Hz). Home-mic noise (tests/mic_noise.py at -42 dBFS, 20 men and 20 women): median
+    # shift +6 Hz, but for 4 of the 20 women the noisy takes pulled the profile ceiling down to
+    # 4000-4500 Hz and ΔF fell 145-253 Hz. The ceiling can move ΔF as far as the edges are apart:
+    # the user's 11 takes read 6-152 Hz (median 29) higher at a 5500 Hz ceiling than at their
+    # profile's 5000 Hz, and their noisy takes pick 4250-4750 Hz on their own (LibriSpeech's
+    # profile ceilings: men mostly 5250, women 5500). Resonance matters about as much as pitch: both
+    # are needed to change the perceived sex of a sentence (Hillenbrand & Clark 2009); formants
+    # decide in the 145-165 Hz range (Gelfer & Bennett 2013) and contribute more than earlier
+    # thought (Leung et al. 2021, JSLHR 64(7)); f0 and tract length shift judgements with no sharp
+    # threshold (Neuhaus, Scherer & Whitfield 2024, J Voice).
     "delta_f": {"name": "Resonance", "unit": "Hz", "scale": (800, 1400), "log": False,
-                "zones": _zones((800, 1400), (1000, 1060)),
-                "source": "Own measurement with VoiceLab: CMU ARCTIC read speech (men 917-968 Hz, "
-                          "women 1087-1162 Hz) and Hillenbrand et al. 1995 recordings (single words, "
-                          "~90 Hz higher); weight from Hillenbrand & Clark 2009, Gelfer & Bennett "
-                          "2013, Leung et al. 2021",
+                "zones": _zones((800, 1400), (1015, 1075)),
+                "source": "Own measurement with VoiceLab on LibriSpeech read speech, 40 men and 40 "
+                          "women (medians 977 and 1113 Hz; edges = men's 90th and women's 10th "
+                          "percentile, widened to one speaker's take-to-take spread), CMU ARCTIC "
+                          "and Hillenbrand et al. 1995 recordings (single words, ~90 Hz higher); "
+                          "weight from Hillenbrand & Clark 2009, Gelfer & Bennett 2013, Leung et "
+                          "al. 2021",
                 "note": "Depends on the words you say and on the formant ceiling the analysis "
-                        "picks, and the running-speech edges rest on only 7 speakers, so treat it "
-                        "as approximate (roughly ±50 Hz). A vowel check gives the fairest reading."},
+                        "picks, so treat it as approximate: one speaker's takes differ by up to "
+                        "about 60 Hz. Background noise can read higher, brighter voices darker (by "
+                        "up to ~250 Hz for 1 in 5 women in our test). A vowel check gives the "
+                        "fairest reading."},
     # Corrected H1*-H2*, a proxy for a lighter (more open) or heavier phonation. Women are on
     # average breathier, with very large differences within each gender (Klatt & Klatt 1990, JASA
     # 87(2)); men's source measures are lower on average (Hanson & Chuang 1999); but for
     # high-pitched talkers there is no significant sex difference in H1*-H2* (Iseli, Shue & Alwan
-    # 2007, JASA 121(4)), and it rises with f0 in low voices, so it partly repeats pitch. Own
-    # measurements disagree with each other: H95 words, no difference (men median -2.6 dB, women
-    # -2.9 dB); ARCTIC read speech, men -0.9..+8.3 dB, women +9.0 and +12.3 dB. A wide overlap
-    # covers that. Home mics read high: the user's takes 7-15 dB (desk rumble under H1, spec 01).
+    # 2007, JASA 121(4)), and it rises with f0 in low voices, so it partly repeats pitch.
+    # LibriSpeech: men median 1.9 dB (IQR -0.2..4.2), women 5.1 dB (IQR 2.5..7.0), AUC 0.69: a
+    # small real difference (H95 words: none; ARCTIC: men -0.9..+8.3, women +9.0 and +12.3 dB). The
+    # decile rule would give -1 / 7 dB, but home mics shift it by more than the 3 dB between the
+    # groups: the user's takes read 4-21 dB, while the simulated mic noise moved LibriSpeech only
+    # -0.4 dB, so the cause is the mic's or room's low end (desk rumble under H1, spec 01;
+    # unverified). So the wide 0 / 9 dB overlap stays (own judgement): it holds 72% of both groups.
     "h1h2": {"name": "Vocal weight", "unit": "dB", "scale": (-10, 15), "log": False,
              "zones": _zones((-10, 15), (0, 9)),
              "source": "Direction: Klatt & Klatt 1990; Hanson & Chuang 1999; no sex difference at "
-                       "high pitch: Iseli, Shue & Alwan 2007. Edges: own measurement with VoiceLab "
-                       "on Hillenbrand et al. 1995 and CMU ARCTIC (mixed results), unverified",
-             "note": "A rough proxy, not a measure of the vocal folds. Studies and our own checks "
-                     "disagree about how much it differs between women and men, and the mic and "
-                     "desk rumble shift it by several dB, so it doesn't count toward the overall "
-                     "placement."},
+                       "high pitch: Iseli, Shue & Alwan 2007. Own measurement with VoiceLab on "
+                       "LibriSpeech (80 speakers: women 3 dB higher), Hillenbrand et al. 1995 and "
+                       "CMU ARCTIC. Edges: own judgement, unverified",
+             "note": "A rough proxy, not a measure of the vocal folds. Women read only about 3 dB "
+                     "higher than men on average, less than the mic and desk rumble can shift it, "
+                     "so it doesn't count toward the overall placement."},
     # CPP (VoiceLab's, not the published CPPS). Women have lower cepstral values on average
     # (Buckley, Abur & Stepp 2023, AJSLP 32(4)), but a breathy voice is a mixed cue for gender
-    # (Leung, Oates & Chan 2018) and costs stamina. Own measurements: H95 words, men median 28.4 dB,
-    # women 25.7; ARCTIC read speech, men 20.5-25.0, women 24.0-24.2 (no difference). So the
+    # (Leung, Oates & Chan 2018) and costs stamina. Own measurements find no difference: LibriSpeech
+    # men median 22.7 dB (IQR 21.5-24.1), women 22.2 (IQR 21.1-24.1), AUC 0.47, every speaker inside
+    # 18.6-26.7; H95 words men 28.4, women 25.7; ARCTIC men 20.5-25.0, women 24.0-24.2. So the
     # overlap spans the healthy range; only very breathy (<12) or very clear (>28) leave it.
-    # Higher = clearer, so the zones run feminine to masculine. CPP falls with noise and room echo
-    # (4-5 dB low at 16 dB SNR, phase 9 audit): the user's takes read 12.6-17.2 dB.
+    # Higher = clearer, so the zones run feminine to masculine. CPP falls with noise and room echo:
+    # the simulated mic noise lowered it 2.0 dB (median, LibriSpeech), 4-5 dB at 16 dB SNR (phase 9
+    # audit); the user's takes read 12.5-17.8 dB.
     "cpp": {"name": "Clarity", "unit": "dB", "scale": (8, 32), "log": False,
             "zones": _zones((8, 32), (12, 28), feminine_high=False),
             "source": "Direction: Buckley, Abur & Stepp 2023; mixed evidence: Leung, Oates & Chan "
-                      "2018. Edges: own measurement with VoiceLab on Hillenbrand et al. 1995 and "
-                      "CMU ARCTIC, unverified",
+                      "2018. Own measurement with VoiceLab: no sex difference on LibriSpeech (80 "
+                      "speakers), Hillenbrand et al. 1995 or CMU ARCTIC. Edges: own judgement",
             "note": "Shown mainly for comfort and health: a clear, easy voice suits every goal. "
-                    "It barely differs between women and men in running speech, and noise and "
-                    "room echo lower it a lot, so it doesn't count toward the overall placement."},
+                    "It doesn't differ between women and men reading aloud, and noise and room "
+                    "echo lower it a lot, so it doesn't count toward the overall placement."},
 }
-# Typical values where a dimension pulls fully one way (score -1 / +1): pitch from VoiceLab on
-# H95 (medians 132 / 218 Hz); floor and resonance from ARCTIC running speech (men's median 97 Hz
-# and 963 Hz; women's floor mean 163 Hz, resonance 1122 Hz = H95 women's median minus 90 Hz);
-# intonation, weight and clarity a zone-width past their edges (own judgement).
-ANCHORS = {"pitch": (132, 218), "pitch_floor": (97, 163), "pitch_range": (2, 10),
-           "delta_f": (963, 1122), "h1h2": (-5, 13), "cpp": (31, 10)}
-# Running speech reads lower than a vowel check's hVd words: H95 words vs ARCTIC sentences,
-# men 1058 vs 963 Hz, women 1212 vs 1124 Hz (own measurement; corpus and speakers confounded).
+# Typical values where a dimension pulls fully one way (score -1 / +1): pitch, floor and resonance
+# are the LibriSpeech groups' medians (men 122 Hz, 96 Hz, 977 Hz; women 194 Hz, 164 Hz, 1113 Hz);
+# intonation, weight and clarity a step past their edges (own judgement).
+ANCHORS = {"pitch": (122, 194), "pitch_floor": (96, 164), "pitch_range": (2, 14.5),
+           "delta_f": (977, 1113), "h1h2": (-5, 13), "cpp": (31, 10)}
+# Running speech reads lower than a vowel check's hVd words: H95 words vs LibriSpeech sentences,
+# men 1058 vs 977 Hz, women 1212 vs 1113 Hz (81 / 99 Hz); vs ARCTIC, 95 / 88 Hz (own measurement;
+# corpus and speakers confounded).
 VOWEL_CHECK_OFFSET_HZ = 90
 # Each dimension's share of the overall placement. Pitch and resonance carry most and equally:
 # speaking f0 explained 41.6% of the variance in perceived gender (Leung, Oates & Chan 2018,
@@ -150,7 +195,9 @@ VOWEL_CHECK_OFFSET_HZ = 90
 # thought (Leung et al. 2021); pitch and resonance account for most of how listeners perceive
 # gender (Hancock & Garabedian 2013). Intonation is a perceived cue (Leung et al. 2018; Hancock
 # et al. 2014); the floor mostly repeats pitch. Weight and clarity get 0: mixed evidence (Leung et
-# al. 2018; our own checks disagree) and dominated by the mic. Exact split: own judgement.
+# al. 2018; our own checks disagree) and dominated by the mic. Exact split: own judgement. On
+# LibriSpeech's 80 speakers any pitch / resonance split from 0.6/0.4 to 0.4/0.6, with or without
+# intonation and floor, separates the groups equally well (AUC 0.98), so the data can't refine it.
 WEIGHTS = {"pitch": 0.44, "delta_f": 0.44, "pitch_range": 0.06, "pitch_floor": 0.06,
            "h1h2": 0.0, "cpp": 0.0}
 MAJOR = ("pitch", "delta_f")
@@ -159,6 +206,8 @@ DIMENSIONS_SING = ["range", "tuning", "steadiness", "register"]
 
 # Overall scale: score -1 (fully masculine) .. +1 (fully feminine), shown as position 0-1.
 OVERALL_EDGES = (0.25, 0.75)    # position; = score -0.5 / +0.5, where each dimension's zone edges sit
+# LibriSpeech check (every dimension trusted): men 34 masculine / 4 overlap / 2 feminine, women
+# 0 / 5 / 35; men's 90th percentile 0.30, women's 10th 0.74, so the edges match the decile rule.
 # Uncertainty of one dimension's score by confidence (score units); own judgement.
 SCORE_SPREAD = {"high": 0.15, "medium": 0.3, "low": 0.5}
 MIN_TRUSTED = 2                 # dimensions needed for an overall placement (spec)
