@@ -338,3 +338,76 @@ def test_coach_line_in_poor_input_explains_instead_of_judging(session):
     session.quality = None
     text, _ = session.coach_text()
     assert "move closer" in text.lower()
+
+
+# --- LIVE CARDS, BANNER AND THE PITCH AXIS (spec 05) ---
+
+def test_live_cards_are_plain_and_follow_the_mode(session):
+    snapshot = feed_frames(session, [frame(f0=200, delta_f=1100)] * 30)
+    cards = live_session.live_cards(snapshot, session.profile)
+    assert [c["key"] for c in cards] == ["pitch", "delta_f", "h1h2", "cpp", "pitch_range", "register"]
+    titles = {c["key"]: c["title"] for c in cards}
+    assert titles["delta_f"] == "Brightness (resonance)" and titles["h1h2"] == "Weight"
+    assert all("H1" not in c["title"] and "CPP" not in c["title"] for c in cards)      # jargon in the help
+    assert "H1*–H2*" in live_session.CARD_HELP["h1h2"] and "CPP" in live_session.CARD_HELP["cpp"]
+    pitch = cards[0]
+    assert pitch["text"] == "200 Hz" and abs(pitch["value"] - 200) < 2 and pitch["unavailable"] is None
+    assert live_session.card_scale("pitch")["zones"][1]["id"] == "overlap"
+    assert live_session.card_scale("h1h2")["zones"] == []                    # no gender zones for weight
+    session.set_mode("sing")
+    session.set_egg(True)
+    keys = [c["key"] for c in live_session.live_cards(session.snapshot(), session.profile)]
+    assert keys == ["tuning", "vibrato", "register", "ring", "cpp", "h1h2", "cq"]
+
+
+def test_card_text_is_throttled_like_the_titles(tmp_path):
+    clock = [0.0]
+    live = LiveSession(Profile(tmp_path / "home"), "speak", clock=lambda: clock[0])
+    shown = []
+    for i in range(20):
+        clock[0] += 0.025
+        snapshot = live.update(frame(f0=150 + i))
+        shown.append(snapshot["metrics"]["pitch"]["shown"])
+    assert len(set(shown)) <= 4                                    # at most every 0.2 s
+
+
+def test_noisy_readings_go_to_one_banner(session):
+    noisy = mic_noise.at_level(voice(1.6), -42) + mic_noise.mic_noise(int(1.6 * SR))   # SNR about 16 dB
+    feed_audio(session, np.concatenate([mic_noise.mic_noise(int(1.5 * SR)), noisy, mic_noise.mic_noise(SR)]))
+    snapshot = feed_audio(session, np.concatenate([noisy, mic_noise.mic_noise(int(0.5 * SR))]))
+    banner = snapshot["banner"]
+    assert banner and banner["target"] == "mic_check" and "weight and clarity" in banner["text"]
+    cards = {c["key"]: c for c in live_session.live_cards(snapshot, session.profile)}
+    assert cards["cpp"]["noisy"] and cards["h1h2"]["noisy"] and not cards["delta_f"]["noisy"]
+
+
+def test_banner_names_the_problem_and_what_to_do(session):
+    assert session.snapshot()["banner"] is None
+    snapshot = session.update(dict(frame(), clipped=True))
+    assert "clipping" in snapshot["banner"]["text"] and snapshot["banner"]["action"] == "Mic check"
+    feed_frames(session, [frame()] * int(live_session.CLIP_BADGE_SECONDS / UPDATE_INTERVAL))
+    session.noise_report(mic_noise.mic_noise(int(5 * SR)), SR)
+    assert session.snapshot()["banner"]["text"].startswith("A steady whine")
+    session.noise_info = {}
+    session.engine.capture_info = {"path": "default", "host_api": "MME", "latency": 0.09}
+    session.refresh_input()
+    assert session.snapshot()["banner"] == {"text": live_session.SLOW_PATH_BANNER, "kind": "info",
+                                             "action": "Settings", "target": "settings"}
+
+
+def test_note_carries_the_pitch_the_graph_draws(session):
+    snapshot = feed_frames(session, [frame(f0=230)] * 20)
+    assert abs(snapshot["note"]["hz"] - 230) < 1 and "230 Hz" in snapshot["note"]["text"]
+
+
+def test_speak_axis_never_moves_and_sing_axis_has_hysteresis():
+    assert live_session.pitch_axis("speak") == (70.0, 400.0)
+    assert live_session.pitch_axis("speak", (100, 200), [600.0] * 40) == (70.0, 400.0)
+    axis = live_session.pitch_axis("sing", None, (), (57, 69))             # A3-A4 from the Voice Map
+    assert abs(axis[0] - 196.0) < 1 and abs(axis[1] - 493.9) < 1          # padded by 2 semitones
+    assert live_session.pitch_axis("sing", axis, [300.0] * 40) == axis       # inside: no change
+    assert live_session.pitch_axis("sing", axis, [600.0] * 5 + [300.0]) == axis   # a blip: no change
+    wider = live_session.pitch_axis("sing", axis, [600.0] * 40)
+    assert wider[0] == axis[0] and wider[1] > 600 * 2 ** (1.9 / 12)
+    default = live_session.pitch_axis("sing")
+    assert abs(default[0] - 116.5) < 1 and abs(default[1] - 587.3) < 1     # C3-C5, padded

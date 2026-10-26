@@ -1,37 +1,50 @@
-"""The singing exercise view: choices, the scrolling piano roll and the readout. exercise.ExerciseSession
-runs the exercise; this draws it."""
+"""The singing exercise view: choices, Start / Stop, progress, the scrolling piano roll and the tuning
+readout. exercise.ExerciseSession runs the exercise; this draws it."""
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                             QPushButton, QSpinBox, QVBoxLayout, QWidget)
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QSpinBox, QVBoxLayout, QWidget
 
 from display import midi_name
-from exercise import CLOSE_COLOR, IN_TUNE_COLOR, MIDI_CHOICE, NOTE_RANGE, OFF_COLOR, ROLL_AFTER, ROLL_BEFORE
-from ui.meters import BUTTON_STYLE
+from exercise import CLOSE_COLOR, IN_TUNE_COLOR, MIDI_CHOICE, OFF_COLOR, ROLL_AFTER, ROLL_BEFORE, TAIL_SECONDS
+from ui import theme
+from ui.components import Button, Caption, Label, ProgressStrip, Select, Toggle
+from ui.live_graph import style_plot
+from ui.takes import listen
 
-BAR_COLORS = {IN_TUNE_COLOR: (46, 204, 113, 200), CLOSE_COLOR: (241, 196, 15, 200), OFF_COLOR: (230, 126, 34, 200)}
-DEFAULT_BAR_COLOR = (52, 152, 219, 200)
+# The session's tuning colours -> theme tokens: in tune, close, off.
+TUNING_TOKENS = {IN_TUNE_COLOR: "on_target", CLOSE_COLOR: "warning", OFF_COLOR: "off_target"}
 
 
 class PianoRoll(pg.PlotWidget):
     """Target notes as bars scrolling past a playhead, with your pitch on top."""
 
     def __init__(self):
-        super().__init__(background="#1e1e1e")
-        self.setMouseEnabled(x=False, y=False)
-        self.hideButtons()
-        self.setMenuEnabled(False)
-        self.showGrid(x=False, y=True, alpha=0.15)
-        self.getAxis("left").setWidth(45)
-        self.getAxis("bottom").setLabel("seconds")
-        self.bars = self.plot(pen=pg.mkPen((150, 150, 150, 140), width=12), connect="pairs")
-        self.current_bar = self.plot(pen=pg.mkPen(DEFAULT_BAR_COLOR, width=12))
-        self.trace = self.plot(pen=pg.mkPen("#f1c40f", width=2), connect="finite")
-        self.playhead = pg.InfiniteLine(angle=90, pen=pg.mkPen("w", width=1))
+        super().__init__()
+        self.bars = self.plot(connect="pairs")
+        self.current_bar = self.plot()
+        self.trace = self.plot(connect="finite")
+        self.playhead = pg.InfiniteLine(angle=90)
         self.addItem(self.playhead)
         self.targets = []
         self.trace_t, self.trace_m = [], []
+        self.color = None
+        theme.changed.connect(self.restyle)
+        self.restyle()
+
+    def restyle(self, *_):
+        t = theme.current()
+        self.setBackground(t["surface"])
+        style_plot(self.plotItem, left_width=48)
+        self.showGrid(x=False, y=True, alpha=0.12)
+        self.bars.setPen(pg.mkPen(t.q("text_muted", 150), width=12))
+        self.trace.setPen(pg.mkPen(t.series["pitch"], width=2.5))
+        self.playhead.setPen(pg.mkPen(t["accent"], width=2))
+        self._color_bar()
+
+    def _color_bar(self):
+        t = theme.current()
+        self.current_bar.setPen(pg.mkPen(t[TUNING_TOKENS.get(self.color, "accent")], width=12))
 
     def set_targets(self, targets):
         self.targets = targets
@@ -58,7 +71,9 @@ class PianoRoll(pg.PlotWidget):
         self.trace.setData(self.trace_t, self.trace_m)
         self.playhead.setValue(now)
         self.setXRange(now - ROLL_BEFORE, now + ROLL_AFTER, padding=0)
-        self.current_bar.setPen(pg.mkPen(BAR_COLORS.get(color, DEFAULT_BAR_COLOR), width=12))
+        if color != self.color:
+            self.color = color
+            self._color_bar()
         if current is not None:
             start, duration, note = current
             self.current_bar.setData([start, start + duration - 0.02], [note, note])
@@ -74,50 +89,52 @@ class ExerciseView(QWidget):
         self.session = core.exercise
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.XL)
         left = QVBoxLayout()
-        self.cents_label = QLabel("—")
-        self.cents_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        self.cents_label.setStyleSheet("color: white;")
-        self.choice = QComboBox()
-        for name in self.session.choice_names():
-            self.choice.addItem(name)
+        left.setSpacing(theme.M)
+        self.cents_label = Label("—", role="figure")
+        self.cents_label.setFont(theme.font("figure", size=40))
+        self.choice = Select([(str(i), name) for i, name in enumerate(self.session.choice_names())])
         self.choice.activated.connect(self._choice_changed)
-        self.start_note = QComboBox()
-        for midi, name in self.session.start_notes():
-            self.start_note.addItem(name, midi)
-        self.start_note.setCurrentIndex(NOTE_RANGE.index(self.session.start_midi))
+        self.start_note = Select([(str(m), name) for m, name in self.session.start_notes()],
+                                 current=str(self.session.start_midi))
         self.transpose = QSpinBox()
         self.transpose.setRange(-24, 24)
         self.transpose.setPrefix("Transpose ")
         self.transpose.hide()
-        self.guide = QCheckBox("Guide tone")
+        self.guide = Toggle(self.session.guide, "Guide tone")
         self.guide.setToolTip("Use headphones, or the mic will hear the guide instead of you.")
-        self.guide.setChecked(self.session.guide)
         self.guide.toggled.connect(lambda on: setattr(self.session, "guide", on))
-        self.start_btn = QPushButton("Start")
-        self.start_btn.setStyleSheet(BUTTON_STYLE)
+        self.start_btn = Button("Start", variant="primary", icon="ph.play-fill")
         self.start_btn.clicked.connect(self.toggle)
-        self.status = QLabel(self.session.status)
-        self.status.setWordWrap(True)
-        self.status.setStyleSheet("color: #aaa; font-size: 11px;")
-        style = "QComboBox, QSpinBox { background: #1e1e1e; color: white; } QCheckBox { color: #ddd; }"
-        for w in (self.choice, self.start_note, self.transpose, self.guide):
-            w.setStyleSheet(style)
-        for w in (self.cents_label, self.choice, self.start_note, self.transpose,
-                  self.guide, self.start_btn, self.status):
-            left.addWidget(w)
-        left.addStretch()
+        self.progress = ProgressStrip()
+        self.progress.set_progress(0, 1)
+        self.status = Label(self.session.status, role="body", tone="secondary", wrap=True)
+        left.addWidget(self.cents_label)
+        left.addWidget(Label("Exercise", role="label", tone="muted"))
+        left.addWidget(self.choice)
+        left.addWidget(Label("Start note", role="label", tone="muted"))
+        left.addWidget(self.start_note)
+        left.addWidget(self.transpose)
+        left.addWidget(self.guide)
+        left.addWidget(self.start_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        left.addWidget(self.progress)
+        left.addWidget(self.status)
+        left.addStretch(1)
+        left.addWidget(Caption("Each finished exercise becomes a scored take: notes in tune, timing and "
+                               "steadiness."))
         left_widget = QWidget()
         left_widget.setLayout(left)
-        left_widget.setFixedWidth(230)
+        left_widget.setFixedWidth(320)
         layout.addWidget(left_widget)
 
         self.roll = PianoRoll()
-        layout.addWidget(self.roll)
-        self.start_note.currentIndexChanged.connect(self._refresh_targets)
+        layout.addWidget(self.roll, 1)
+        self.start_note.changed.connect(self._refresh_targets)
         self.transpose.valueChanged.connect(self._refresh_targets)
         self._refresh_targets()
-        core.events.subscribe("exercise_changed", self.show_state)
+        self.show_state(self.session.state())
+        listen(self, core, {"exercise_changed": self.show_state})
 
     @property
     def running(self):
@@ -150,7 +167,7 @@ class ExerciseView(QWidget):
         self._refresh_targets()
 
     def _refresh_targets(self, *_):
-        self.session.start_midi = self.start_note.currentData()
+        self.session.start_midi = int(self.start_note.current_key())
         self.session.transpose = self.transpose.value()
         midi = self.session.is_midi()
         self.start_note.setVisible(not midi)
@@ -159,17 +176,23 @@ class ExerciseView(QWidget):
 
     def show_state(self, state):
         """Draw the session's texts and lock the choices while it runs."""
-        self.start_btn.setText("Stop" if state["running"] else "Start")
+        running = state["running"]
+        self.start_btn.setText("Stop" if running else "Start")
+        self.start_btn.set_icon("ph.stop-fill" if running else "ph.play-fill")
+        self.start_btn.set_variant("secondary" if running else "primary")
         for w in (self.choice, self.start_note, self.transpose):
-            w.setEnabled(not state["running"])
+            w.setEnabled(not running)
         self.status.setText(state["status"])
-        self.cents_label.setText(state["cents_text"])
-        self.cents_label.setStyleSheet(f"color: {state['cents_color'] or 'white'};")
+        idle = state["cents_text"] == "—"
+        self.cents_label.setText("Ready" if idle else state["cents_text"])
+        self.cents_label.set_tone("muted" if idle else TUNING_TOKENS.get(state["cents_color"], "primary"))
 
     def show_frame(self, view):
         """Draw one live frame of the running exercise (ExerciseSession.on_frame's result)."""
         if view is None:
             return
         self.roll.show_view(view["now"], view["midi"], view["color"], view["current"])
+        end = max(s + d for s, d, _ in view["targets"]) + TAIL_SECONDS if view["targets"] else 1.0
+        self.progress.set_progress(min(view["now"], end), end)
         if not view["finished"]:
             self.show_state(view)

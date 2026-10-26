@@ -14,7 +14,7 @@ from ui.components.layout import Card, Collapsible
 BAND_HEIGHT = 26            # px: tall enough for a 12 px label inside each zone
 COMPACT_BAND = 18           # px: live meters
 HEADROOM = 16               # px above the band: the marker's overshoot and the baseline caret
-TICK_ROW = 20               # px below the band for tick labels
+TICK_ROW = 26               # px below the band for tick labels (room for descenders)
 END_PAD = 10                # px at each end so the marker never clips
 GAP = 2                     # px surface gap between zones (dataviz spacer)
 MARKER_WIDTH = 5            # px; with a 2 px surface ring
@@ -54,6 +54,7 @@ class ZoneBar(ThemedWidget):
         super().__init__(parent)
         self.scale, self.log = tuple(scale), log
         self.zones = list(zones or [])
+        self.reverse = bool(self.zones) and self.zones[0].get("id") == "feminine"   # see set_zones
         self.unit, self.fmt = unit, fmt
         self.show_ticks, self.show_labels, self.compact = ticks, labels, compact
         self.value = None
@@ -100,10 +101,13 @@ class ZoneBar(ThemedWidget):
             value, lo, hi = math.log(max(value, 1e-9)), math.log(lo), math.log(hi)
         if hi == lo:
             return 0.5
-        return min(1.0, max(0.0, (value - lo) / (hi - lo)))
+        f = min(1.0, max(0.0, (value - lo) / (hi - lo)))
+        return 1.0 - f if self.reverse else f
 
     def value_at(self, fraction):
         """The scale value at a fraction of the bar (inverse of fraction())."""
+        if self.reverse:
+            fraction = 1.0 - fraction
         lo, hi = self.scale
         if self.log:
             return math.exp(math.log(lo) + fraction * (math.log(hi) - math.log(lo)))
@@ -121,7 +125,7 @@ class ZoneBar(ThemedWidget):
     def _zone_span(self, z):
         lo = self.fraction(self.scale[0] if z.get("lo") is None else z["lo"])
         hi = self.fraction(self.scale[1] if z.get("hi") is None else z["hi"])
-        return lo, hi
+        return (hi, lo) if self.reverse else (lo, hi)
 
     # --- setters ---
     def set_scale(self, lo, hi, log=None):
@@ -133,6 +137,10 @@ class ZoneBar(ThemedWidget):
 
     def set_zones(self, zones):
         self.zones = list(zones or [])
+        # every bar runs masculine to feminine, left to right; a scale where feminine is the low end
+        # (clarity) is drawn mirrored so it reads the same way
+        self.reverse = bool(self.zones) and self.zones[0].get("id") == "feminine"
+        self.shown = self.fraction(self.value)
         self.update()
 
     def set_value(self, value, animate=True):
@@ -218,7 +226,7 @@ class ZoneBar(ThemedWidget):
         p.setClipPath(rounded_path(track, radius))
         p.fillRect(track, t.q("surface_raised"))
         spans = []
-        for z in self.zones:
+        for z in sorted(self.zones, key=lambda z: self._zone_span(z)[0]):
             fa, fb = self._zone_span(z)
             if fb <= fa:
                 continue
@@ -238,6 +246,7 @@ class ZoneBar(ThemedWidget):
         target_rect = None
         if self.target:
             fa, fb = self.fraction(self.target[0]), self.fraction(self.target[1])
+            fa, fb = min(fa, fb), max(fa, fb)
             target_rect = QRectF(X(fa), top - 4, max(4.0, X(fb) - X(fa)), band_h + 8)
 
         # zone labels: the full label, else the short one, else none (the tooltip has it); each is
@@ -250,7 +259,8 @@ class ZoneBar(ThemedWidget):
             if self.shown is not None:
                 blocked.append((X(self.shown) - 8, X(self.shown) + 8))
                 if self.range:
-                    blocked.append((X(self.fraction(self.range[0])) - 6, X(self.fraction(self.range[1])) + 6))
+                    ra, rb = sorted((self.fraction(self.range[0]), self.fraction(self.range[1])))
+                    blocked.append((X(ra) - 6, X(rb) + 6))
             if target_rect is not None:
                 blocked += [(target_rect.left() - 4, target_rect.left() + 4),
                             (target_rect.right() - 4, target_rect.right() + 4)]

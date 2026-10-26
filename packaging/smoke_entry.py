@@ -10,9 +10,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 REQUIRED = ["analysis", "app_core", "coach", "denoise", "display", "egg", "engine", "events", "exercise",
             "isolation", "jobs", "live_session", "main", "mic_check", "playback", "profile_store", "progress",
             "register", "shift", "shift_session", "speech", "take_register", "take_store", "take_view", "targets",
-            "voice_map", "ui.bridge", "ui.exercise_view", "ui.live_panel", "ui.live_views", "ui.main_window",
-            "ui.meters", "ui.mic_check_dialog", "ui.progress_dialog", "ui.shift_panel", "ui.take_card",
-            "ui.targets_dialog", "ui.voice_map_view", "ui.vowel_check", "ui.widgets"]
+            "voice_map", "report", "ui.bridge", "ui.theme", "ui.anim", "ui.components", "ui.app_window",
+            "ui.live_graph", "ui.live_cards", "ui.live_views", "ui.onboarding", "ui.exercise_view",
+            "ui.mic_check_dialog", "ui.voice_map_view", "ui.vowel_check", "ui.screens", "ui.screens.dashboard",
+            "ui.screens.live", "ui.screens.practice", "ui.screens.settings", "ui.takes", "ui.takes.take_card",
+            "ui.takes.take_graph", "ui.takes.takes_screen", "ui.takes.latest_take", "ui.takes.recent_list",
+            "ui.takes.shift_view", "ui.takes.targets_editor", "ui.progress", "ui.progress.progress_screen"]
 OPTIONAL = []
 
 

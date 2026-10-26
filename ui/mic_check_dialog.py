@@ -1,9 +1,11 @@
 """The mic check dialog: drives mic_check.MicCheckSession with timers and shows what it found."""
-from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QPainter
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
 
 from mic_check import INTRO, LEAD_SECONDS, PHASE_SECONDS, MicCheckSession
-from ui.meters import BUTTON_STYLE, OFF_TARGET_COLOR, ON_TARGET_COLOR
+from ui import theme
+from ui.components import Button, Headline, Label, ProgressStrip
 
 
 class MicCheckDialog(QDialog):
@@ -16,27 +18,29 @@ class MicCheckDialog(QDialog):
         super().__init__(parent)
         self.session = MicCheckSession(engine, seconds, lead_seconds)
         self.setWindowTitle("Mic check")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
-        self.instruction = QLabel(INTRO)
-        self.instruction.setWordWrap(True)
-        self.status = QLabel("")
-        self.status.setStyleSheet("font-size: 16px; font-weight: bold;")
-        self.report = QLabel("")
-        self.report.setWordWrap(True)
+        layout.setContentsMargins(theme.XL, theme.XL, theme.XL, theme.L)
+        layout.setSpacing(theme.M)
+        layout.addWidget(Headline("Mic check", level="title"))
+        self.instruction = Label(INTRO, role="body", tone="secondary", wrap=True)
+        self.status = Label("", role="heading")
+        self.strip = ProgressStrip()
+        self.strip.hide()
+        self.report = Label("", role="body", wrap=True)
+        self.report.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.instruction)
         layout.addWidget(self.status)
+        layout.addWidget(self.strip)
         layout.addWidget(self.report)
         row = QHBoxLayout()
-        self.start_btn = QPushButton("Start")
-        self.close_btn = QPushButton("Close")
-        for btn in (self.start_btn, self.close_btn):
-            btn.setStyleSheet(BUTTON_STYLE)
+        self.start_btn = Button("Start", variant="primary", icon="ph.microphone")
+        self.close_btn = Button("Close", variant="ghost")
         self.start_btn.clicked.connect(self.start)
         self.close_btn.clicked.connect(self.reject)
         row.addStretch()
-        row.addWidget(self.start_btn)
         row.addWidget(self.close_btn)
+        row.addWidget(self.start_btn)
         layout.addLayout(row)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -44,6 +48,9 @@ class MicCheckDialog(QDialog):
         self._tick = QTimer(self)
         self._tick.setInterval(100)
         self._tick.timeout.connect(self._show_countdown)
+        self._total = 2 * seconds + lead_seconds
+        self._done = 0.0
+        self._phase_seconds = 0.0
 
     # The session's settings and state, under the names the dialog always had.
     seconds = property(lambda self: self.session.seconds, lambda self, v: setattr(self.session, "seconds", v))
@@ -51,6 +58,9 @@ class MicCheckDialog(QDialog):
                             lambda self, v: setattr(self.session, "lead_seconds", v))
     phase = property(lambda self: self.session.phase)
     result = property(lambda self: self.session.result)
+
+    def paintEvent(self, event):
+        QPainter(self).fillRect(self.rect(), theme.color("surface"))
 
     def start(self):
         """Begin the check (refused while a take is being recorded)."""
@@ -60,17 +70,25 @@ class MicCheckDialog(QDialog):
             return
         self.report.setText("")
         self.start_btn.setEnabled(False)
+        self._total = 2 * self.session.seconds + self.session.lead_seconds
+        self._done = 0.0
+        self.strip.show()
+        self.strip.set_progress(0, self._total)
         self._wait(seconds)
 
     def _wait(self, seconds):
+        self._phase_seconds = seconds
         self._timer.start(int(seconds * 1000))
         self._tick.start()
         self._show_countdown()
 
     def _show_countdown(self):
         self.status.setText(self.session.status_text())
+        left = max(0.0, self.session.ends_at - self.session.clock())
+        self.strip.set_progress(self._done + self._phase_seconds - left, self._total)
 
     def _next(self):
+        self._done += self._phase_seconds
         seconds = self.session.next()
         if seconds is not None:
             self._wait(seconds)
@@ -81,8 +99,9 @@ class MicCheckDialog(QDialog):
     def _finish(self):
         self.start_btn.setEnabled(True)
         self.start_btn.setText("Run again")
+        self.strip.hide()
         report = self.session.report()
-        color = ON_TARGET_COLOR if report["ok"] else OFF_TARGET_COLOR
+        color = theme.current()["on_target" if report["ok"] else "off_target"]
         self.status.setText(self.session.status_text())
         text = "<br>".join(report["lines"])
         text += f"<p style='color:{color}'>" + "<br><br>".join(report["advice"]) + "</p>"
