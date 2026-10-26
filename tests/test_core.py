@@ -78,7 +78,7 @@ class Recorder:
         return self.heard[name]
 
 
-EVENTS = ("take_added", "take_updated", "take_removed", "takes_loaded", "status", "busy", "profile_changed",
+EVENTS = ("take_added", "take_ready", "take_updated", "take_removed", "takes_loaded", "status", "busy", "profile_changed",
           "mode_changed", "mic_changed", "recording", "controls_changed", "progress_changed", "session_started")
 
 
@@ -124,6 +124,7 @@ def test_record_stop_adds_a_take(make_core):
     assert core.runner.wait_all(120)
     assert len(core.heard["take_added"]) == 1
     take = core.heard["take_added"][0][0]
+    assert core.heard["take_ready"] == [(take,)]                # only new takes: not ones loaded from a folder
     assert abs(take["pitch"] - 140) < 3 and take["mode"] == "speak" and take["uid"]
     assert take["analysis_version"] == ANALYSIS_VERSION and take["task"] == "free speech"
     assert core.takes() == [take] and core.number(take) == 1 and core.shown == 1
@@ -528,3 +529,13 @@ def test_mic_check_text_in_plain_words(make_core):
     assert lines[0].startswith("Last check (Fri Oct 23") and lines[0].endswith("Move closer.")
     assert any("Noise floor" in line for line in lines[1:])
     assert core.mic_status({"text": "Desk rumble"})["state"] == "warn"
+
+
+def test_vocabulary_names_every_metric():
+    import display
+    assert set(display.METRIC_DEFS) <= set(display.NAMES)
+    assert display.quantity_name("delta_f") == "Resonance" and display.zone_word("overlap") == "overlap"
+    assert display.zone_word("feminine", short=True) == "Feminine" and display.zone_word(None) is None
+    names = [entry["name"] for entry in display.NAMES.values()]
+    assert len(names) == len(set(names))                        # one name per quantity
+    assert not any(banned in name for name in names for banned in display.BANNED_TEXT)

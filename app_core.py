@@ -2,7 +2,8 @@
 the mic, the session, progress and the practice sessions. A UI calls these methods and draws what the
 events say. No UI toolkit.
 
-Events (Events.emit): "take_added"(take), "take_updated"(take), "take_removed"(uid),
+Events (Events.emit): "take_added"(take) (also for every take loaded from the folder),
+"take_ready"(take) (only a new take: recorded, imported or an exercise), "take_updated"(take), "take_removed"(uid),
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
@@ -431,6 +432,7 @@ class VoiceLabCore:
         if egg_info and not egg_info["signal_ok"]:      # say why there's no contact quotient
             message, level = f"{message}. EGG: {egg_info['note']}", "warning"
         self._status(message, level)
+        self.events.emit("take_ready", results)
         self.events.emit("progress_changed")
         self.update_register()          # exercise takes arrive without a register result
 

@@ -7,6 +7,53 @@ import numpy as np
 from analysis import CLOSE_CENTS, IN_TUNE_CENTS, NOTE_NAMES, VOICE_BAND_HZ, hz_to_note, vocal_tract_length_cm
 
 LIVE_TEXT_SECONDS = 0.2         # live numbers change at most this often, so they can be read
+
+# --- VOCABULARY (phase 11; the UX audit's vocabulary sheet, specs/phase11, audit A-052) ---
+# One name, one pair of scale words and one unit per quantity, for every screen. The technical name
+# (ΔF, H1*–H2*, CPP) belongs in a HelpTip or Details only.
+NAMES = {
+    "pitch": {"name": "Pitch", "low": "Low", "high": "High", "unit": "Hz", "tech": "f0"},
+    "delta_f": {"name": "Resonance", "sub": "brightness", "low": "Darker", "high": "Brighter", "unit": "Hz",
+                "tech": "ΔF (formant spacing)"},
+    "h1h2": {"name": "Weight", "low": "Heavier", "high": "Lighter", "unit": "dB", "tech": "H1*–H2*",
+             "note": "rough guide"},
+    "cpp": {"name": "Clarity", "low": "Breathy", "high": "Clear", "unit": "dB", "tech": "CPP"},
+    "pitch_range": {"name": "Intonation", "low": "Flat", "high": "Expressive", "unit": "st",
+                    "tech": "pitch range in semitones"},
+    "pitch_floor": {"name": "Lowest notes", "low": "Low", "high": "High", "unit": "Hz", "tech": "pitch floor"},
+    "register": {"name": "Register", "low": "Chest", "high": "Head", "unit": "", "note": "rough guide"},
+    "ring": {"name": "Ring", "low": "Muffled", "high": "Ringing", "unit": "dB", "tech": "2–4 kHz energy"},
+    "tuning": {"name": "Tuning", "low": "Flat", "high": "Sharp", "unit": "c", "tech": "cents"},
+    "vibrato": {"name": "Vibrato", "low": "Straight", "high": "Wide", "unit": "c", "tech": "extent in cents"},
+    "cq": {"name": "Contact", "low": "Light", "high": "Pressed", "unit": "", "tech": "EGG contact quotient"},
+    "overall": {"name": "Overall placement", "low": "", "high": "", "unit": ""},
+    "level": {"name": "Input level", "low": "Quiet", "high": "Loud", "unit": "dBFS"},
+}
+# Zone words: the long form where there's room, the short form where there isn't (chosen by width,
+# never by screen). "androgynous" is only ever a goal word, never a zone.
+ZONE_WORDS = {"masculine": ("typically masculine", "Masculine"), "overlap": ("overlap", "Overlap"),
+              "feminine": ("typically feminine", "Feminine")}
+GOAL_WORDS = {"feminine": "Feminine", "androgynous": "Androgynous", "masculine": "Masculine",
+              "exploring": "Just exploring"}
+TIME_WORDS = {"now": "now", "window": "last {seconds:.0f} s", "last_take": "your last take",
+              "this_take": "this take", "last_time": "last time"}
+# Trust: per take a recording verdict, per reading a reliability word (report.LEVELS -> words).
+TAKE_TRUST_WORDS = {"good": "Good recording", "fair": "Okay recording", "poor": "Poor recording"}
+READING_TRUST_WORDS = {"high": "Reliable", "medium": "Rough", "low": "Rough", "none": "Can't judge"}
+# Visible text (outside a HelpTip or an expanded Details) must not contain these.
+BANNED_TEXT = ("overlap / androgynous", "ΔF", "Brightness (resonance)", "semitones", "Demucs", "EGG",
+               "formant ceiling", "H1*", "CPP", "dBFS")
+
+
+def quantity_name(key):
+    """The plain name of a quantity ("Resonance"), or the key itself for an unknown one."""
+    return NAMES.get(key, {}).get("name", key)
+
+
+def zone_word(zone, short=False):
+    """'typically feminine' (or 'Feminine' when short) for a zone id; None for no zone."""
+    words = ZONE_WORDS.get(zone)
+    return None if words is None else words[1 if short else 0]
 # --- METRIC DISPLAY ---
 # key: (label, min, max, low label, high label, value format, scale)
 # `scale` maps values onto the bar; pitch uses log2 so octaves are equal widths.
