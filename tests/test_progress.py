@@ -95,9 +95,10 @@ def test_overall_placement_needs_pitch_and_resonance():
     import report
     assert progress.overall_of(entry(0, pitch=220.0)) is None
     assert progress.overall_of(entry(0, pitch=220.0, delta_f=1130.0, mode="sing")) is None
-    feminine = progress.overall_of(entry(0, pitch=218.0, delta_f=1122.0))
-    masculine = progress.overall_of(entry(0, pitch=132.0, delta_f=963.0))
-    assert feminine == 100.0 and masculine == 0.0                      # the report's anchors
+    (pitch_m, pitch_f), (df_m, df_f) = report.ANCHORS["pitch"], report.ANCHORS["delta_f"]
+    feminine = progress.overall_of(entry(0, pitch=pitch_f + 5.0, delta_f=df_f + 10.0))
+    masculine = progress.overall_of(entry(0, pitch=pitch_m - 5.0, delta_f=df_m - 10.0))
+    assert feminine == 100.0 and masculine == 0.0                      # beyond the report's anchors
     middle = progress.overall_of(entry(0, pitch=162.0, delta_f=1030.0))
     assert 100 * report.OVERALL_EDGES[0] < middle < 100 * report.OVERALL_EDGES[1]
 
