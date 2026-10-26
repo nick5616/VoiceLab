@@ -11,8 +11,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QGraphicsRectItem
 
 import report
-from analysis import NOTE_NAMES, hz_to_midi
-from display import note_ticks
+from display import note_name, note_ticks
 from live_session import HISTORY_LEN, HISTORY_SECONDS, pitch_axis
 from ui import anim, theme
 
@@ -23,12 +22,6 @@ AXIS_WIDTH = 92                 # px for "100 Hz  G2"
 LINE_WIDTH = 2.6                # px
 DOT_SIZE = 11                   # px: the readout's pitch at "now"
 GLIDE_MS = 420                  # the sing axis glides to a new range this long
-
-
-def note_name(hz):
-    """'G2' for a frequency."""
-    midi = int(round(float(hz_to_midi(hz))))
-    return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
 
 
 def hz_ticks(values, lo_hz, hi_hz):

@@ -59,7 +59,7 @@ EGG_QUESTION = ("This file has two channels. Is one of them an electroglottograp
                 "signal, with the voice on the other?")
 TAKES_FOLDER_QUESTION = ("Choose a folder to save takes in? Each take is saved there as a WAV file with its "
                          "analysis beside it, and loads again next time.\n\n"
-                         "You can choose or change the folder any time with the folder button at the bottom.")
+                         "You can choose or change the folder any time in Settings, or with the folder button at the bottom.")
 REBUILD_QUESTION = ("Replace the Voice Map with one built from your saved takes? What it has gathered live is "
                     "replaced, and imported voices are left out.")
 DEFAULT_MIC = "System default mic"
@@ -907,7 +907,7 @@ class VoiceLabCore:
         if not stale:
             if self.reanalysis_total:
                 self._status(f"Re-analysed {self.reanalysis_done} of your takes with the improved analysis. "
-                             "Use “Rebuild from takes” on the Voice Map tab to clear old noise readings from it.",
+                             "Use “Rebuild from takes” under Practice › Voice Map to clear old noise readings from it.",
                              "success")
                 self.reanalysis_total = self.reanalysis_done = 0
             self.update_register()

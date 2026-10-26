@@ -227,3 +227,65 @@ def test_live_cards_and_views_follow_the_mode(make_window, mode):
     else:
         assert keys[:2] == ["tuning", "vibrato"] and "plane" not in live.tabs.keys
         assert live.graph.y_range() != (70.0, 400.0)
+
+
+def test_take_widgets_are_wired_to_the_shell(make_window, monkeypatch):
+    window = make_window()
+    window.toggle_recording()
+    play(window, VOICE)
+    window.toggle_recording()
+    assert wait_for(lambda: window.core.takes())
+    take = window.core.takes()[0]
+    dash = window.dashboard
+    dash.latest.open_report.emit(take["uid"])                 # "Open full report"
+    assert window.current() == "takes" and window.takes.selected == take["uid"]
+    assert window.takes.full is not None and window.takes.full.uid == take["uid"]
+    window.go("dashboard")
+    dash.recent.open_take.emit(take["uid"])
+    assert window.current() == "takes"
+    window.go("dashboard")
+    dash.recent.show_all.emit()
+    assert window.current() == "takes"
+    window.takes.mic_check_requested.emit()                   # from a take's "too noisy" banner
+    assert window.mic_dialog is not None and window.mic_dialog.isVisible()
+    window.mic_dialog.reject()
+    imports = []
+    monkeypatch.setattr(window, "import_audio", lambda: imports.append(1))
+    window.takes.import_requested.disconnect()
+    window.takes.import_requested.connect(window.import_audio)
+    window.takes.import_requested.emit()
+    assert imports == [1]
+    window.takes.record_requested.emit()                      # from the Takes screen's empty state
+    assert window.current() == "dashboard" and window.core.is_recording
+    window.toggle_recording()
+    assert wait_for(lambda: window.record_btn.state == "idle")
+
+
+def test_voice_map_rebuild_and_clear_from_practice(make_window, tmp_path):
+    window = make_window(tmp_path / "takes")
+    window.toggle_recording()
+    play(window, VOICE)
+    window.toggle_recording()
+    assert wait_for(lambda: window.core.takes())
+    window.practice.open("voicemap")
+    view = window.voice_map
+    view.confirm = lambda text: True
+    view.clear()
+    assert view.data.counts.sum() == 0
+    view.rebuild_requested.emit()                             # QMessageBox.question is faked to "Yes"
+    assert wait_for(lambda: "rebuilt" in window.status_text())
+    assert view.data.counts.sum() > 50 and window.toasts.toasts[-1].kind == "success"
+
+
+def test_settings_targets_and_goal(make_window):
+    window = make_window()
+    window.go("settings")
+    settings = window.settings
+    settings.goal.set_current("masculine", emit=True)
+    assert window.profile.voice_goal == "masculine" and window.top.goal.current_key() == "masculine"
+    window.top.goal.set_current_key("exploring")
+    assert window.profile.voice_goal is None and settings.goal.current() == "exploring"
+    settings.targets.apply()
+    assert window.toasts.toasts[-1].text == "Targets saved"
+    settings.theme_choice.set_current_key("light")
+    assert window.profile.ui["theme"] == "light"

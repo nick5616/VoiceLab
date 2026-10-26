@@ -10,7 +10,7 @@ from ui import theme
 from ui.components import Button, Caption, Card, Chip, Collapsible, FlowGrid, Headline, IconButton, Label, Select
 from ui.exercise_view import ExerciseView
 from ui.live_graph import LivePitchGraph
-from ui.screens.listen import listen
+from ui.takes import listen
 from ui.voice_map_view import VoiceMapView
 from ui.vowel_check import VowelCheck
 
@@ -57,8 +57,9 @@ class _RecordingPanel(QWidget):
         self.graph = LivePitchGraph("speak", compact=True)
         self.graph.setMinimumHeight(160)
         self.graph.setMaximumHeight(240)
-        listen(self, core.events, ("recording", self._recording),
-               ("controls_changed", lambda c: self._recording(c["recording"])), ("profile_changed", self._reference))
+        listen(self, core, {"recording": self._recording,
+                            "controls_changed": lambda c: self._recording(c["recording"]),
+                            "profile_changed": self._reference})
         self._reference()
 
     def _reference(self):
@@ -195,7 +196,7 @@ class Phrases(_RecordingPanel):
                               "is a take, and they count together in Progress as “phrases”."))
         box.addWidget(self.graph)
         box.addStretch(1)
-        listen(self, core.events, ("phrase_changed", self.show_phrase))
+        listen(self, core, {"phrase_changed": self.show_phrase})
         self.show_phrase(core.phrase())
 
     def show_phrase(self, phrase):

@@ -3,12 +3,11 @@ baseline, appearance, and the kindness note."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
-import targets
 from app_core import VOICE_GOAL_CHOICES, VOICE_GOAL_TEXT
 from ui import theme
-from ui.components import Button, Caption, Card, Headline, Label, SegmentedControl, Select, Toggle
+from ui.components import Button, Caption, Card, Headline, Label, Section, SegmentedControl, Select, Toggle
 from ui.screens import TargetsEditor
-from ui.screens.listen import listen
+from ui.takes import listen
 
 EGG_CHOICES = [("none", "None"), ("0", "Channel 1"), ("1", "Channel 2")]     # the EGG input channel
 THEME_CHOICES = [("dark", "Dark"), ("light", "Light"), ("system", "Same as Windows")]
@@ -93,13 +92,13 @@ class SettingsScreen(QWidget):
         column.addWidget(goal)
 
         # --- targets ---
-        target_card = Card("Targets and baseline", "Targets are ranges to aim for; your baseline is a take "
-                           "to compare with. Both are yours to set; the presets are only typical.")
+        # The editor (spec 06) brings its own cards, so it sits under a plain heading, not in one more card.
+        target_section = Section("Targets and baseline")
         self.targets = TargetsEditor(core)
-        target_card.add(self.targets)
-        self.baseline_text = Caption("", tone="secondary")
-        target_card.add(self.baseline_text)
-        column.addWidget(target_card)
+        target_section.add(self.targets)
+        column.addSpacing(theme.S)
+        column.addWidget(target_section)
+        column.addSpacing(theme.S)
 
         # --- appearance ---
         look = Card("Appearance")
@@ -137,9 +136,9 @@ class SettingsScreen(QWidget):
         scroll.setWidget(holder)
         outer.addWidget(scroll)
 
-        listen(self, core.events, *(
+        listen(self, core, dict((
             ("mic_changed", self._mic_changed), ("folder_changed", self.refresh),
-            ("profile_changed", self.refresh), ("controls_changed", self._controls)))
+            ("profile_changed", self.refresh), ("controls_changed", self._controls))))
         self.update_egg_choice()
         self.refresh()
 
@@ -154,7 +153,6 @@ class SettingsScreen(QWidget):
         self.folder_btn.setToolTip(tooltip)
         self.reload_btn.setVisible(core.store is not None)
         self.goal.set_current(goal_key(core.profile.voice_goal), animate=False)
-        self.baseline_text.setText(targets.baseline_text(core.profile))
         lines = core.mic_check_text()
         self.mic_result.setText(lines[0] if lines else "No mic check yet. It takes 8 seconds and says what to fix.")
         self.mic_numbers.setText(" · ".join(lines[1:]))

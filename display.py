@@ -54,6 +54,11 @@ def midi_name(midi):
     return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
 
 
+def note_name(hz):
+    """'G2' for a frequency: the nearest note."""
+    return midi_name(int(round(69 + 12 * float(np.log2(hz / 440)))))
+
+
 def pitch_label(f0):
     note, cents = hz_to_note(f0)
     return f"{note} {cents:+d}¢ · {f0:.0f} Hz"

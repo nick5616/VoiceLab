@@ -1,6 +1,6 @@
 """The live view (note readout, coach line, pitch graph / spectrum / pitch x resonance, live cards and the
 phrase prompt) and the focused Live screen built from it. Both draw the core's live snapshots."""
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from ui import theme
@@ -8,12 +8,20 @@ from ui.components import Button, Caption, Chip, IconButton, Label, Tabs
 from ui.live_cards import LiveCards
 from ui.live_graph import LivePitchGraph
 from ui.live_views import PitchResonancePlane, SpectrumView
-from ui.screens.listen import listen
+from ui.takes import listen
 
 VIEWS = [("pitch", "Pitch"), ("spectrum", "Spectrum"), ("plane", "Pitch × Resonance")]
 SPEAK_ONLY_VIEWS = {"plane"}       # resonance isn't measured in singing (as the old tab set)
 PLAYHEAD_MS = 40                   # the replay playhead moves this often
 COACH_IDLE_TONE = "muted"
+
+
+class ViewStack(QStackedWidget):
+    """The graph views. Its preferred height is its minimum, so a scroll area around the live view only
+    scrolls when the window really is too short; any spare height goes to the graph (stretch)."""
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self.minimumHeight())
 
 
 class NumberLabel(Label):
@@ -50,7 +58,7 @@ class PhraseStrip(QWidget):
         row.addWidget(self.next_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         if replay is not None:
             row.addWidget(replay, 0, Qt.AlignmentFlag.AlignVCenter)
-        listen(self, core.events, ("phrase_changed", self.show_phrase))
+        listen(self, core, {"phrase_changed": self.show_phrase})
         self.show_phrase(core.phrase())
 
     def show_phrase(self, phrase):
@@ -97,7 +105,7 @@ class LiveView(QWidget):
         self.graph = LivePitchGraph(core.mode, compact=not focused)
         self.spectrum = SpectrumView(core.engine.analyzer.spectrum_freqs) if core.engine else QWidget()
         self.plane = PitchResonancePlane()
-        self.stack = QStackedWidget()
+        self.stack = ViewStack()
         for widget in (self.graph, self.spectrum, self.plane):
             self.stack.addWidget(widget)
         self.stack.setMinimumHeight(300 if focused else 200)
@@ -111,12 +119,12 @@ class LiveView(QWidget):
         self.playhead_timer.setInterval(PLAYHEAD_MS)
         self.playhead_timer.timeout.connect(self._follow_replay)
         self.note_text, self.note_tone, self.coach_text = None, None, None
-        listen(self, core.events, *(
-            ("mode_changed", self.apply_mode), ("profile_changed", self.refresh_profile),
-            ("take_added", self._take_added), ("take_updated", self._take_updated),
-            ("take_removed", self._take_removed), ("takes_loaded", lambda *_: self._load_takes()),
-            ("voice_map_changed", lambda: self.apply_mode(self.core.mode)),
-            ("mic_changed", lambda info: self.apply_mode(self.core.mode))))
+        listen(self, core, {
+            "mode_changed": self.apply_mode, "profile_changed": self.refresh_profile,
+            "take_added": self._take_added, "take_updated": self._take_updated,
+            "take_removed": self._take_removed, "takes_loaded": lambda *_: self._load_takes(),
+            "voice_map_changed": lambda: self.apply_mode(self.core.mode),
+            "mic_changed": lambda info: self.apply_mode(self.core.mode)})
         self.apply_mode(core.mode)
         self._load_takes()
         self.show_snapshot(None, core.live.snapshot())

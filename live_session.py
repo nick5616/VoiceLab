@@ -76,7 +76,7 @@ CARD_HELP = {
     "pitch": "How high your voice sits: the fundamental frequency (F0) over the last moment, in hertz. "
              "The zones are tendencies across many speakers, not rules.",
     "delta_f": "How bright or dark your voice sounds: formant spacing ΔF over F1–F4, in hertz. Higher is "
-               "brighter (a shorter apparent vocal tract). Not measured above about 350 Hz.",
+               "brighter (a shorter apparent vocal tract). Not judged above about 230 Hz.",
     "h1h2": "Light or heavy: H1*–H2*, the corrected level difference of the first two harmonics, in dB. "
             "A rough proxy for vocal-fold contact; the mic and desk rumble shift it.",
     "cpp": "Clear or breathy: cepstral peak prominence (CPP), in dB. Background noise and room echo "

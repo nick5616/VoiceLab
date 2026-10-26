@@ -9,7 +9,7 @@ from speech import VOWEL_PROMPT, VOWEL_WORDS
 from ui import theme
 from ui.components import Button, Caption, Headline, Label, ProgressStrip
 from ui.live_graph import style_plot
-from ui.screens.listen import listen
+from ui.takes import listen
 
 
 class VowelChart(pg.PlotWidget):
@@ -103,7 +103,7 @@ class VowelCheck(QWidget):
         self.chart = VowelChart()
         layout.addWidget(self.chart, 1)
         self._chart_data = None
-        listen(self, core.events, ("vowels_changed", self.show_state))
+        listen(self, core, {"vowels_changed": self.show_state})
         self.show_state(self.session.state())
 
     @property

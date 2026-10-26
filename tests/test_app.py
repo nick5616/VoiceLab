@@ -50,7 +50,7 @@ def play(window, audio, on_frame=None):
 
 
 def record(window, audio):
-    """Record `audio` as a take; returns the take's card on the Takes screen (or, without one, the take)."""
+    """Record `audio` as a take; returns the take."""
     count = len(window.core.takes())
     window.toggle_recording()
     play(window, audio)
@@ -58,7 +58,7 @@ def record(window, audio):
     assert window.record_btn.state == "analysing"
     assert wait_for(lambda: len(window.core.takes()) > count), window.status_text()
     QApplication.processEvents()
-    return window.cards[-1] if window.cards else window.core.takes()[0]
+    return window.core.takes()[0]
 
 
 def record_take(window, audio):

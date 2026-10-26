@@ -10,7 +10,7 @@ from exercise import CLOSE_COLOR, IN_TUNE_COLOR, MIDI_CHOICE, OFF_COLOR, ROLL_AF
 from ui import theme
 from ui.components import Button, Caption, Label, ProgressStrip, Select, Toggle
 from ui.live_graph import style_plot
-from ui.screens.listen import listen
+from ui.takes import listen
 
 # The session's tuning colours -> theme tokens: in tune, close, off.
 TUNING_TOKENS = {IN_TUNE_COLOR: "on_target", CLOSE_COLOR: "warning", OFF_COLOR: "off_target"}
@@ -134,7 +134,7 @@ class ExerciseView(QWidget):
         self.transpose.valueChanged.connect(self._refresh_targets)
         self._refresh_targets()
         self.show_state(self.session.state())
-        listen(self, core.events, ("exercise_changed", self.show_state))
+        listen(self, core, {"exercise_changed": self.show_state})
 
     @property
     def running(self):

@@ -136,7 +136,7 @@ def test_high_pitch_marks_only_resonance_untrusted(make_core):
     core._add(data)
     card = TakeCard(core, data["uid"])
     assert card.metric_cards["delta_f"].unavailable
-    assert "250 Hz" in card.metric_cards["delta_f"].headline.text()
+    assert "230 Hz" in card.metric_cards["delta_f"].headline.text()
     assert not card.metric_cards["pitch"].unavailable
 
 

@@ -8,7 +8,7 @@ from voice_map import HINT, REBUILD_TOOLTIP
 from ui import theme
 from ui.components import Button, Caption, Headline, Label, Select
 from ui.live_graph import style_plot
-from ui.screens.listen import listen
+from ui.takes import listen
 
 CLEAR_QUESTION = "Clear the Voice Map? Everything it has gathered is forgotten."
 
@@ -64,7 +64,7 @@ class VoiceMapView(QWidget):
         theme.changed.connect(self.restyle)
         self.restyle()
         self.redraw()
-        listen(self, core.events, ("voice_map_changed", self._changed))
+        listen(self, core, {"voice_map_changed": self._changed})
 
     def restyle(self, *_):
         t = theme.current()

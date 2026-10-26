@@ -17,7 +17,8 @@ for pkg in ("parselmouth", "sounddevice", "_sounddevice_data", "qtawesome", "pyw
 hiddenimports += collect_submodules("pyqtgraph") + collect_submodules("mido")
 datas += collect_data_files("pyqtgraph")
 
-# Every app module: the core in the repo root and the Qt UI in the ui package (with its subpackages),
+# Every app module: the core in the repo root and the Qt UI in the ui package with its subpackages
+# (ui.components, ui.screens, ui.takes, ui.progress),
 # covering modules added later, plus scipy bits pulled in lazily.
 app_modules = [os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(ROOT, "*.py"))]
 ui_modules = [os.path.splitext(os.path.relpath(p, ROOT))[0].replace(os.sep, ".").removesuffix(".__init__")

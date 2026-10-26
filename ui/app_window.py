@@ -18,7 +18,7 @@ from ui.mic_check_dialog import MicCheckDialog
 from ui.onboarding import Onboarding
 from ui.screens import ProgressScreen, TakesScreen
 from ui.screens.dashboard import DashboardScreen
-from ui.screens.listen import listen
+from ui.takes import listen
 from ui.screens.live import LiveScreen
 from ui.screens.practice import PracticeScreen
 from ui.screens.settings import SettingsScreen
@@ -222,6 +222,9 @@ class AppWindow(QMainWindow):
         self.live = LiveScreen(core, self)
         self.practice = PracticeScreen(core, self)
         self.takes = TakesScreen(core)
+        self.takes.record_requested.connect(self.start_recording)
+        self.takes.import_requested.connect(self.import_audio)
+        self.takes.mic_check_requested.connect(self.mic_check)
         self.progress = ProgressScreen(core)
         self.settings = SettingsScreen(core, self)
         self.screens = dict(zip(SCREENS, (self.dashboard, self.live, self.practice, self.takes, self.progress,
@@ -247,14 +250,14 @@ class AppWindow(QMainWindow):
         self._shortcuts()
 
         signals.frame_ready.connect(self.on_frame)
-        listen(self, core.events, *(("status", self.set_status), ("controls_changed", self.show_controls),
+        listen(self, core, dict((("status", self.set_status), ("controls_changed", self.show_controls),
                               ("recording", lambda on: self.show_record_state()), ("busy", self._busy),
                               ("session_started", self.start_session), ("folder_changed", self.update_folder),
                               ("mode_changed", self._mode_changed), ("profile_changed", self._profile_changed),
                               ("ui_changed", self.apply_ui_prefs), ("take_added", lambda *_: self.update_badges()),
                               ("takes_loaded", lambda *_: self.update_badges()),
                               ("take_updated", lambda *_: self.update_badges()),
-                              ("mic_changed", lambda info: self.update_mic_status())))
+                              ("mic_changed", lambda info: self.update_mic_status()))))
         self.update_folder()
         self.show_controls(core.controls())
         self.update_mic_status()
@@ -418,6 +421,13 @@ class AppWindow(QMainWindow):
         if self.core.is_recording or self.core.controls()["record"] and self.core.mic_available:
             self.core.toggle_recording()
 
+    def start_recording(self):
+        """Record (from an empty state's "Record" button): a screen that records, then the take."""
+        if self.current() not in ACTION_BAR_SCREENS:
+            self.go("dashboard")
+        if not self.core.is_recording:
+            self.toggle_recording()
+
     def replay(self):
         """Play the last 10 s; the live graphs hold still and show a playhead."""
         if self.core.replay_progress() is not None:
@@ -526,15 +536,7 @@ class AppWindow(QMainWindow):
         if self.core.should_onboard():
             self.show_onboarding()
 
-    # --- takes (transitional: what the take tests use until spec 06's widgets replace the placeholders) ---
-
-    @property
-    def cards(self):
-        """The full take cards on the Takes screen, oldest first ([] with spec 06's screen)."""
-        return list(getattr(self.takes, "cards", []))
-
-    def add_card(self, data):
-        return self.takes.add_card(data)
+    # --- takes ---
 
     def set_target(self, uid):
         return self.core.set_target(uid)
