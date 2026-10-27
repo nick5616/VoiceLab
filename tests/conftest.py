@@ -68,3 +68,17 @@ def make_window(app, tmp_path, monkeypatch):
     QApplication.processEvents()
     theme.set_theme("dark")             # a test may have switched it; the theme is app-wide
     theme.set_reduce_motion(False)
+
+
+# phase 11 / 01-ui-lab
+@pytest.fixture
+def lab_env(app):
+    """The UI lab's process fakes (no mic, speakers, file pickers or blocking message boxes; motion off), put
+    back afterwards so the tests that follow see the real ones."""
+    from ui import theme
+    from ui.lab import env
+    env.setup()
+    yield env
+    env.restore()
+    theme.set_theme("dark")
+    theme.set_reduce_motion(False)

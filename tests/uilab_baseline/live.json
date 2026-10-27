@@ -1,0 +1,945 @@
+{
+ "group": "live",
+ "note": "Accepted findings (check|screen|widget path). Wave B may only remove entries; regenerate with python -m ui.lab baseline --group live",
+ "scenarios": [
+  "C:/tmp/phase11-work/01-lab/baseline-run"
+ ],
+ "count": 57,
+ "entries": {
+  "axis|dashboard|dashboard/live/graph": {
+   "check": "axis",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/graph",
+   "count": 156,
+   "example": "The live graph has no time axis: nothing says how far back the line goes",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "axis|live|live/view/graph": {
+   "check": "axis",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/graph",
+   "count": 33,
+   "example": "The time axis has numbers but no unit (seconds? ago?)",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "consistency|dashboard|dashboard/live/cards/cards.pitch": {
+   "check": "consistency",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch",
+   "count": 88,
+   "example": "Pitch reads 82 Hz on the readout and 86 Hz on the pitch card at the same moment, and nothing says why they differ",
+   "scenarios": [
+    "noisy_input",
+    "record_take",
+    "speak_real_replay",
+    "speak_truth_glide"
+   ]
+  },
+  "consistency|live|live/view/cards/cards.pitch": {
+   "check": "consistency",
+   "severity": "error",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch",
+   "count": 8,
+   "example": "Pitch reads 253 Hz on the readout and 249 Hz on the pitch card at the same moment, and nothing says why they differ",
+   "scenarios": [
+    "speak_truth_glide"
+   ]
+  },
+  "fold|dashboard|dashboard/right": {
+   "check": "fold",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "dashboard/right",
+   "count": 68,
+   "example": "The dashboard needs scrolling at 1920×1080: dashboard scrolls 361 px at 1920×1080",
+   "scenarios": [
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "fold|dashboard|dashboard/right/edge": {
+   "check": "fold",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/right/edge",
+   "count": 134,
+   "example": "The bottom of the dashboard cuts through 3 text(s) at 1920×1080: “Fri 23 Oct 9:20 · free s”, “Masculine”, “147 Hz”",
+   "scenarios": [
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|dashboard|dashboard/live/cards/cards.delta_f/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.delta_f/bar",
+   "count": 152,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|dashboard|dashboard/live/cards/cards.pitch/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch/bar",
+   "count": 152,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|dashboard|dashboard/live/cards/cards.pitch_range/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch_range/bar",
+   "count": 82,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|dashboard|dashboard/live/cards/cards.register/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.register/bar",
+   "count": 86,
+   "example": "Zone band(s) chest #2a303b at 1.22:1, mix #2a303b at 1.22:1, head #2a303b at 1.22:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|live|live/view/cards/cards.delta_f/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.delta_f/bar",
+   "count": 15,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|live|live/view/cards/cards.pitch/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch/bar",
+   "count": 15,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|live|live/view/cards/cards.pitch_range/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch_range/bar",
+   "count": 15,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "indicator_contrast|live|live/view/cards/cards.register/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.register/bar",
+   "count": 17,
+   "example": "Zone band(s) chest #2a303b at 1.22:1, mix #2a303b at 1.22:1, head #2a303b at 1.22:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "jargon|dashboard|dashboard/live/cards/cards.pitch_range/value": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch_range/value",
+   "count": 88,
+   "example": "Jargon “st without 'semitones'” in visible text: “14.6 st”",
+   "scenarios": [
+    "noisy_input",
+    "record_take",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "jargon|dashboard|dashboard/live/cards/cards.tuning/value": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.tuning/value",
+   "count": 4,
+   "example": "Jargon “¢ without words” in visible text: “-0¢ from A”",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "jargon|dashboard|dashboard/live/note_name": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/note_name",
+   "count": 64,
+   "example": "Jargon “¢ without words” in visible text: “E2 -14¢”",
+   "scenarios": [
+    "noisy_input",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "jargon|live|live/view/cards/cards.pitch_range/value": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch_range/value",
+   "count": 8,
+   "example": "Jargon “st without 'semitones'” in visible text: “10.6 st”",
+   "scenarios": [
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "jargon|live|live/view/cards/cards.tuning/value": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.tuning/value",
+   "count": 4,
+   "example": "Jargon “¢ without words” in visible text: “+8¢ from A”",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "jargon|live|live/view/cards/cards.vibrato/value": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.vibrato/value",
+   "count": 4,
+   "example": "Jargon “¢ without words” in visible text: “5.5 Hz · ±48¢”",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "jargon|live|live/view/note_name": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/note_name",
+   "count": 12,
+   "example": "Jargon “¢ without words” in visible text: “A3 +9¢”",
+   "scenarios": [
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "listening|dashboard|dashboard/live/note_label": {
+   "check": "listening",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/note_label",
+   "count": 52,
+   "example": "Silent, and nothing says the app is waiting for your voice (the readout is just “—”)",
+   "scenarios": [
+    "noisy_input",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "listening|live|live/view/note_label": {
+   "check": "listening",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/note_label",
+   "count": 12,
+   "example": "Nothing says the app hears you: only the numbers move (no “listening” or “hearing you” state)",
+   "scenarios": [
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "live_vs_take|dashboard|dashboard/live/note_label": {
+   "check": "live_vs_take",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/note_label",
+   "count": 1,
+   "example": "Live pitch while replaying take 2026-10-18 11-28-50 reads 169 Hz (median); the take itself says 158 Hz over the same seconds (+1.19 semitones)",
+   "scenarios": [
+    "speak_real_replay"
+   ]
+  },
+  "overlap|live|live/replay_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/replay_btn",
+   "count": 2,
+   "example": "Button “Replay last 10 s” is covered by toasts",
+   "scenarios": [
+    "no_mic"
+   ]
+  },
+  "overlap|live|live/view/phrase/next_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/phrase/next_btn",
+   "count": 2,
+   "example": "IconButton “” is covered by toasts",
+   "scenarios": [
+    "no_mic"
+   ]
+  },
+  "raw_unit|dashboard|dashboard/live/cards/cards.cpp/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.cpp/value",
+   "count": 40,
+   "example": "“31.9 dB” on Clarity has no zones to say what it means (only the ends: Breathy / Clear)",
+   "scenarios": [
+    "noisy_input",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "raw_unit|dashboard|dashboard/live/cards/cards.h1h2/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.h1h2/value",
+   "count": 40,
+   "example": "“+0.5 dB” on Weight has no zones to say what it means (only the ends: Heavy / Light)",
+   "scenarios": [
+    "noisy_input",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "raw_unit|dashboard|dashboard/live/cards/cards.ring/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.ring/value",
+   "count": 4,
+   "example": "“-12.7 dB” on Ring has no zones to say what it means (only the ends: Muffled / Ringing)",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "raw_unit|live|live/view/cards/cards.cpp/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.cpp/value",
+   "count": 12,
+   "example": "“30.2 dB” on Clarity has no zones to say what it means (only the ends: Breathy / Clear)",
+   "scenarios": [
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "raw_unit|live|live/view/cards/cards.h1h2/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.h1h2/value",
+   "count": 12,
+   "example": "“-4.1 dB” on Weight has no zones to say what it means (only the ends: Heavy / Light)",
+   "scenarios": [
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "raw_unit|live|live/view/cards/cards.ring/value": {
+   "check": "raw_unit",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.ring/value",
+   "count": 4,
+   "example": "“-12.8 dB” on Ring has no zones to say what it means (only the ends: Muffled / Ringing)",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.cpp/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.cpp/help",
+   "count": 154,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.delta_f/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.delta_f/help",
+   "count": 152,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.h1h2/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.h1h2/help",
+   "count": 154,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.pitch/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch/help",
+   "count": 152,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.pitch_range/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.pitch_range/help",
+   "count": 82,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.register/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.register/help",
+   "count": 86,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.ring/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.ring/help",
+   "count": 4,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.tuning/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.tuning/help",
+   "count": 4,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|dashboard|dashboard/live/cards/cards.vibrato/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/cards/cards.vibrato/help",
+   "count": 4,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.cpp/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.cpp/help",
+   "count": 17,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.delta_f/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.delta_f/help",
+   "count": 15,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.h1h2/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.h1h2/help",
+   "count": 17,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.pitch/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch/help",
+   "count": 15,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.pitch_range/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.pitch_range/help",
+   "count": 15,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.register/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.register/help",
+   "count": 17,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.ring/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.ring/help",
+   "count": 2,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.tuning/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.tuning/help",
+   "count": 2,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "small_target|live|live/view/cards/cards.vibrato/help": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.vibrato/help",
+   "count": 2,
+   "example": "Click target 24×24 px is under 28×28",
+   "scenarios": [
+    "sing_truth_scale"
+   ]
+  },
+  "truncation|dashboard|dashboard/live/graph/marker": {
+   "check": "truncation",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/graph/marker",
+   "count": 2,
+   "example": "Graph label “▲ 444 Hz” runs outside the plot",
+   "scenarios": [
+    "noisy_input"
+   ]
+  },
+  "truth_moving|dashboard|dashboard/live/note_label": {
+   "check": "truth_moving",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/note_label",
+   "count": 5,
+   "example": "The readout is off by 30.0 % (median) against a known speech voice; tolerance 3 %",
+   "scenarios": [
+    "noisy_input",
+    "record_take",
+    "sing_truth_scale"
+   ]
+  },
+  "truth|dashboard|dashboard/live/note_label": {
+   "check": "truth",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/note_label",
+   "count": 2,
+   "example": "The readout is an octave off for 37 % of a known speech voice (the tracker jumps octaves)",
+   "scenarios": [
+    "noisy_input",
+    "sing_truth_scale"
+   ]
+  },
+  "vocabulary|dashboard|words:name.delta_f": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "words:name.delta_f",
+   "count": 140,
+   "example": "One quantity under 2 names on one screen: Brightness (resonance), Resonance",
+   "scenarios": [
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "vocabulary|dashboard|words:zone.feminine": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "words:zone.feminine",
+   "count": 144,
+   "example": "The feminine zone is called Feminine and typically feminine on one screen",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "vocabulary|dashboard|words:zone.masculine": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "words:zone.masculine",
+   "count": 144,
+   "example": "The masculine zone is called Masculine and typically masculine on one screen",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "vocabulary|dashboard|words:zone.overlap": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "words:zone.overlap",
+   "count": 138,
+   "example": "The overlap zone is called Overlap and overlap / androgynous on one screen",
+   "scenarios": [
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  }
+ }
+}
