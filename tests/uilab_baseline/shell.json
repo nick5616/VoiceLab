@@ -1,0 +1,418 @@
+{
+ "group": "shell",
+ "note": "Accepted findings (check|screen|widget path). Wave B may only remove entries; regenerate with python -m ui.lab baseline --group shell",
+ "scenarios": [
+  "C:/tmp/phase11-work/01-lab/baseline-run"
+ ],
+ "count": 30,
+ "entries": {
+  "indicator_contrast|settings|settings/targets/rows.pitch/bar": {
+   "check": "indicator_contrast",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "settings/targets/rows.pitch/bar",
+   "count": 12,
+   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "jargon|settings|settings/targets/baseline_label": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "settings/targets/baseline_label",
+   "count": 40,
+   "example": "Jargon “ΔF” in visible text: “Recorded 2026-10-23 11:59 · D3 -10¢ · 146 Hz · ΔF 993 Hz”",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "next_action|dashboard|toasts/toasts.*": {
+   "check": "next_action",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "toasts/toasts.0",
+   "count": 16,
+   "example": "Error toast says what went wrong but not what to do: “Couldn't save the take: [Errno 28] No space left on device”",
+   "scenarios": [
+    "error_status"
+   ]
+  },
+  "overlap|dashboard|action_bar/mic_check_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "action_bar/mic_check_btn",
+   "count": 22,
+   "example": "Button “Mic check” is covered by toasts",
+   "scenarios": [
+    "error_status",
+    "no_mic",
+    "reach"
+   ]
+  },
+  "overlap|dashboard|action_bar/replay_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "action_bar/replay_btn",
+   "count": 22,
+   "example": "Button “Replay last 10 s” is covered by toasts",
+   "scenarios": [
+    "error_status",
+    "no_mic",
+    "reach"
+   ]
+  },
+  "overlap|live|action_bar/mic_check_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "action_bar/mic_check_btn",
+   "count": 4,
+   "example": "Button “Mic check” is covered by toasts",
+   "scenarios": [
+    "no_mic"
+   ]
+  },
+  "overlap|practice|action_bar/mic_check_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "action_bar/mic_check_btn",
+   "count": 8,
+   "example": "Button “Mic check” is covered by toasts",
+   "scenarios": [
+    "practice_each"
+   ]
+  },
+  "overlap|practice|action_bar/replay_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "action_bar/replay_btn",
+   "count": 8,
+   "example": "Button “Replay last 10 s” is covered by toasts",
+   "scenarios": [
+    "practice_each"
+   ]
+  },
+  "small_target|dashboard|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "top/activity/header",
+   "count": 156,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "first_run",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|live|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "top/activity/header",
+   "count": 33,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "small_target|practice|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "top/activity/header",
+   "count": 103,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "practice_each",
+    "reach"
+   ]
+  },
+  "small_target|progress|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "progress",
+   "widget_path": "top/activity/header",
+   "count": 9,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "progress",
+    "reach"
+   ]
+  },
+  "small_target|settings|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "top/activity/header",
+   "count": 20,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "small_target|takes|top/activity/header": {
+   "check": "small_target",
+   "severity": "warn",
+   "screen": "takes",
+   "widget_path": "top/activity/header",
+   "count": 77,
+   "example": "Click target 136×18 px is under 28×28",
+   "scenarios": [
+    "empty",
+    "no_mic",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "takes_report"
+   ]
+  },
+  "source_text|dashboard|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "top/mic",
+   "count": 296,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "empty",
+    "error_status",
+    "listening_silence",
+    "no_mic",
+    "noisy_input",
+    "progress",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "source_text|live|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "top/mic",
+   "count": 66,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "empty",
+    "listening_silence",
+    "no_mic",
+    "reach",
+    "sing_truth_scale",
+    "speak_truth_glide",
+    "speak_truth_steady"
+   ]
+  },
+  "source_text|practice|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "top/mic",
+   "count": 206,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "practice_each",
+    "reach"
+   ]
+  },
+  "source_text|progress|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "progress",
+   "widget_path": "top/mic",
+   "count": 18,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "empty",
+    "progress",
+    "reach"
+   ]
+  },
+  "source_text|settings|settings/mic_choice": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "settings/mic_choice",
+   "count": 20,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "source_text|settings|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "top/mic",
+   "count": 40,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "source_text|takes|top/mic": {
+   "check": "source_text",
+   "severity": "warn",
+   "screen": "takes",
+   "widget_path": "top/mic",
+   "count": 154,
+   "example": "Text opens a bracket it never closes (cut short before it reached the screen?): “Microphone (USB PnP Audio Devic”",
+   "scenarios": [
+    "empty",
+    "no_mic",
+    "reach",
+    "reanalysis_running",
+    "record_take",
+    "takes_report"
+   ]
+  },
+  "state|dashboard|nav#takes": {
+   "check": "state",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "nav#takes",
+   "count": 4,
+   "example": "The Takes badge says nothing while 3 take(s) are being analysed",
+   "scenarios": [
+    "reanalysis_running"
+   ]
+  },
+  "state|practice|top/activity": {
+   "check": "state",
+   "severity": "error",
+   "screen": "practice",
+   "widget_path": "top/activity",
+   "count": 8,
+   "example": "“Scoring the exercise” is running, but nothing visible names it (the top bar says “1 running”)",
+   "scenarios": [
+    "practice_each"
+   ]
+  },
+  "state|takes|nav#takes": {
+   "check": "state",
+   "severity": "error",
+   "screen": "takes",
+   "widget_path": "nav#takes",
+   "count": 8,
+   "example": "The Takes badge says nothing while 3 take(s) are being analysed",
+   "scenarios": [
+    "reanalysis_running"
+   ]
+  },
+  "truncation|dashboard|banner/label": {
+   "check": "truncation",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "banner/label",
+   "count": 46,
+   "example": "Text is cut short with an ellipsis: “A steady whine from the mic: try another USB port or cable”",
+   "scenarios": [
+    "listening_silence",
+    "noisy_input",
+    "record_take",
+    "sing_truth_scale",
+    "speak_real_replay",
+    "speak_truth_steady"
+   ]
+  },
+  "truncation|live|banner/label": {
+   "check": "truncation",
+   "severity": "error",
+   "screen": "live",
+   "widget_path": "banner/label",
+   "count": 8,
+   "example": "Text is cut short with an ellipsis: “A steady whine from the mic: try another USB port or cable · can't judge weight ”",
+   "scenarios": [
+    "listening_silence",
+    "sing_truth_scale",
+    "speak_truth_steady"
+   ]
+  },
+  "truncation|practice|banner/label": {
+   "check": "truncation",
+   "severity": "error",
+   "screen": "practice",
+   "widget_path": "banner/label",
+   "count": 32,
+   "example": "Text is cut short with an ellipsis: “A steady whine from the mic: try another USB port or cable”",
+   "scenarios": [
+    "practice_each"
+   ]
+  },
+  "truncation|takes|banner/label": {
+   "check": "truncation",
+   "severity": "error",
+   "screen": "takes",
+   "widget_path": "banner/label",
+   "count": 2,
+   "example": "Text is cut short with an ellipsis: “A steady whine from the mic: try another USB port or cable · can't judge weight ”",
+   "scenarios": [
+    "record_take"
+   ]
+  },
+  "vocabulary|settings|words:zone.feminine": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "words:zone.feminine",
+   "count": 17,
+   "example": "The feminine zone is called Feminine and typically feminine on one screen",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  },
+  "vocabulary|settings|words:zone.masculine": {
+   "check": "vocabulary",
+   "severity": "warn",
+   "screen": "settings",
+   "widget_path": "words:zone.masculine",
+   "count": 17,
+   "example": "The masculine zone is called Masculine and typically masculine on one screen",
+   "scenarios": [
+    "no_mic",
+    "reach",
+    "settings"
+   ]
+  }
+ }
+}
