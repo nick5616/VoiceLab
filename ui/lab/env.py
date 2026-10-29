@@ -63,7 +63,7 @@ def restore():
 
 def _install():
     import sounddevice as sd
-    from PyQt6.QtWidgets import QFileDialog, QMessageBox
+    from PyQt6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox
 
     import app_core
     saved = []
@@ -91,6 +91,13 @@ def _install():
         _state["calls"].append(("message_box", f"{box.windowTitle()}: {box.text()}"))
         return 0
 
+    def exec_dialog(dialog):
+        """Any other modal (spec 05's sheets): record its title and words, and cancel it. A real exec() would
+        block the run forever, since nobody is there to answer."""
+        words = " · ".join(t for t in (w.text() for w in dialog.findChildren(QLabel)) if t)
+        _state["calls"].append(("dialog", f"{dialog.windowTitle()}: {words}"))
+        return QDialog.DialogCode.Rejected
+
     put(sd, "play", lambda *a, **k: None)
     put(sd, "stop", lambda *a, **k: None)
     put(sd, "InputStream", no_stream)
@@ -101,4 +108,5 @@ def _install():
     put(QFileDialog, "getExistingDirectory", staticmethod(folder))
     put(QMessageBox, "question", staticmethod(question))
     put(QMessageBox, "exec", exec_box)
+    put(QDialog, "exec", exec_dialog)
     return saved

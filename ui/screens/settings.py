@@ -78,6 +78,27 @@ class SettingsTargets(TargetsEditor):
         self.baseline_label.setText(shell_state.plain_baseline_text(self.baseline_label.text()))
 
 
+class _Centred(QWidget):
+    """Holds the settings column centred in the scroll area. Its height for a width is the column's at the
+    column's own (capped) width; the plain layout asked at the full width, where text wraps less, so the
+    column got less height than it needs and its rows were squeezed (lab: the Settings target rows)."""
+
+    def __init__(self, content):
+        super().__init__()
+        self.content = content
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(content, 1, Qt.AlignmentFlag.AlignHCenter)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        # centred, the column gets its preferred width (within its limits), not the whole row
+        hint = max(self.content.sizeHint().width(), self.content.minimumWidth())
+        return self.content.heightForWidth(min(width, hint, self.content.maximumWidth()))
+
+
 class SettingsScreen(QWidget):
     def __init__(self, core, shell):
         super().__init__()
@@ -195,11 +216,8 @@ class SettingsScreen(QWidget):
         column.addWidget(about)
         column.addStretch(1)
 
-        holder = QWidget()
-        center = QHBoxLayout(holder)
-        center.setContentsMargins(0, 0, 0, 0)
         content.setMaximumWidth(COLUMN_WIDTH + 2 * theme.XXL)
-        center.addWidget(content, 1, Qt.AlignmentFlag.AlignHCenter)
+        holder = _Centred(content)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
