@@ -1,8 +1,9 @@
 """The dashboard's last-take panel: titled "Your last take" with when it was made ("3 min ago", or the day
 and "3 days ago"), so it can't be mistaken for the live readings; the newest take's headline, overall
 placement and the top tip with its moment. A skeleton while a new take is analysed, and a kind empty state
-before the first take. LatestTakePanel(core, compact=True) is the dashboard's version: at most
-COMPACT_MAX_HEIGHT tall, one tip, and a problem only when there is one."""
+before the first take. LatestTakePanel(core, compact=True) is the dashboard's version: about
+COMPACT_MAX_HEIGHT tall at the dashboard's width (it grows rather than clip), one tip, and a problem only when
+there is one."""
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -14,7 +15,7 @@ from ui.takes.take_card import SummaryView, TakePlayback, clear_layout
 
 LATEST_TIPS = 2                 # the full panel shows the top tips; the full report has the rest
 COMPACT_TIPS = 1                # the compact panel shows the top one
-COMPACT_MAX_HEIGHT = 320        # px (audit A-026)
+COMPACT_MAX_HEIGHT = 320        # px at 520 px wide: the design height (audit A-026), not a clip
 HFW_SLACK = 24                  # px: the card's own height-for-width comes out this short in a scroll column
 TITLE_REFRESH_MS = 30000        # "3 min ago" is refreshed this often
 EMPTY_TEXT = "Your first take's report appears here"
@@ -46,8 +47,6 @@ class LatestTakePanel(Card):
                                small=compact)
         self.open_btn.clicked.connect(lambda: self.uid and self.open_report.emit(self.uid))
         self.add_action(self.open_btn)
-        if compact:
-            self.setMaximumHeight(COMPACT_MAX_HEIGHT)
         listen(self, core, {"take_added": self.refresh, "take_removed": self.refresh, "takes_loaded": self.refresh,
                             "take_updated": self._updated, "profile_changed": self.refresh, "busy": self._busy})
         self.clock = QTimer(self)
@@ -59,8 +58,6 @@ class LatestTakePanel(Card):
     def resizeEvent(self, event):
         """Never shorter than its wrapped text needs: a host column that sizes by minimumSize would squash it."""
         super().resizeEvent(event)
-        if self.compact:
-            return
         need = self.heightForWidth(self.width()) + HFW_SLACK
         if need > 0 and need != self.minimumHeight():
             self.setMinimumHeight(need)
@@ -116,7 +113,8 @@ class LatestTakePanel(Card):
         self.state = "take"
         head = take_view.header(newest, self.core.number(newest))
         self.set_title(take_view.last_take_title(newest))
-        self.set_subtitle(" · ".join(p for p in (head["title"] or head["placeholder"], head["task"]) if p))
+        if not self.compact:            # the compact title already says when; clipping a tip is worse than a name
+            self.set_subtitle(" · ".join(p for p in (head["title"] or head["placeholder"], head["task"]) if p))
         rep = report_for(self.core, self.uid)
         self.summary = SummaryView(rep, newest, max_tips=COMPACT_TIPS if self.compact else LATEST_TIPS,
                                    headline_level="heading", split=False, compact=self.compact)

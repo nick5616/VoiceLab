@@ -953,7 +953,10 @@ def test_latest_take_panel_says_which_take_and_how_long_ago_and_stays_short(make
     assert panel.title_label.text().startswith("Your last take · ") and "ago" in panel.title_label.text() \
         or "just now" in panel.title_label.text()
     assert not panel.findChildren(Banner) and len(panel.summary.tip_rows) <= 1
-    assert panel.layout().totalHeightForWidth(520) <= 320 and panel.maximumHeight() == 320     # nothing squeezed
+    assert panel.layout().totalHeightForWidth(520) <= 320                    # fits the design height...
+    panel.resize(400, 900)
+    QApplication.processEvents()
+    assert panel.minimumHeight() >= panel.layout().totalHeightForWidth(400)  # ...and grows rather than clip when narrow
     assert panel.open_btn.text() == "Open report"
     full = LatestTakePanel(core)
     assert full.title_label.text().startswith("Your last take") and full.open_btn.text() == "Open full report"

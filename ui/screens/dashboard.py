@@ -19,7 +19,6 @@ except ImportError:
 RIGHT_MIN, RIGHT_MAX = 380, 620     # px: the right column's width range
 SHORT_BELOW = 760                   # px: a dashboard shorter than this shows fewer recent takes and no progress
 RECENT_ROWS = {"tall": 6, "short": 3}
-LAST_TAKE_MAX_HEIGHT = 320          # px: the compact last-take panel (spec 04's contract)
 
 
 def scrolling(widget, min_width=None, max_width=None):

@@ -136,7 +136,7 @@ class SessionCard(Card):
         finished = plan.finished
         self.where.setText(f"{plan.title()} · about {SESSION_MINUTES} min" if not finished else plan.title())
         self.rows["result"].practice = None
-        nudge = self.core.rest_nudge()                  # a long session earns a kind word, finished or not
+        nudge = self.core.rest_text()                   # a long session earns a kind word, finished or not
         if nudge:
             self.rest_text = nudge
         if finished and any(s["state"] == "done" for s in steps[:-1]):

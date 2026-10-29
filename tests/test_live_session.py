@@ -12,6 +12,7 @@ import display  # noqa: E402
 import live_session  # noqa: E402
 import mic_noise  # noqa: E402
 from analysis import SAMPLE_RATE  # noqa: E402
+from display import LIVE_TEXT_SECONDS  # noqa: E402
 from engine import UPDATE_INTERVAL, LiveEngine  # noqa: E402
 from live_session import COACH_EVERY, LiveSession, VerdictTracker  # noqa: E402
 from profile_store import Profile  # noqa: E402
@@ -152,7 +153,7 @@ def test_note_is_readable_and_held_through_short_gaps(tmp_path):
         text = live.update(frame(f0=f0))["note"]["text"]
         if not texts or texts[-1] != text:
             texts.append(text)
-    assert len(texts) <= 80                 # a 19 st glide: a change per 0.25 st at most (spec 07), not one per frame
+    assert len(texts) <= 5 / LIVE_TEXT_SECONDS + 2                  # readable: not one change per frame
     assert "—" not in texts[1:]                                     # a 0.2 s gap holds the note
 
 
@@ -369,7 +370,7 @@ def test_card_text_is_throttled_like_the_titles(tmp_path):
         clock[0] += 0.025
         snapshot = live.update(frame(f0=150 + i))
         shown.append(snapshot["metrics"]["pitch"]["shown"])
-    assert len(set(shown)) <= 8      # every 0.2 s, or sooner when the voice has moved 0.25 st (spec 07: the readout tracks)
+    assert len(set(shown)) <= 4      # every 0.2 s, like the readout it follows
 
 
 def test_noisy_readings_go_to_one_banner(session):
@@ -603,13 +604,13 @@ def test_next_step_for_the_dashboard():
     assert live_session.next_step(3, recording=True)["action"] is None
 
 
-def test_readout_tracks_a_moving_voice_within_a_quarter_semitone(tmp_path):
+def test_readout_is_never_more_than_one_text_interval_behind_the_voice(tmp_path):
     clock = [0.0]
     live = LiveSession(Profile(tmp_path / "home"), "speak", clock=lambda: clock.__setitem__(0, clock[0] + UPDATE_INTERVAL) or clock[0])
-    track, worst = [], 0.0
+    track, medians = [], []
+    window, lag = int(live_session.NOTE_WINDOW_SECONDS / UPDATE_INTERVAL), int(round(LIVE_TEXT_SECONDS / UPDATE_INTERVAL))
     for n in range(160):
         track.append(150 * 2 ** (np.sin(n / 12) * 3 / 12))              # +-3 st swings, like speech
         hz = live.update(frame(f0=track[-1]))["note"]["hz"]
-        median = np.median(track[-int(live_session.NOTE_WINDOW_SECONDS / UPDATE_INTERVAL):])
-        worst = max(worst, abs(12 * np.log2(hz / median)))
-    assert worst < live_session.NOTE_JUMP_SEMITONES + 0.01              # sample-and-hold was up to ~1.1 st off
+        medians.append(float(np.median(track[-window:])))
+        assert hz is not None and any(abs(hz - m) < 1e-6 for m in medians[-lag - 1:])     # a median from the last 0.2 s

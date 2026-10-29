@@ -49,7 +49,6 @@ FRESH_VERDICT_FRAMES = 20       # a verdict counts for the note readout only whi
 CLIP_REPORT_FRACTION = 1e-4     # share of clipped samples in a noise report that counts as clipping
 H1H2_ROUGH_HZ = coach.FORMANT_MAX_F0     # H1*-H2* is rough above this f0 (F1 meets H1; audit)
 NOTE_WINDOW_SECONDS = 0.25      # the note readout shows the median pitch over this
-NOTE_JUMP_SEMITONES = 0.25      # a change this big skips the readout's hold (spec 07: the readout tracks the voice)
 NOTE_HOLD_SECONDS = 0.5         # ...and keeps the last note this long through gaps
 CLIP_BADGE_SECONDS = 1.0        # the clipping badge stays up this long after a clip
 EGG_SIGNAL_SECONDS = 1.5        # the EGG badge stays green this long after the last contact quotient
@@ -643,9 +642,9 @@ class LiveSession:
                 self.floor_db = level
             elif not voiced:
                 self.floor_db = min(level, self.floor_db + FLOOR_RISE_DB)
-        sound = (not voiced) and (bool(frame.get("too_quiet", False)) or (
+        sound = bool(frame.get("too_quiet", False)) or ((not voiced) and (
             np.isfinite(self.level_avg) and self.level_avg > self.floor_db + QUIET_MARGIN_DB
-            and self.level_avg < QUIET_MAX_DBFS))
+            and self.level_avg < QUIET_MAX_DBFS))      # spec 07 reads a quiet voice's pitch and flags it too_quiet
         self.quiet_frames = self.quiet_frames + 1 if sound else 0
         self.state = self.current_state()
 
@@ -654,10 +653,10 @@ class LiveSession:
         age = self.signal_age() if self.signal_age else None
         if age is not None and age > NO_SIGNAL_SECONDS:
             return "no_signal"
-        if self.heard and self.silent_frames * UPDATE_INTERVAL < HEARING_HOLD_SECONDS:
-            return "hearing"
         if self.quiet_frames * UPDATE_INTERVAL >= QUIET_SECONDS:
             return "too_quiet"
+        if self.heard and self.silent_frames * UPDATE_INTERVAL < HEARING_HOLD_SECONDS:
+            return "hearing"
         return "silent"
 
     @staticmethod
@@ -949,10 +948,12 @@ class LiveSession:
             self.last_voiced_at = now
         recent = np.array(list(self.recent_f0)[-int(NOTE_WINDOW_SECONDS / UPDATE_INTERVAL):])
         recent = recent[~np.isnan(recent)]
-        if now - self.note_shown_at < LIVE_TEXT_SECONDS and self.note["hz"] is not None:
-            held = self.note["hz"]      # later changes wait, unless the voice has really moved
-            if len(recent) and abs(12 * np.log2(np.median(recent) / held)) < NOTE_JUMP_SEMITONES:
-                return
+        if len(recent) and self.note["hz"] is not None and now - self.note_shown_at < LIVE_TEXT_SECONDS:
+            on_target = self.pitch_and_resonance_on_target()      # the number waits; being on target doesn't
+            if on_target != self.note["on_target"]:
+                self.note = dict(self.note, on_target=on_target)
+                self.changed_text = True
+            return          # readable rather than flickering; never more than LIVE_TEXT_SECONDS behind the voice
         if len(recent):
             pitch = float(np.median(recent))
             note = {"text": pitch_label(pitch), "on_target": self.pitch_and_resonance_on_target(), "hz": pitch,

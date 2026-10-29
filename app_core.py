@@ -644,9 +644,17 @@ class VoiceLabCore:
         minutes = self.session_minutes()
         if minutes >= REST_NUDGE_MINUTES * (self.rest_nudges + 1):
             self.rest_nudges += 1
-            return (f"You have been at this for {minutes:.0f} minutes. A short rest and a sip "
-                    "of water can help; ease off if your voice feels tired or tight.")
+            return self.rest_text()
         return None
+
+    # phase 11 / integration: the reminder's words without using it up (session cards read it; the toast uses it)
+    def rest_text(self):
+        """The rest reminder once the session has run REST_NUDGE_MINUTES, else None. Doesn't count as shown."""
+        minutes = self.session_minutes()
+        if minutes < REST_NUDGE_MINUTES:
+            return None
+        return (f"You have been at this for {minutes:.0f} minutes. A short rest and a sip "
+                "of water can help; ease off if your voice feels tired or tight.")
 
     # --- REPLAY ---
 
