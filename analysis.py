@@ -45,6 +45,7 @@ SPECTRUM_MAX_HZ = 5500
 VOICE_BAND_HZ = 4000
 # Below this level live frames skip analysis and report silence.
 SILENCE_DBFS = -50
+QUIET_READ_MARGIN_DB = 12     # a frame under SILENCE_DBFS still gets a pitch if its voice band stands this far over the learned floor (phase 11: a -52 dBFS voice over a -75 floor read nothing)
 # Samples at or above this are treated as clipped (input overloaded).
 CLIP_LEVEL = 0.99
 # Live frames must be this far above the input's noise floor to be analysed as
@@ -106,7 +107,7 @@ def vocal_tract_length_cm(df):
     return SPEED_OF_SOUND_CM / (2 * df)
 
 
-ANALYSIS_VERSION = 10          # stored on every take result so older takes can be re-analysed (10: phase 10)
+ANALYSIS_VERSION = 11          # stored on every take result so older takes can be re-analysed (10: phase 10; 11: phase 11 pitch tracking band 100 Hz, sing octave cost)
 F1_MIN_HZ = 250                # an "F1" below this is rumble or H1, not a resonance (audit: snapped F1 median 246 Hz)
 F1_F0_RATIO = 1.3              # ... and one closer than this to f0 has snapped onto H1 (audit: 43-44% of frames at 202-212 Hz)
 NUCLEUS_STEADY = 0.15          # a steady frame's F1 and F2 move less than this over +/-1 frame
@@ -395,15 +396,24 @@ class NoiseMonitor:
 # ceiling 500 / octave cost 0.1 halves 2.6% of frames and reads 0.2% of silence
 # as voiced, against 21.2% and 15.7% for 60 / 1200. Sing mode has no real-take
 # reference; its ceiling covers soprano notes above 1200 Hz that used to read an
-# octave low, and its higher octave cost resists sub-octave jumps on breathy lows.
+# octave low. Its octave cost is 0.04 (phase 11 truth lab): at 0.12 a sung C#4 / D4
+# (second harmonic on a 560 Hz F1) read an octave high for 47% of a clean scale and a
+# breathy 262 Hz note read 100% an octave high. Grid of 6 pitches 131-392 Hz x 3
+# breathiness, live path: octave errors 67/708 frames at 0.01, 40 at 0.02, 22 at 0.03,
+# 15 at 0.04, 17 at 0.05 (and 0 of the clean scale from 0.05 down). The tracker's cost
+# favours higher octaves.
 PITCH_MODES = {
     "speak": {"floor": 75, "ceiling": 500, "octave_cost": 0.1, "voicing": 0.45},
-    "sing": {"floor": 60, "ceiling": 1500, "octave_cost": 0.12, "voicing": 0.45},
+    "sing": {"floor": 60, "ceiling": 1500, "octave_cost": 0.04, "voicing": 0.45},
 }
-# Lower edge of the tracking band. Own measurement on the 7 real takes: 70 Hz
-# agrees with the harvest + CREPE consensus on 93.7% of frames vs 93.0% with none,
-# and halving on breathy synthetic voices is 0% either way.
-PITCH_HIGHPASS_HZ = 70
+# Lower edge of the tracking band (the formant and level paths never see it). Phase 9:
+# 70 Hz agreed with the harvest + CREPE consensus on 93.7% of real-take frames vs 93.0%
+# with none. Phase 11 (truth lab, speech + desk rumble at -40 dBFS in 20-90 Hz): with 70 Hz
+# and a 100 Hz skirt the 60-90 Hz rumble survives and wins the octave (live read 82 Hz for a
+# 170 Hz voice, 48% octave errors); 100 Hz with a 20 Hz skirt reads 0% octave errors and
+# keeps 85, 100 and 120 Hz synthetic male voices exact (their harmonics carry the period).
+PITCH_HIGHPASS_HZ = 100
+PITCH_HIGHPASS_SMOOTH_HZ = 20    # Hann skirt of the band edges (Hz)
 
 
 def _praat_pitch(sound, time_step, mode):
@@ -412,7 +422,8 @@ def _praat_pitch(sound, time_step, mode):
     # Track on the voice band only: high-pitched hiss otherwise weakens the
     # periodicity Praat sees, so voiced frames get marked unvoiced (in tests, up
     # to 85% of them), and it also cuts octave-jump spikes.
-    voice_band = call(sound, "Filter (pass Hann band)...", PITCH_HIGHPASS_HZ, VOICE_BAND_HZ, 100)
+    voice_band = call(sound, "Filter (pass Hann band)...", PITCH_HIGHPASS_HZ, VOICE_BAND_HZ,
+                      PITCH_HIGHPASS_SMOOTH_HZ)
     pitch = voice_band.to_pitch_ac(time_step=time_step, pitch_floor=cfg["floor"],
                                    pitch_ceiling=cfg["ceiling"], voicing_threshold=cfg["voicing"],
                                    octave_cost=cfg["octave_cost"])
@@ -590,6 +601,11 @@ LIVE_HOLD_MARGIN_DB = 4       # while voiced, a frame needs only this much over 
 LIVE_JUMP_CENTS = 600         # a bigger jump must be confirmed by recent frames
 LIVE_JUMP_AGREE = 3           # of the last 5 candidates within LIVE_JUMP_CENTS / 2
 LIVE_HISTORY = 5
+LIVE_OCTAVE_AGREE = 4         # an octave jump (+/- OCTAVE_WINDOW_ST of 12 st) needs this many of the last 5 candidates: a window can hear the subharmonic for 2-3 frames (real take 2026-10-19 12-19-19: 99 Hz for a 198 Hz voice at strength 0.97)
+LIVE_REFERENCE_FRAMES = 400   # the voice's recent centre (median of the last LIVE_REFERENCE_READS readings) still anchors the octave this long after it stops (10 s): a phrase starts with a window half full of consonant, and the 99 Hz subharmonic of a 198 Hz voice shows then
+LIVE_REFERENCE_READS = 40     # readings (1 s of voice) behind that centre
+LIVE_MIN_STRENGTH = GATE_STRENGTH   # Praat strength of the frames a live pitch is read from, as for takes
+LIVE_MIN_FRAMES = 2           # of the window's last 3 pitch frames must be voiced: a lone frame at a phrase edge is noise (real takes: 10.4% -> 6.4% of live frames disagree with take and harvest)
 DEFAULT_NOISE_FLOOR_DBFS = -60   # ceiling on the first learned floor (quiet room; the user's mic sits near -58)
 
 
@@ -606,6 +622,8 @@ class FrameAnalyzer:
         self.noise_floor = noise_floor      # voice-band dBFS; None until a pause is heard
         self._floor_rise = NOISE_FLOOR_RISE_DB_PER_S * frame_interval
         self._voiced, self._last_f0 = False, np.nan   # previous frame reported a pitch
+        self._reads = deque(maxlen=LIVE_REFERENCE_READS)
+        self._reference_age = LIVE_REFERENCE_FRAMES + 1   # frames since the last pitch read
         self._candidates = deque(maxlen=LIVE_HISTORY)
         freqs, _ = _power_spectrum_db(np.zeros(SPECTRAL_FRAME), sample_rate, pad=2)
         self._spectrum_bins = freqs <= SPECTRUM_MAX_HZ
@@ -635,15 +653,29 @@ class FrameAnalyzer:
                     self.noise_floor += self._floor_rise
             self._candidates.clear()
         self._voiced, self._last_f0 = not np.isnan(f0), f0
+        if np.isnan(f0):
+            self._reference_age += 1
+        else:
+            self._reads.append(f0)
+            self._reference_age = 0
 
     def _confirmed(self, f0):
-        """False for a jump of more than LIVE_JUMP_CENTS that recent frames
-        don't back: a pitch step halves for a single frame."""
+        """False for a jump of more than LIVE_JUMP_CENTS that recent frames don't back: a pitch step
+        halves for a single frame. An octave jump needs more backing, and also counts against the
+        last reading when the voice only just restarted."""
         self._candidates.append(f0)
-        if not self._voiced or abs(1200 * np.log2(f0 / self._last_f0)) <= LIVE_JUMP_CENTS:
+        if self._voiced:
+            anchor, onset = self._last_f0, False
+        elif self._reference_age <= LIVE_REFERENCE_FRAMES and len(self._reads) >= LIVE_REFERENCE_READS // 2:
+            anchor, onset = float(np.median(self._reads)), True
+        else:
+            return True
+        jump = abs(12 * np.log2(f0 / anchor))
+        octave = abs(jump - 12) < OCTAVE_WINDOW_ST or abs(jump - 24) < OCTAVE_WINDOW_ST
+        if jump <= LIVE_JUMP_CENTS / 100 or (onset and not octave):
             return True
         near = sum(abs(1200 * np.log2(f0 / c)) <= LIVE_JUMP_CENTS / 2 for c in self._candidates)
-        return near >= LIVE_JUMP_AGREE
+        return near >= (LIVE_OCTAVE_AGREE if octave else LIVE_JUMP_AGREE)
 
     def spectrum(self, frame):
         """Power spectrum (dB) of the frame over 0-SPECTRUM_MAX_HZ."""
@@ -653,19 +685,26 @@ class FrameAnalyzer:
     def analyze(self, window):
         frame = window[-SPECTRAL_FRAME:]
         result = {"level": level_dbfs(frame), "band_level": band_level_db(frame, self.sample_rate),
-                  "clipped": bool(np.max(np.abs(frame), initial=0) >= CLIP_LEVEL),
+                  "clipped": bool(np.max(np.abs(frame), initial=0) >= CLIP_LEVEL), "too_quiet": False,
                   "f0": np.nan, "delta_f": np.nan, "h1h2": np.nan, "cpp": np.nan, "ring": np.nan,
                   "formants": np.full(4, np.nan), "resonance_reliable": False,
                   "spectrum": self.spectrum(frame)}
         band_level = result["band_level"]
-        if not self._above_noise(band_level) or result["level"] < SILENCE_DBFS:
+        if not self._above_noise(band_level):
+            self._end_frame(band_level, np.nan)
+            return result
+        quiet = result["level"] < SILENCE_DBFS
+        if quiet and (self.noise_floor is None or band_level < self.noise_floor + QUIET_READ_MARGIN_DB):
+            # Something stands out of the floor but is too soft to read: say so, read nothing.
+            result["too_quiet"] = self.noise_floor is not None
             self._end_frame(band_level, np.nan)
             return result
 
         sound = parselmouth.Sound(window, sampling_frequency=self.sample_rate)
-        _, f0_track = pitch_track(sound, mode=self.mode)
+        _, f0_track, strength = _praat_pitch(sound, 0.01, self.mode)
         recent = f0_track[-3:]
-        if np.isnan(recent).all():
+        voiced = ~np.isnan(recent)
+        if voiced.sum() < LIVE_MIN_FRAMES or np.median(strength[-3:][voiced]) < LIVE_MIN_STRENGTH:
             self._end_frame(band_level, np.nan)
             return result
         f0 = float(np.nanmedian(recent))
@@ -673,6 +712,9 @@ class FrameAnalyzer:
             return result
         self._end_frame(band_level, f0)
         result["f0"] = f0
+        if quiet:       # a pitch, but the voice is soft: the other readings would be noise
+            result["too_quiet"] = True
+            return result
 
         # Praat's Burg window is twice `window_length`, so 80 ms gives a few frames.
         tail = sound.extract_part(from_time=sound.duration - 0.08, to_time=sound.duration)
