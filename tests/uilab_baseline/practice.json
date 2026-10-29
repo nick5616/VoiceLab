@@ -4,6 +4,33 @@
  "scenarios": [
   "C:/tmp/phase11-work/06-practice/lab/after"
  ],
- "count": 0,
- "entries": {}
+ "count": 2,
+ "entries": {
+  "jargon|practice|practice/read/result_card/grid_holder/Label#*": {
+   "check": "jargon",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "practice/read/result_card/grid_holder/Label#4",
+   "count": 8,
+   "example": "Jargon “st without 'semitones'” in visible text: “3.3 st”",
+   "scenarios": [
+    "guided_session",
+    "practice_each"
+   ],
+   "why": "integration: 'st' vs BANNED 'semitones' is an unresolved conflict between two lab rules (spec 01); 04 and 06 both deferred it"
+  },
+  "overlap|practice|practice/cards.vowels/Button": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "practice",
+   "widget_path": "practice/cards.vowels/Button",
+   "count": 4,
+   "example": "Button “Open” is covered by toasts",
+   "scenarios": [
+    "guided_session",
+    "practice_each"
+   ],
+   "why": "integration: a transient, dismissable toast stacked bottom-right over content at 1280x720 (spec 05 toast placement; open finding)"
+  }
+ }
 }

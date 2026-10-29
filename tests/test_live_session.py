@@ -579,6 +579,8 @@ def test_state_strip_text_differs_for_every_state():
     texts = {live_session.state_strip(s)["text"] for s in ("no_signal", "silent", "too_quiet", "hearing")}
     assert len(texts) == 4 and live_session.state_strip("hearing")["kind"] == "success"
     assert live_session.state_strip("hearing", recording=True)["state"] == "recording"
+    recording = {live_session.state_strip(s, recording=True)["text"] for s in ("silent", "too_quiet", "hearing")}
+    assert len(recording) == 3 and all(t.startswith("Recording") for t in recording)    # and whether it hears you
     assert live_session.state_strip("hearing", mic_state="error")["state"] == "no_signal"   # a lost mic wins
     assert live_session.state_strip("silent", mic_state="lost", recording=True)["kind"] == "error"
 

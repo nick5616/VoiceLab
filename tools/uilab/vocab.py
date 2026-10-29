@@ -45,7 +45,8 @@ NOW_WORDS = re.compile(r"\b(now|live|right now|this moment|last (\d+(\.\d+)?|few
 TAKE_WORDS = re.compile(r"\b(last|latest|this|your) take\b|\btake #?\d+", re.I)
 # Words that say the app hears (or is waiting for) a voice.
 HEARD_WORDS = re.compile(r"hearing you|\bheard\b|\bvoice detected\b|\blistening\b", re.I)
-WAITING_WORDS = re.compile(r"listening|waiting for (your )?voice|can'?t hear|\bsilen(t|ce)\b|no voice", re.I)
+WAITING_WORDS = re.compile(r"listening|waiting for (your )?voice|can'?t hear|\bsilen(t|ce)\b|no voice|say something",
+                           re.I)
 # A next step in words (a toast or line that says what to do).
 NEXT_STEP = re.compile(r"\b(try|move|check|choose|pick|lower|raise|record|use|wait|connect|set|label|open|"
                        r"rest|speak|sing|say|run|free up|close)\b", re.I)

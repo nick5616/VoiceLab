@@ -94,6 +94,8 @@ STATE_STRIP = {
     "hearing": ("Hearing you", "success"),
 }
 RECORDING_STRIP = ("Recording", "recording")
+# while recording, the strip still says whether the take is getting your voice (integration: lab first_run)
+RECORDING_HEARD = {"hearing": "hearing you", "too_quiet": "too quiet", "silent": "say something"}
 # Plain words for the cards whose numbers mean little alone (low / middle / high on the bar).
 MID_WORDS = {"h1h2": "In between", "cpp": "A bit breathy", "ring": "In between", "cq": "Medium",
              "pitch_range": "Moderate"}
@@ -125,7 +127,9 @@ def state_strip(state, mic_state="ok", recording=False):
     if mic_state in ("error", "lost"):
         state = "no_signal"
     if recording and state != "no_signal":
-        return {"state": "recording", "text": RECORDING_STRIP[0], "kind": RECORDING_STRIP[1]}
+        heard = RECORDING_HEARD.get(state)
+        text = f"{RECORDING_STRIP[0]} · {heard}" if heard else RECORDING_STRIP[0]
+        return {"state": "recording", "text": text, "kind": RECORDING_STRIP[1]}
     text, kind = STATE_STRIP.get(state, STATE_STRIP["silent"])
     return {"state": state, "text": text, "kind": kind}
 

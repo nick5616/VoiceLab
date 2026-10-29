@@ -85,6 +85,9 @@ def core_state(window, truth=None, extra=None):
     state, caption = core.record_state()
     jobs = core.runner.jobs()
     snap = core.live.snapshot()
+    if hasattr(core.live, "current_state"):     # as the screen shows it now: the heartbeat counts between frames,
+        from live_session import state_strip    # and a lost mic is "no signal" whatever the last frame said
+        snap["state"] = state_strip(core.live.current_state(), core.mic_status().get("state", "ok"))["state"]
     history = snap.pop("pitch_history", None) or []
     run = 0
     for hz in reversed(history):        # how long the voice has sounded without a break, up to now

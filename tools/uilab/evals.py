@@ -705,13 +705,16 @@ def check_listening(cap):
         return out
     shows_number = bool(vocab.hz_values(readout.get("text")))
     text = cap.visible_text()
-    if snap.get("voiced") and s.get("voiced_seconds", 1.0) >= VOICED_FOR_S and not shows_number:
+    # "voiced" is the last frame's; once the stream stops (spec 05: mic lost) it goes stale, and the snapshot's
+    # state (spec 03: no_signal | silent | too_quiet | hearing) says what is heard right now
+    voiced = snap.get("voiced") and snap.get("state", "hearing") == "hearing"
+    if voiced and s.get("voiced_seconds", 1.0) >= VOICED_FOR_S and not shows_number:
         out.append(cap.finding("state", readout["path"], "A voice is heard right now but the readout shows no pitch",
                                {"readout": readout.get("text")}))
-    if snap.get("voiced") and not vocab.HEARD_WORDS.search(text):
+    if voiced and not vocab.HEARD_WORDS.search(text):
         out.append(cap.finding("listening", readout["path"], "Nothing says the app hears you: only the numbers move "
                                "(no “listening” or “hearing you” state)", {}))
-    if not snap.get("voiced") and not shows_number and not vocab.WAITING_WORDS.search(text):
+    if not voiced and not shows_number and not vocab.WAITING_WORDS.search(text) and snap.get("state") != "no_signal":
         out.append(cap.finding("listening", readout["path"], "Silent, and nothing says the app is waiting for your "
                                "voice (the readout is just “—”)", {}))
     return out

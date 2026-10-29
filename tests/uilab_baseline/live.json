@@ -4,7 +4,7 @@
  "scenarios": [
   "C:/tmp/phase11-work/03-live/lab/after"
  ],
- "count": 22,
+ "count": 24,
  "entries": {
   "fold|dashboard|dashboard/right/edge": {
    "check": "fold",
@@ -302,6 +302,30 @@
     "no_mic"
    ],
    "why": "integration: a transient, dismissable toast stacked bottom-right over content at 1280x720 (spec 05 toast placement; listed as an open finding in the phase 11 integration report)"
+  },
+  "state|dashboard|dashboard/live/readout/note_label": {
+   "check": "state",
+   "severity": "error",
+   "screen": "dashboard",
+   "widget_path": "dashboard/live/readout/note_label",
+   "count": 1,
+   "example": "A voice is heard right now but the readout shows no pitch",
+   "scenarios": [
+    "mic_lost"
+   ],
+   "why": "integration: lab oracle gap. In mic_lost the fake stream stops entirely and the lab has no engine heartbeat, so 'voiced' stays stale; the screen correctly shows No signal / Say something"
+  },
+  "state|live|live/view/readout/note_label": {
+   "check": "state",
+   "severity": "error",
+   "screen": "live",
+   "widget_path": "live/view/readout/note_label",
+   "count": 8,
+   "example": "A voice is heard right now but the readout shows no pitch",
+   "scenarios": [
+    "mic_lost"
+   ],
+   "why": "integration: lab oracle gap. In mic_lost the fake stream stops entirely and the lab has no engine heartbeat, so 'voiced' stays stale; the screen correctly shows No signal / Say something"
   }
  }
 }
