@@ -3,16 +3,22 @@ through the eight words, and the vowel chart."""
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 
-from speech import VOWEL_PROMPT, VOWEL_WORDS
+from speech import VOWEL_WORDS
 from ui import theme
-from ui.components import Button, Caption, Headline, Label, ProgressStrip
+from ui.components import Button, Caption, Chip, Headline, Label, ProgressStrip, WrapRow
 from ui.live_graph import style_plot
+from ui.practice.result_card import ResultCard
+from ui.practice.widgets import SizedPlot
 from ui.takes import listen
 
+CHART_MIN_PX = 180              # px: the vowel chart is never shorter than this
+EMPTY_CHART = "Your vowels will appear here as you say each word."
+CHART_TIP = "Height is F1 and position is F2 (the first two formants), both in Hz."
 
-class VowelChart(pg.PlotWidget):
+
+class VowelChart(SizedPlot):
     """Classic vowel space: F2 (right to left) against F1 (top to bottom)."""
 
     def __init__(self):
@@ -32,8 +38,9 @@ class VowelChart(pg.PlotWidget):
         self.setBackground(t["surface"])
         style_plot(self.plotItem, left_width=56)
         self.showGrid(x=True, y=True, alpha=0.12)
-        self.getAxis("bottom").setLabel("F2 Hz (front ← → back)", color=t["text_muted"])
-        self.getAxis("left").setLabel("F1 Hz", color=t["text_muted"])
+        self.getAxis("bottom").setLabel("Tongue position (front ← → back)", color=t["text_muted"])
+        self.getAxis("left").setLabel("Tongue height", color=t["text_muted"])
+        self.setToolTip(CHART_TIP)
         self.legend.setLabelTextColor(t["text_secondary"])
         self.show_vowels(*self.data)
 
@@ -79,11 +86,16 @@ class VowelCheck(QWidget):
         self.status = Label("", role="body", tone="secondary", wrap=True)
         self.start_btn = Button("Start", variant="primary", icon="ph.play-fill")
         self.skip_btn = Button("Skip word", variant="secondary", icon="ph.skip-forward")
-        self.baseline_btn = Button("Save as vowel baseline", variant="secondary", icon="ph.push-pin")
+        self.baseline_btn = Button("Use as my vowel baseline", variant="secondary", icon="ph.push-pin")
+        self.baseline_btn.setToolTip("Later checks will say how far you moved from this one.")
+        self.words = WrapRow(spacing=theme.XS)
+        self.chips = {}
+        for word in VOWEL_WORDS:
+            self.chips[word] = self.words.add(Chip(word, kind="neutral"))
         self.start_btn.clicked.connect(self.session.toggle)
         self.skip_btn.clicked.connect(self.session.skip)
         self.baseline_btn.clicked.connect(self.session.save_baseline)
-        for w in (self.overline, self.prompt, self.progress, self.status):
+        for w in (self.overline, self.prompt, self.words, self.progress, self.status):
             left.addWidget(w)
         buttons = QHBoxLayout()
         buttons.setSpacing(theme.S)
@@ -93,15 +105,26 @@ class VowelCheck(QWidget):
         left.addLayout(buttons)
         left.addWidget(self.baseline_btn, 0, Qt.AlignmentFlag.AlignLeft)
         left.addStretch(1)
-        left.addWidget(Caption("The vowel check measures resonance across eight vowels, the fairest reading "
-                               "there is, and sets the formant ceiling for your voice."))
+        left.addWidget(Caption("The vowel check measures your resonance across eight vowels, the fairest reading "
+                               "there is, and tunes the analysis to your voice."))
         left_widget = QWidget()
         left_widget.setLayout(left)
         left_widget.setFixedWidth(340)
         layout.addWidget(left_widget)
 
         self.chart = VowelChart()
-        layout.addWidget(self.chart, 1)
+        self.chart.setMinimumHeight(CHART_MIN_PX)
+        self.placeholder = Label(EMPTY_CHART, role="body", tone="muted", wrap=True)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.placeholder)
+        self.stack.addWidget(self.chart)
+        self.result_card = ResultCard()
+        right = QVBoxLayout()
+        right.setSpacing(theme.M)
+        right.addWidget(self.result_card)
+        right.addWidget(self.stack, 1)
+        layout.addLayout(right, 1)
         self._chart_data = None
         listen(self, core, {"vowels_changed": self.show_state})
         self.show_state(self.session.state())
@@ -119,17 +142,28 @@ class VowelCheck(QWidget):
         if state is None:
             return
         self.prompt.setText(state["prompt"])
-        self.prompt.setVisible(state["prompt"] != VOWEL_PROMPT)       # the page already says "Vowel check"
+        self.prompt.setVisible(bool(state["running"] or state.get("analysing")))      # the result card has the number
         self.status.setText(state["status"])
-        self.start_btn.setText("Stop" if state["running"] else "Start")
+        self.start_btn.setText("Stop" if state["running"] else "Start again" if self.session.result else "Start")
         self.start_btn.set_icon("ph.stop-fill" if state["running"] else "ph.play-fill")
         self.start_btn.set_variant("secondary" if state["running"] else "primary")
         self.skip_btn.setEnabled(state["running"])
-        self.baseline_btn.setEnabled(state["can_save_baseline"])
+        self.baseline_btn.setEnabled(state["can_save_baseline"] and not self.session.baseline_saved)
         self.overline.setVisible(state["running"])
+        heard = set(state.get("heard", []))
+        for i, word in enumerate(VOWEL_WORDS):
+            now = state["running"] and i == self.session.index
+            self.chips[word].set_kind("success" if word in heard else "accent" if now else "neutral")
+        card = self.session.card()
+        if card:
+            self.result_card.show_result({"title": "Your vowel check", "headline": card["headline"],
+                                         "lines": card["lines"], "tip": card["question"]})
+        else:
+            self.result_card.clear()
         done = self.session.index if state["running"] else (len(VOWEL_WORDS) if self.session.result else 0)
         self.progress.set_progress(done, len(VOWEL_WORDS))
         chart = (state["current"], state["baseline"])
+        self.stack.setCurrentWidget(self.chart if any(chart) else self.placeholder)
         if chart != self._chart_data:
             self._chart_data = chart
             self.chart.show_vowels(*chart)

@@ -122,6 +122,72 @@ def analyze_exercise_take(audio, targets, name, latency=0.0, ceiling=None):
     return result
 
 
+# --- phase 11 / 06-practice: results in plain words, a start note from your range ---
+GRADE_WORDS = {"in_tune": "in tune", "close": "close", "off": "off", "missed": "not heard"}
+CENTS_EXPLAINED = (f"Cents measure how far you are from the note: 100 cents is one semitone. Within {IN_TUNE_CENTS} "
+                   f"cents counts as in tune, within {CLOSE_CENTS} as close.")
+START_BELOW_TOP = 12            # semitones: leave room for an octave above the start note
+START_FROM_BOTTOM = 4           # semitones above the bottom of your range: a comfortable start
+
+
+def cents_words(cents):
+    """'+12 cents' (never '-0'): a pitch error in cents, signed."""
+    n = int(round(cents))
+    return "0 cents" if n == 0 else f"{n:+d} cents"
+
+
+def note_grade(cents):
+    """'in_tune' (within IN_TUNE_CENTS), 'close' (within CLOSE_CENTS), 'off', or 'missed' (not sung)."""
+    if cents is None or np.isnan(cents):
+        return "missed"
+    return "in_tune" if abs(cents) <= IN_TUNE_CENTS else "close" if abs(cents) <= CLOSE_CENTS else "off"
+
+
+def exercise_result(score):
+    """A scored exercise in plain words: {"notes" [{"index", "name", "cents", "grade", "text"}], "weakest"
+    (the note to retry: a missed note first, else the largest error; None if all in tune), "headline",
+    "detail", "explain", "retry" (what to do next)}. `score` is analysis.score_exercise's result."""
+    notes = []
+    for i, note in enumerate(score["notes"]):
+        cents, name = note["cents"], midi_name(note["midi"])
+        grade = note_grade(cents)
+        text = "not heard" if grade == "missed" else (
+            "in tune" if grade == "in_tune" else f"{abs(round(cents))} cents {'flat' if cents < 0 else 'sharp'}")
+        notes.append({"index": i, "name": name, "cents": cents, "grade": grade, "text": text})
+    total, sung = score["notes_total"], score["notes_sung"]
+    order = {"missed": 0, "off": 1, "close": 2, "in_tune": 3}
+    weak = [n for n in notes if n["grade"] != "in_tune"]
+    weakest = min(weak, key=lambda n: (order[n["grade"]], -abs(n["cents"] or 0))) if weak else None
+    if not sung:
+        headline, retry = "No sung notes were heard.", "Try again a little louder, close to the mic."
+    else:
+        headline = f"{score['notes_in_tune']} of {total} notes in tune"
+        if weakest is None:
+            retry = "Every note landed. Try a higher start note or a longer pattern."
+        else:
+            retry = f"Retry {weakest['name']}: {weakest['text']}." + (" Sing the whole pattern again." if
+                                                                        len(weak) > 1 else "")
+    detail = (f"{score['notes_close']} close · {score['mean_abs_cents']:.0f} cents off on average · "
+              f"{score['timing']}") if sung else ""
+    return {"notes": notes, "weakest": weakest, "headline": headline, "detail": detail,
+            "explain": CENTS_EXPLAINED, "retry": retry}
+
+
+def comfortable_start(map_range=None, sung_hz=None):
+    """A start note (MIDI) that sits in your range: from the Voice Map's (low, high) MIDI range, else from
+    the median pitch of your sung takes, else the default. Never beyond the notes offered."""
+    lo_note, hi_note = NOTE_RANGE[0], NOTE_RANGE[-1]
+    if map_range:
+        low, high = map_range
+        start = min(low + START_FROM_BOTTOM, high - START_BELOW_TOP)
+        start = max(low, start)
+        return int(min(max(start, lo_note), hi_note))
+    if sung_hz:
+        mid = int(round(float(hz_to_midi(float(np.median(sung_hz))))))
+        return int(min(max(mid - START_FROM_BOTTOM, lo_note), hi_note))
+    return DEFAULT_START_MIDI
+
+
 def current_target(targets, now):
     for start, duration, midi in targets:
         if start <= now < start + duration:
@@ -161,6 +227,7 @@ class ExerciseSession:
         self.status = IDLE_STATUS
         self.cents_text, self.cents_color = "—", None    # the big readout; colour from tuning_color
         self.result = None
+        self.error = None                # why the last exercise couldn't be scored, in words
         self.job = None
         self.ceiling = lambda: None      # the profile's formant ceiling, for the scoring analysis
 
@@ -211,7 +278,9 @@ class ExerciseSession:
     def state(self):
         """{"running", "status", "cents_text", "cents_color", "targets"}."""
         return {"running": self.running, "status": self.status, "cents_text": self.cents_text,
-                "cents_color": self.cents_color, "targets": self.targets if self.running else self.build_targets()}
+                "cents_color": self.cents_color, "targets": self.targets if self.running else self.build_targets(),
+                "result": exercise_result(self.result["exercise"]) if self.result else None,
+                "job": self.job is not None, "error": self.error}
 
     def _changed(self):
         self.events.emit("exercise_changed", self.state())
@@ -228,6 +297,7 @@ class ExerciseSession:
             self._changed()
             return False
         self.targets = self.build_targets()
+        self.result, self.error = None, None
         self.engine.start_take()
         self.latency = 0.0
         self.recent = []
@@ -284,7 +354,7 @@ class ExerciseSession:
         cents = self.perceived_error(now, f0, target)
         color = tuning_color(cents)
         if target is not None and color is not None:
-            self.cents_text, self.cents_color = f"{midi_name(target)} {cents:+.0f}¢", color
+            self.cents_text, self.cents_color = f"{midi_name(target)} {cents_words(cents)}", color
         elif target is not None:
             self.cents_text, self.cents_color = midi_name(target), None
         self.status = f"Count-in… {COUNT_IN_BEATS - int(now / BEAT_SECONDS)}" if now < LEAD_IN else "Sing!"
@@ -299,14 +369,14 @@ class ExerciseSession:
     def _scored(self, result):
         self.job = None
         if "error" in result:
-            self.status = result["error"]
+            self.status = self.error = result["error"]
             self._changed()
             return
         score = result["exercise"]
         if score["notes_sung"]:
-            self.status = (f"{score['notes_in_tune']}/{score['notes_total']} notes in tune "
-                           f"(±{IN_TUNE_CENTS}¢), {score['notes_close']} close (±{CLOSE_CENTS}¢), "
-                           f"average error {score['mean_abs_cents']:.0f}¢ · {score['timing']}.")
+            self.status = (f"{score['notes_in_tune']} of {score['notes_total']} notes in tune (within "
+                           f"{IN_TUNE_CENTS} cents), {score['notes_close']} close (within {CLOSE_CENTS} cents), "
+                           f"{score['mean_abs_cents']:.0f} cents off on average · {score['timing']}.")
         else:
             self.status = "No sung notes detected."
         self.cents_text, self.cents_color = "—", None

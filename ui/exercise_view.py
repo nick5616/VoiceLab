@@ -2,26 +2,37 @@
 readout. exercise.ExerciseSession runs the exercise; this draws it."""
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QSpinBox, QVBoxLayout, QWidget
 
 from display import midi_name
-from exercise import CLOSE_COLOR, IN_TUNE_COLOR, MIDI_CHOICE, OFF_COLOR, ROLL_AFTER, ROLL_BEFORE, TAIL_SECONDS
+from exercise import (CENTS_EXPLAINED, CLOSE_COLOR, DEFAULT_START_MIDI, IN_TUNE_COLOR, MIDI_CHOICE, OFF_COLOR, ROLL_AFTER, ROLL_BEFORE,
+                      TAIL_SECONDS, comfortable_start)
 from ui import theme
 from ui.components import Button, Caption, Label, ProgressStrip, Select, Toggle
 from ui.live_graph import style_plot
+from ui.practice.result_card import ResultCard
+from ui.practice.widgets import SizedPlot
 from ui.takes import listen
 
 # The session's tuning colours -> theme tokens: in tune, close, off.
 TUNING_TOKENS = {IN_TUNE_COLOR: "on_target", CLOSE_COLOR: "warning", OFF_COLOR: "off_target"}
+GRADE_TOKENS = {"in_tune": "on_target", "close": "warning", "off": "off_target", "missed": "text_muted"}
+GRADE_CHIPS = {"in_tune": "on_target", "close": "warning", "off": "off_target", "missed": "neutral"}
+BAR_PX = 12                     # px: thickness of a target-note bar in the lane
+CENTS_FIGURE_PX = 32            # px: the big "C3 +12 cents" readout
+MAX_NOTE_CHIPS = 4              # the notes to work on that the result card names (the roll colours them all)
+ROLL_MIN_PX = 150               # px: the piano roll never gets shorter than this
+CENTS_KEY = "How far from the note, in cents (100 = one semitone)"
 
 
-class PianoRoll(pg.PlotWidget):
+class PianoRoll(SizedPlot):
     """Target notes as bars scrolling past a playhead, with your pitch on top."""
 
     def __init__(self):
         super().__init__()
         self.bars = self.plot(connect="pairs")
+        self.graded = {g: self.plot(connect="pairs") for g in GRADE_TOKENS}     # after finishing: a colour per note
         self.current_bar = self.plot()
         self.trace = self.plot(connect="finite")
         self.playhead = pg.InfiniteLine(angle=90)
@@ -37,14 +48,16 @@ class PianoRoll(pg.PlotWidget):
         self.setBackground(t["surface"])
         style_plot(self.plotItem, left_width=48)
         self.showGrid(x=False, y=True, alpha=0.12)
-        self.bars.setPen(pg.mkPen(t.q("text_muted", 150), width=12))
+        self.bars.setPen(pg.mkPen(t.q("text_muted", 150), width=BAR_PX))
+        for grade, bar in self.graded.items():
+            bar.setPen(pg.mkPen(t[GRADE_TOKENS[grade]], width=BAR_PX))
         self.trace.setPen(pg.mkPen(t.series["pitch"], width=2.5))
         self.playhead.setPen(pg.mkPen(t["accent"], width=2))
         self._color_bar()
 
     def _color_bar(self):
         t = theme.current()
-        self.current_bar.setPen(pg.mkPen(t[TUNING_TOKENS.get(self.color, "accent")], width=12))
+        self.current_bar.setPen(pg.mkPen(t[TUNING_TOKENS.get(self.color, "accent")], width=BAR_PX))
 
     def set_targets(self, targets):
         self.targets = targets
@@ -56,12 +69,35 @@ class PianoRoll(pg.PlotWidget):
         self.bars.setData(xs, ys)
         self.trace.setData([], [])
         self.current_bar.setData([], [])
+        self.clear_grades()
         midis = [m for _, _, m in targets]
         lo, hi = min(midis) - 3, max(midis) + 3
         self.setYRange(lo, hi, padding=0)
         self.getAxis("left").setTicks([[(m, midi_name(m)) for m in range(lo, hi + 1)
                                         if m in midis or m % 12 == 0]])
         self.show_view(0.0, np.nan, None, None)
+
+    def clear_grades(self):
+        for bar in self.graded.values():
+            bar.setData([], [])
+        self.bars.setVisible(True)
+
+    def show_grades(self, notes):
+        """After finishing: each target note coloured by how it went ('in_tune', 'close', 'off', 'missed'), the
+        whole exercise in view with your pitch still drawn over it."""
+        if not self.targets:
+            return
+        self.bars.setVisible(False)
+        self.current_bar.setData([], [])
+        for grade, bar in self.graded.items():
+            xs, ys = [], []
+            for (start, duration, midi), note in zip(self.targets, notes):
+                if note["grade"] == grade:
+                    xs += [start, start + duration - 0.02]
+                    ys += [midi, midi]
+            bar.setData(xs, ys)
+        end = max(s + d for s, d, _ in self.targets)
+        self.setXRange(0, end + TAIL_SECONDS, padding=0)
 
     def show_view(self, now, midi, color, current):
         """Move the roll to `now` with the voice at `midi` (NaN unvoiced); `color` tints the current bar,
@@ -83,17 +119,22 @@ class PianoRoll(pg.PlotWidget):
 
 class ExerciseView(QWidget):
     """Pick an exercise, sing it against the piano roll, get a scored take (the core's ExerciseSession)."""
+    open_report = pyqtSignal(str)
 
     def __init__(self, core):
         super().__init__()
+        self.core = core
         self.session = core.exercise
+        self.last_uid = None
+        self.start_defaulted = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.XL)
         left = QVBoxLayout()
-        left.setSpacing(theme.M)
+        left.setSpacing(theme.S)
         self.cents_label = Label("—", role="figure")
-        self.cents_label.setFont(theme.font("figure", size=40))
+        self.cents_label.setFont(theme.font("figure", size=CENTS_FIGURE_PX))
+        self.cents_key = Caption(CENTS_KEY)
         self.choice = Select([(str(i), name) for i, name in enumerate(self.session.choice_names())])
         self.choice.activated.connect(self._choice_changed)
         self.start_note = Select([(str(m), name) for m, name in self.session.start_notes()],
@@ -111,8 +152,11 @@ class ExerciseView(QWidget):
         self.progress.set_progress(0, 1)
         self.status = Label(self.session.status, role="body", tone="secondary", wrap=True)
         left.addWidget(self.cents_label)
+        left.addWidget(self.cents_key)
         left.addWidget(Label("Exercise", role="label", tone="muted"))
         left.addWidget(self.choice)
+        self.melody = Caption("")
+        left.addWidget(self.melody)
         left.addWidget(Label("Start note", role="label", tone="muted"))
         left.addWidget(self.start_note)
         left.addWidget(self.transpose)
@@ -121,20 +165,26 @@ class ExerciseView(QWidget):
         left.addWidget(self.progress)
         left.addWidget(self.status)
         left.addStretch(1)
-        left.addWidget(Caption("Each finished exercise becomes a scored take: notes in tune, timing and "
-                               "steadiness."))
+        left.addWidget(Caption(CENTS_EXPLAINED))
         left_widget = QWidget()
         left_widget.setLayout(left)
         left_widget.setFixedWidth(320)
         layout.addWidget(left_widget)
 
+        self.result_card = ResultCard()
+        self.result_card.action.connect(self._result_action)
         self.roll = PianoRoll()
-        layout.addWidget(self.roll, 1)
+        self.roll.setMinimumHeight(ROLL_MIN_PX)
+        right = QVBoxLayout()
+        right.setSpacing(theme.M)
+        right.addWidget(self.result_card)
+        right.addWidget(self.roll, 1)
+        layout.addLayout(right, 1)
         self.start_note.changed.connect(self._refresh_targets)
         self.transpose.valueChanged.connect(self._refresh_targets)
         self._refresh_targets()
         self.show_state(self.session.state())
-        listen(self, core, {"exercise_changed": self.show_state})
+        listen(self, core, {"exercise_changed": self.show_state, "take_ready": self._take_ready})
 
     @property
     def running(self):
@@ -159,6 +209,18 @@ class ExerciseView(QWidget):
         else:
             self.start()
 
+    def apply_defaults(self):
+        """Offer a start note that sits in your range (the Voice Map's, else your sung takes'), once, and only
+        while the note is still the built-in default."""
+        if self.start_defaulted or self.session.running or self.session.start_midi != DEFAULT_START_MIDI:
+            return
+        self.start_defaulted = True
+        sung = [t["pitch"] for t in self.core.takes() if t.get("mode") == "sing" and t.get("pitch")]
+        midi = comfortable_start(self.core.voice_map.data.range_midi(), sung)
+        if midi != self.session.start_midi:
+            self.start_note.set_current_key(str(midi))
+            self._refresh_targets()
+
     def _choice_changed(self, index):
         path = None
         if index == MIDI_CHOICE:
@@ -172,7 +234,31 @@ class ExerciseView(QWidget):
         midi = self.session.is_midi()
         self.start_note.setVisible(not midi)
         self.transpose.setVisible(midi)
+        self.melody.setVisible(midi)
+        if midi:
+            self.melody.setText(f"Melody: {self.session.midi_file}. Its notes are the bars; transpose it to fit "
+                                "your voice.")
         self.roll.set_targets(self.session.build_targets())
+
+    def _take_ready(self, take):
+        if take.get("exercise"):
+            self.last_uid = take.get("uid")
+            data = self.result_card.data
+            if data is not None:
+                data["actions"] = self._actions()
+                self.result_card.show_result(data)
+
+    def _result_action(self, key):
+        if key == "again":
+            self.start()
+        elif key == "report" and self.last_uid:
+            self.open_report.emit(self.last_uid)
+
+    def _actions(self):
+        actions = [("again", "Sing it again", "primary")]
+        if self.last_uid:
+            actions.append(("report", "Open full report", "secondary"))
+        return actions
 
     def show_state(self, state):
         """Draw the session's texts and lock the choices while it runs."""
@@ -186,6 +272,22 @@ class ExerciseView(QWidget):
         idle = state["cents_text"] == "—"
         self.cents_label.setText("Ready" if idle else state["cents_text"])
         self.cents_label.set_tone("muted" if idle else TUNING_TOKENS.get(state["cents_color"], "primary"))
+        result = state.get("result")
+        self.status.setVisible(not (result and not running))        # the result card says it better
+        if result and not running:
+            shown = self.result_card.data
+            if shown is None or shown.get("headline") != result["headline"] or shown.get("compare") != result["detail"]:
+                weak = sorted((n for n in result["notes"] if n["grade"] != "in_tune"),
+                              key=lambda n: (n["grade"] != "missed", -abs(n["cents"] or 0)))[:MAX_NOTE_CHIPS]
+                chips = [(f"{n['name']} {n['text']}", GRADE_CHIPS[n["grade"]]) for n in weak]
+                self.last_uid = None
+                self.result_card.show_result({
+                    "title": "", "headline": result["headline"], "compare": result["detail"],
+                    "chips": chips, "tip": result["retry"],
+                    "actions": self._actions()})
+                self.roll.show_grades(result["notes"])
+        elif self.result_card.data is not None:
+            self.result_card.clear()
 
     def show_frame(self, view):
         """Draw one live frame of the running exercise (ExerciseSession.on_frame's result)."""

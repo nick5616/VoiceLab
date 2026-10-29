@@ -47,7 +47,8 @@ FEATURES = [
                ("text", "practice/panels.voicemap/view", "Rebuild from takes")],
      "target": {"called": "question", "contains": "Rebuild"}},
     {"id": "voice_map_clear", "name": "Voice Map: clear",
-     "steps": [("nav", "practice"), ("text", "practice/cards.voicemap", "Open")],
+     "steps": [("nav", "practice"), ("text", "practice/cards.voicemap", "Open"),
+               ("expand", "practice/panels.voicemap/view/more")],      # phase 11 / 06: Clear map is under "More options"
      "target": {"text": "Clear map", "under": "practice/panels.voicemap/view"}},
     {"id": "import", "name": "Import audio", "steps": [("click", "action_bar/import_btn")],
      "target": {"called": "open_file"}},

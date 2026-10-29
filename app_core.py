@@ -7,7 +7,7 @@ Events (Events.emit): "take_added"(take) (also for every take loaded from the fo
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
-"voice_map_changed"(), "ui_changed"(prefs), "phrase_changed"(phrase), plus the practice sessions'
+"voice_map_changed"(), "ui_changed"(prefs), "phrase_changed"(phrase), "practice_plan_changed"(), plus the practice sessions'
 "exercise_changed", "vowels_changed" and "practice".
 """
 import time
@@ -23,6 +23,7 @@ import mic_check
 import profile_store
 import register
 import report
+import session_plan
 import speech
 import take_view
 import voice_map
@@ -50,7 +51,8 @@ REST_NUDGE_MINUTES = 25         # first rest reminder, then every so often. Own 
 #                                 advice commonly says to rest the voice regularly, but I could not confirm
 #                                 a specific interval (unverified)
 # What a take keeps through re-analysis: who it is, not what was measured.
-KEPT_KEYS = ("uid", "time", "title", "dated", "file", "source", "register_label", "egg_channel", "task")
+KEPT_KEYS = ("uid", "time", "title", "dated", "file", "source", "register_label", "egg_channel", "task",
+             "phrase")
 READY = "Ready to Record"
 REST_TOOLTIP = ("Vocal-hygiene guidance generally suggests resting the voice regularly. "
                 "The 25-minute interval is a rough guide (unverified).")
@@ -237,6 +239,8 @@ class VoiceLabCore:
         self.events.subscribe("practice", self._practice_changed)
         self.events.subscribe("exercise_scored", self.process_results)
         self.events.subscribe("vowel_check_done", self._vowel_check_done)
+        self.events.subscribe("vowel_check_done", self._plan_vowels)        # phase 11 / 06-practice
+        self.events.subscribe("take_ready", self._plan_changed)
         self.set_mode(profile.mode)
         self.live.set_targets(profile.targets)
 
@@ -415,6 +419,8 @@ class VoiceLabCore:
         results.setdefault("mode", self.profile.mode)
         results.setdefault("analysis_version", ANALYSIS_VERSION)
         results.setdefault("task", self.current_task(results))
+        if results["task"] == PHRASE_TASK:      # phase 11 / 06-practice: which phrase, for the dots
+            results.setdefault("phrase", self.phrase_index)
         message, level = "Done", "info"
         # With a takes folder, the folder is the record of every take; without
         # one, a summary goes to the history log so progress still builds up.
@@ -485,6 +491,53 @@ class VoiceLabCore:
     def set_phrase_practice(self, on):
         """Takes recorded meanwhile are for the phrases (their own task in progress)."""
         self.phrase_practice = bool(on)
+
+    # phase 11 / 06-practice: today's practice, and the result after a passage or a phrase
+    def practice_plan(self):
+        """session_plan.SessionPlan for today (your mode and goal, today's takes, what you skipped)."""
+        return session_plan.SessionPlan(self.profile.mode, getattr(self.profile, "voice_goal", None), self._takes,
+                                        self.profile.ui.get("practice_session"))
+
+    def skip_practice_step(self, key):
+        """Skip a step of today's practice; "practice_plan_changed"() follows."""
+        self.profile.set_ui(practice_session=self.practice_plan().skip(key))
+        self.events.emit("practice_plan_changed")
+
+    def practice_summary(self):
+        """The end-of-session summary (session_plan.SessionPlan.summary) with the rest nudge when one is due."""
+        plan = self.practice_plan()
+        return plan.summary(rest_text=self.rest_nudge())
+
+    def _plan_changed(self, *_):
+        self.events.emit("practice_plan_changed")
+
+    def _plan_vowels(self, _result):
+        self.profile.set_ui(practice_session=self.practice_plan().note_vowel_check())
+        self.events.emit("practice_plan_changed")
+
+    def passage_result(self, uid):
+        """speech.passage_result for a take against the last reading of the same passage; None if unknown."""
+        data = self.take(uid)
+        if data is None:
+            return None
+        previous = self.previous_take(uid)
+        if previous is not None and profile_store.task_of(previous) != profile_store.task_of(data):
+            previous = None
+        return speech.passage_result(data, previous, self.profile)
+
+    def phrase_result(self, uid):
+        """speech.phrase_result for a take; None if unknown."""
+        data = self.take(uid)
+        return None if data is None else speech.phrase_result(data, self.profile)
+
+    def phrases_today(self):
+        """The phrase takes made today, oldest first (each has "phrase", its number, unless it is older than that)."""
+        today = datetime.now().date().isoformat()
+        return [t for t in self._takes if t.get("task") == PHRASE_TASK and str(t.get("time", ""))[:10] == today]
+
+    def map_rebuilding(self):
+        """True while the Voice Map is being rebuilt from the takes."""
+        return self._job_running("voicemap")
 
     # --- MODE, CEILING AND TARGETS ---
 
