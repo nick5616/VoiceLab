@@ -34,6 +34,7 @@ QUIET_BAND_DB = 6.0        # blocks within this of the quietest are noise-only (
 VOICED_MARGIN_DB = 10.0    # without a mask, blocks this far over the quietest are voice (audit SNRs are 11.5-19.7 dB)
 NOISE_MARGIN_S = 0.1       # keep this far from voiced frames (s)
 RUMBLE_HZ = 150            # noise power below this counts as rumble (Hz)
+USUAL_LEVEL_DB = {"rumble": -60.0, "whine": -73.5}   # dBFS the user's mic sits at anyway: rumble = noise power below RUMBLE_HZ (floor -58 dBFS x share 0.86, audit), whine = its 4 kHz line (-73.5 peak, phase 9 audit)
 CLIP_LEVEL = 0.999         # samples at or above are clipped
 VOICE_BAND = 4000          # voice-band SNR upper edge (Hz); same as analysis.VOICE_BAND_HZ
 _EPS = 1e-12
@@ -215,13 +216,14 @@ def _band_rms_db(x, sr, high_hz):
 def noise_report(audio, sr, voiced=None):
     """Plain dict describing the take's input quality. Noise is measured on the noise-only stretches,
     the voice on the rest (`voiced` as in noise_audio_from_take; None picks them by level).
-    Keys: noise_db (floor dBFS), rumble_share (noise power below 150 Hz), lines [(Hz, dBFS)],
+    Keys: noise_db (floor dBFS), rumble_share (noise power below 150 Hz), rumble_db (that power, dBFS),
+    lines [(Hz, dBFS)], line_db (the strongest line, dBFS or NaN),
     voiced_db, snr_db (full band), snr_voice_db (below 4 kHz), peak, peak_db, clip_fraction, dc,
     noise_seconds. NaN where the take has no noise-only or no voiced stretch."""
     audio = np.asarray(audio, dtype=float)
     nan = float("nan")
-    report = {"noise_db": nan, "rumble_share": nan, "lines": [], "voiced_db": nan, "snr_db": nan,
-              "snr_voice_db": nan, "peak": 0.0, "peak_db": -np.inf, "clip_fraction": 0.0, "dc": 0.0,
+    report = {"noise_db": nan, "rumble_share": nan, "rumble_db": nan, "lines": [], "line_db": nan,
+              "voiced_db": nan, "snr_db": nan, "snr_voice_db": nan, "peak": 0.0, "peak_db": -np.inf, "clip_fraction": 0.0, "dc": 0.0,
               "noise_seconds": 0.0}
     if not len(audio):
         return report
@@ -236,7 +238,9 @@ def noise_report(audio, sr, voiced=None):
     report["noise_db"] = _band_rms_db(noise, sr, 0.499 * sr)
     freqs, psd = signal.welch(noise - np.mean(noise), sr, nperseg=min(len(noise), 4096))
     report["rumble_share"] = float(psd[freqs < RUMBLE_HZ].sum() / max(psd.sum(), _EPS))
+    report["rumble_db"] = report["noise_db"] + _db(report["rumble_share"])
     report["lines"] = find_lines(noise, sr)
+    report["line_db"] = max((level for _, level in report["lines"]), default=nan)
     levels, _ = _block_levels(audio, sr)
     loud = ~keep
     if voiced is not None:
@@ -249,3 +253,21 @@ def noise_report(audio, sr, voiced=None):
         report["snr_db"] = report["voiced_db"] - report["noise_db"]
         report["snr_voice_db"] = _band_rms_db(speech, sr, VOICE_BAND) - _band_rms_db(noise, sr, VOICE_BAND)
     return report
+
+
+def issue_excess_db(report):
+    """{issue: dB over the level this mic has anyway} for "rumble" and "whine" (negative when below it)."""
+    out = {}
+    for name, key in (("rumble", "rumble_db"), ("whine", "line_db")):
+        level = report.get(key)
+        if level is not None and np.isfinite(level):
+            out[name] = float(level - USUAL_LEVEL_DB[name])
+    return out
+
+
+def rank_issues(report, issues):
+    """`issues` (names such as "whine", "rumble") with the worst first. Both are always present on the
+    user's mic, so the one that stands furthest over its usual level is the one worth naming; other
+    names keep their place after them. Stable for ties."""
+    excess = issue_excess_db(report)
+    return sorted(issues, key=lambda name: -excess.get(name, float("-inf")))

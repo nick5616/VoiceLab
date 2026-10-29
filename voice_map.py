@@ -15,6 +15,12 @@ MIN_FRAMES = 12                      # frames before a cell is shown: 0.3 s of l
 # subharmonic of the mic's 4 kHz tone: phase 9 audits). Speech 70-500 and singing 70-1100 are
 # judgment calls (unverified); mode None uses the wider range.
 MODE_F0 = {"speak": (70.0, 500.0), "sing": (70.0, 1100.0)}
+# The range ignores this share of all frames at each end: maps saved before phase 9 hold tracker ghosts
+# (65-87 Hz rumble, 1 kHz subharmonics) that fill every column from C2 to D6 with more than MIN_FRAMES, so
+# a speech voice at 146-210 Hz read "C2-D6" (phase 11 lab; the user's saved map holds 182k frames, 4.9% of
+# them below G2 and 3.2% above C5). 5% each end gives G2-G4 there (2.5% gave D2-D5) and, on a map built
+# from clean takes, the same range as before for any voice that spends a few percent of its time at its ends.
+RANGE_TAIL = 0.05
 REDRAW_EVERY = 10                    # live frames between redraws
 # key: (label, colour range, unit); the labels are the vocabulary sheet's names (display.NAMES)
 MAP_METRICS = {
@@ -73,8 +79,19 @@ class VoiceMapData:
         return bool(self.metric_counts[key].sum() > 0)
 
     def range_midi(self):
+        """(lowest, highest) MIDI note of the voice: columns holding a shown cell, without the outer
+        RANGE_TAIL of the frames at each end (a few stray or ghost frames don't stretch the range)."""
+        per_note = self.counts.sum(axis=1)
         cols = np.flatnonzero((self.counts >= MIN_FRAMES).any(axis=1))
-        return (cols[0] + MIDI_LO, cols[-1] + MIDI_LO) if len(cols) else None
+        if not len(cols):
+            return None
+        cum = np.cumsum(per_note)
+        total = cum[-1]
+        low = np.searchsorted(cum, RANGE_TAIL * total, side="right")       # first column past the low tail
+        high = np.searchsorted(cum, (1 - RANGE_TAIL) * total, side="left")  # last column inside the high tail
+        inside = cols[(cols >= low) & (cols <= high)]
+        use = inside if len(inside) else cols
+        return use[0] + MIDI_LO, use[-1] + MIDI_LO
 
     def seconds_at(self, midi):
         """Seconds of voice mapped at one note (all levels)."""
