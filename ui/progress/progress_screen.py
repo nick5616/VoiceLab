@@ -2,6 +2,7 @@
 rests on, the zone bands behind, your target and baseline), with task, poor-take and time filters; and
 ProgressMini, the dashboard's sparklines. progress.report_view() and progress.mini() decide what shows."""
 import math
+from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
@@ -14,17 +15,36 @@ from ui import theme
 from ui.components import (Caption, Card, Chip, Collapsible, EmptyState, FlowGrid, Headline, Label, SegmentedControl,
                            Select, Sparkline, Toggle, WrapRow)
 from ui.takes import listen
-from ui.takes.take_card import clear_layout
+from ui.takes.take_card import clear_layout, holder
 
 CHART_HEIGHT = 200              # px
 CHART_COLUMN = 480              # px: the narrowest chart column
 ZONE_ALPHA = {"dark": 70, "light": 110}     # the bands are a background, as on the take graph
 PERIOD_KEYS = [("all", "All time", None), ("90", "90 days", 90), ("30", "30 days", 30)]
 PITCH_TICKS = (80, 100, 125, 145, 180, 220, 300, 400)   # Hz, as the take graph's speak axis
+MONTH_SPACING_S = 25 * 86400    # a tick gap this wide labels months ("Oct 2026"), a narrower one days ("Oct 14")
+PAGE_MARGIN = theme.XL          # px: the screen's margin, as Takes
 EMPTY_TEXT = "Nothing to chart yet"
 EMPTY_DETAIL = ("Record some takes over a few days. Each week's median shows here on the same zones as "
                 "your reports, with your target and baseline.")
 MINI_EMPTY = "Record takes over a few days to see a trend here."
+
+
+COUNT_BELOW_FROM = 0.8              # share of the chart's height above which a week's count sits below its dot
+
+class MonthAxis(pg.DateAxisItem):
+    """A time axis whose ticks always carry the month: "Oct 14", or "Oct 2026" for gaps of a month or more."""
+
+    def tickStrings(self, values, scale, spacing):
+        out = []
+        for v in values:
+            try:
+                when = datetime.fromtimestamp(v)
+            except (OverflowError, OSError, ValueError):
+                out.append("")
+                continue
+            out.append(f"{when:%b %Y}" if spacing >= MONTH_SPACING_S else f"{when:%b} {when.day}")
+        return out
 
 
 def _pen(color, width=1.5, style=Qt.PenStyle.SolidLine, alpha=None):
@@ -35,21 +55,25 @@ def _pen(color, width=1.5, style=Qt.PenStyle.SolidLine, alpha=None):
 
 
 class ProgressChart(Card):
-    """One dimension over time: its takes (faint dots), the weekly medians (labelled n=), the zone bands,
-    the target (dashed green) and the baseline (dashed line). The subtitle is progress.change_text."""
+    """One dimension over time: its takes (faint dots), the weekly medians (a line once there are three
+    weeks, each labelled with how many takes it rests on), the zone bands, the target (dashed green) and the
+    baseline (dashed line). The subtitle is progress.change_text: one short line, "steady" when nothing
+    changed."""
 
     def __init__(self, data, parent=None):
         super().__init__(parent=parent)
         self.data = data
         self.zone_chip = Chip("")
         self.add_action(self.zone_chip)
-        self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
+        self.plot = pg.PlotWidget(axisItems={"bottom": MonthAxis()})
         self.plot.setFixedHeight(CHART_HEIGHT)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.hideButtons()
         self.plot.setMenuEnabled(False)
         self.explanation = Caption("", tone="secondary")
+        self.line_note = Caption(progress.NO_LINE_TEXT, tone="muted")
         self.add(self.plot)
+        self.add(self.line_note)
         self.add(self.explanation)
         self.counts = []
         theme.changed.connect(self._theme_changed)
@@ -67,6 +91,8 @@ class ProgressChart(Card):
         t = theme.current()
         self.set_title(data["name"])
         self.set_subtitle(data["change"])
+        self.subtitle_label.setToolTip(progress.STEADY_TOOLTIP if data.get("steady") else "")
+        self.line_note.setVisible(not data.get("line", True))
         self.explanation.setText(data.get("explanation") or "")
         self.explanation.setVisible(bool(data.get("explanation")))
         zone = data.get("latest_zone")
@@ -116,17 +142,53 @@ class ProgressChart(Card):
             p.addItem(line, ignoreBounds=True)
         p.addItem(pg.ScatterPlotItem(data["times"], self._y(data["values"]), size=6, pen=None,
                                      brush=pg.mkBrush(QColor(t["text_muted"]))))
-        p.plot(data["median_times"], self._y(data["medians"]), pen=_pen(t["accent"], 2.4), symbol="o",
+        p.plot(data["median_times"], self._y(data["medians"]),
+               pen=_pen(t["accent"], 2.4) if data.get("line", True) else None, symbol="o",
                symbolSize=8, symbolBrush=t["accent"], symbolPen=_pen(t["surface"], 1.5))
         self.counts = []
         for x, median, count in zip(data["median_times"], self._y(data["medians"]), data["counts"]):
-            label = pg.TextItem(f"n={count}", color=t["text_secondary"], anchor=(0.5, 1.5))
+            near_top = median > y0 + COUNT_BELOW_FROM * (y1 - y0)        # no room above: the number goes below
+            label = pg.TextItem(f"{count}", color=t["text_secondary"], anchor=(0.5, -0.6 if near_top else 1.5))
+            label.setToolTip(f"{count} take{'s' if count != 1 else ''} that week")
             label.setFont(QFont(theme.font("caption")))
             label.setPos(x, median)
             p.addItem(label, ignoreBounds=True)
             self.counts.append(label)
         p.setYRange(y0, y1, padding=0.04)
         p.setXRange(*data["x_range"], padding=0)
+
+
+class SummaryCard(Card):
+    """The answer to "am I getting better?": a headline sentence for the last 30 days (toward your goal, away,
+    steady, or just changed), the last 7 days under it, and what goes with the good and the harder days where
+    the data allows. progress.summary and variation_notes decide what it says."""
+
+    def __init__(self, parent=None):
+        super().__init__("Am I getting better?", parent=parent)
+        self.headline = Label("", role="heading", wrap=True)
+        self.week = Label("", role="body", tone="secondary", wrap=True)
+        self.notes_title = Label("What goes with your different days", role="label", tone="muted")
+        self.notes_box = QVBoxLayout()
+        self.notes_box.setSpacing(theme.XS)
+        self.add(self.headline)
+        self.add(self.week)
+        self.add(self.notes_title)
+        self.add(holder(self.notes_box))
+        self.data = None
+
+    def show_summary(self, data, notes):
+        """Fill the card from progress.summary(...) and progress.variation_notes(...)."""
+        self.data = data
+        self.headline.setText(data["headline"])
+        week = [ln for ln in data["lines"] if ln["days"] == data["windows"][0]]
+        week_text = " ".join(ln["text"] for ln in week if ln["direction"] != "few")
+        self.week.setText(week_text)
+        self.week.setVisible(bool(week_text) and data["windows"][0] != data["windows"][-1])
+        clear_layout(self.notes_box)
+        for note in notes:
+            self.notes_box.addWidget(Label("• " + note["text"], role="body", tone="secondary", wrap=True))
+        self.notes_title.setVisible(bool(notes))
+        self.setVisible(True)
 
 
 class ProgressScreen(QWidget):
@@ -138,12 +200,11 @@ class ProgressScreen(QWidget):
         self.core = core
         self.task_choice = None         # None until a task is picked: then a 1-tuple (None = all tasks)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(PAGE_MARGIN, theme.L, theme.L, theme.M)
         outer.setSpacing(theme.M)
         outer.addWidget(Headline("Progress", level="title"))
-        outer.addWidget(Caption("Weekly medians of your takes on the same zones as your reports. A trend is "
-                                "only named once there are enough takes and it is bigger than your usual "
-                                "take-to-take variation.", tone="secondary"))
+        self.summary = SummaryCard()
+        outer.addWidget(self.summary)
         self.task = Select([(None, "All tasks")])
         self.task.setToolTip(progress.TASK_TOOLTIP)
         self.task.changed.connect(self._task_picked)
@@ -155,6 +216,9 @@ class ProgressScreen(QWidget):
         outer.addWidget(WrapRow([self.task, self.period, self.poor], spacing=theme.L))
         self.left_out = Caption("", tone="secondary")
         outer.addWidget(self.left_out)
+        self.legend = Caption(progress.CHART_LEGEND + ". A change is only named once there are enough takes and it "
+                              "is bigger than your usual take-to-take variation.", tone="secondary")
+        outer.addWidget(self.legend)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -181,9 +245,17 @@ class ProgressScreen(QWidget):
         return progress.report_view(self.core.progress_entries(), self.core.profile, task_choice=self.task_choice,
                                     include_poor=self.poor.isChecked(), days=self.days())
 
+    def goal(self):
+        return getattr(self.core.profile, "voice_goal", None)
+
     def refresh(self, *_):
         shown = self.view()
         self.shown = shown
+        entries = self.core.progress_entries()
+        self.summary.show_summary(progress.summary(entries, self.goal(), task=shown["task"]),
+                                  progress.variation_notes(entries, days=self.days(), task=shown["task"],
+                                                           include_poor=self.poor.isChecked()))
+        self.legend.setVisible(not shown["empty"])
         self.task.set_options([(None, "All tasks")] + [(name, f"{name} ({n})") for name, n in shown["tasks"]],
                               shown["task"])
         self.left_out.setText(shown["left_out"] or "")
@@ -212,12 +284,16 @@ class ProgressScreen(QWidget):
 
 
 class ProgressMini(Card):
-    """The dashboard's progress: sparklines of pitch, resonance and the overall placement over the last
-    weeks (progress.mini), each with its latest value and zone."""
+    """The dashboard's progress: one sentence on how the last weeks went (progress.summary_text), then
+    sparklines of pitch, resonance and the overall placement over the last weeks (progress.mini), each
+    labelled with its latest value, its unit and its zone. `sparklines=False` keeps only the sentence."""
 
-    def __init__(self, core, parent=None):
+    def __init__(self, core, sparklines=True, parent=None):
         super().__init__("Progress", parent=parent)
         self.core = core
+        self.sparklines = sparklines
+        self.sentence = Label("", role="body", wrap=True)
+        self.add(self.sentence)
         self.list = QWidget()
         self.grid = QGridLayout(self.list)
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -230,28 +306,37 @@ class ProgressMini(Card):
         self.refresh()
 
     def refresh(self, *_):
-        data = progress.mini(self.core.progress_entries(), self.core.profile)
+        entries = self.core.progress_entries()
+        data = progress.mini(entries, self.core.profile)
         self.data = data
         clear_layout(self.grid)
         self.sparks = {}
         if not any(s["latest"] for s in data["series"]):
             self.set_subtitle("")
+            self.sentence.hide()
             self.grid.addWidget(Caption(MINI_EMPTY, tone="secondary"), 0, 0)
             return
+        goal = getattr(self.core.profile, "voice_goal", None)
+        self.sentence.setText(progress.summary_text(entries, goal, task=data["task"]))
+        self.sentence.show()
+        self.list.setVisible(self.sparklines)
         self.set_subtitle(f"{(data['task'] or 'All tasks').capitalize()} · weekly medians, last {data['weeks']} weeks")
         for row, s in enumerate(data["series"]):
-            name = Label("Overall" if s["key"] == progress.OVERALL_KEY else s["name"], role="caption",
-                         tone="secondary")
-            name.setFixedWidth(80)
+            overall = s["key"] == progress.OVERALL_KEY
+            name = Label(s["name"], role="caption", tone="secondary")
+            name.setFixedWidth(120)
             spark = Sparkline(s["values"], height=32)
-            if s["target"]:
-                spark.setToolTip(f"Your target: {s['target'][0]:.0f}–{s['target'][1]:.0f}")
-            latest = Label(s["latest"] or "—", role="numeric")
-            if s["key"] == progress.OVERALL_KEY:
-                latest = Chip(theme.ZONE_SHORT.get(s["zone"], "—") if s["zone"] else "—", kind=s["zone"] or "neutral",
-                              dot=bool(s["zone"]))
+            unit = progress.SERIES[s["key"]][1]
+            spark.setToolTip(f"Weekly median{'' if overall else f' in {unit}'}, last {data['weeks']} weeks"
+                             + (f". Your target: {s['target'][0]:.0f}–{s['target'][1]:.0f} {unit}" if s["target"] else ""))
+            zone = Chip(theme.ZONE_SHORT.get(s["zone"], "—") if s["zone"] else "—", kind=s["zone"] or "neutral",
+                        dot=bool(s["zone"]))
             self.grid.addWidget(name, row, 0)
             self.grid.addWidget(spark, row, 1)
-            self.grid.addWidget(latest, row, 2, Qt.AlignmentFlag.AlignRight)
+            if overall:
+                self.grid.addWidget(zone, row, 2, 1, 2, Qt.AlignmentFlag.AlignRight)
+            else:
+                self.grid.addWidget(Label(s["latest"] or "—", role="numeric"), row, 2, Qt.AlignmentFlag.AlignRight)
+                self.grid.addWidget(zone, row, 3, Qt.AlignmentFlag.AlignRight)
             self.sparks[s["key"]] = spark
         self.grid.setColumnStretch(1, 1)

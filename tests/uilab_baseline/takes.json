@@ -2,145 +2,21 @@
  "group": "takes",
  "note": "Accepted findings (check|screen|widget path). Wave B may only remove entries; regenerate with python -m ui.lab baseline --group takes",
  "scenarios": [
-  "C:/tmp/phase11-work/01-lab/baseline-run"
+  "C:/tmp/phase11-work/04-takes/lab/after"
  ],
- "count": 47,
+ "count": 25,
  "entries": {
-  "contrast|takes|takes/full/title": {
-   "check": "contrast",
-   "severity": "error",
-   "screen": "takes",
-   "widget_path": "takes/full/title",
-   "count": 34,
-   "example": "Text contrast 3.32:1 (sampled) is under 4.5:1 (#88888c on #f8f8f8): “Take #11”",
-   "scenarios": [
-    "no_mic",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "contrast|takes|takes/search": {
-   "check": "contrast",
-   "severity": "error",
-   "screen": "takes",
-   "widget_path": "takes/search",
-   "count": 36,
-   "example": "Text contrast 3.30:1 (sampled) is under 4.5:1 (#888c90 on #fcfcfc): “Search by name, task or date”",
-   "scenarios": [
-    "empty",
-    "no_mic",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "exception||code:take_card.py:143": {
-   "check": "exception",
-   "severity": "error",
-   "screen": "",
-   "widget_path": "code:take_card.py:143",
-   "count": 3,
-   "example": "RuntimeError: wrapped C/C++ object of type QTimer has been deleted at take_card.py:143 (6×): self.timer.stop()",
-   "scenarios": [
-    "practice_each",
-    "reach",
-    "record_take"
-   ]
-  },
-  "exception||code:take_card.py:208": {
-   "check": "exception",
-   "severity": "error",
-   "screen": "",
-   "widget_path": "code:take_card.py:208",
-   "count": 4,
-   "example": "RuntimeError: wrapped C/C++ object of type _Icon has been deleted at take_card.py:208 (80×): theme.changed.connect(lambda *_: self.update())",
-   "scenarios": [
-    "practice_each",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
   "indicator_contrast|dashboard|dashboard/latest/summary/overall/bar": {
    "check": "indicator_contrast",
    "severity": "warn",
    "screen": "dashboard",
    "widget_path": "dashboard/latest/summary/overall/bar",
-   "count": 130,
+   "count": 16,
    "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
    "scenarios": [
-    "error_status",
-    "listening_silence",
-    "no_mic",
-    "noisy_input",
     "progress",
-    "reach",
     "reanalysis_running",
-    "record_take",
-    "sing_truth_scale",
-    "speak_real_replay",
-    "speak_truth_glide",
-    "speak_truth_steady"
-   ]
-  },
-  "indicator_contrast|takes|takes/cards.*/mini_bars.delta_f/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/cards.20261023T114140-e2f20e/mini_bars.delta_f/bar",
-   "count": 189,
-   "example": "Zone band(s) masculine #3e5f8a at 1.99:1, overlap #2a282e at 1.12:1, feminine #814a60 at 1.92:1 against what they sit on (#2f2d4f); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "indicator_contrast|takes|takes/cards.*/mini_bars.pitch/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/cards.20261023T114140-e2f20e/mini_bars.pitch/bar",
-   "count": 177,
-   "example": "Zone band(s) masculine #3e5f8a at 1.99:1, overlap #2a282e at 1.12:1, feminine #814a60 at 1.92:1 against what they sit on (#2f2d4f); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "indicator_contrast|takes|takes/cards.*/overall/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/cards.20261023T114140-e2f20e/overall/bar",
-   "count": 173,
-   "example": "Zone band(s) masculine #3e5f8a at 1.99:1, overlap #2a282e at 1.12:1, feminine #814a60 at 1.92:1 against what they sit on (#2f2d4f); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "indicator_contrast|takes|takes/full/metric_cards.cpp/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.cpp/bar",
-   "count": 15,
-   "example": "Zone band(s) feminine #814a60 at 2.37:1, overlap #2a282e at 1.11:1, masculine #3e5f8a at 2.46:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
+    "record_take"
    ]
   },
   "indicator_contrast|takes|takes/full/metric_cards.delta_f/bar": {
@@ -148,26 +24,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.delta_f/bar",
-   "count": 37,
+   "count": 30,
    "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
    "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "indicator_contrast|takes|takes/full/metric_cards.h1h2/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.h1h2/bar",
-   "count": 19,
-   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #1d2129 at 1.00:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -178,26 +37,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.pitch/bar",
-   "count": 39,
+   "count": 32,
    "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
    "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "indicator_contrast|takes|takes/full/metric_cards.pitch_floor/bar": {
-   "check": "indicator_contrast",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.pitch_floor/bar",
-   "count": 21,
-   "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
-   "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -208,11 +50,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.pitch_range/bar",
-   "count": 39,
+   "count": 30,
    "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -223,64 +63,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/summary/overall/bar",
-   "count": 69,
+   "count": 60,
    "example": "Zone band(s) masculine #3e5f8a at 2.46:1, overlap #2a282e at 1.11:1, feminine #814a60 at 2.37:1 against what they sit on (#1d2129); WCAG 1.4.11 asks 3.0:1",
    "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "jargon|progress|progress/charts.pitch_range/subtitle_label": {
-   "check": "jargon",
-   "severity": "warn",
-   "screen": "progress",
-   "widget_path": "progress/charts.pitch_range/subtitle_label",
-   "count": 5,
-   "example": "Jargon “st without 'semitones'” in visible text: “latest week 4.6 st · no clear change since week of Oct 12 (within your usual tak”",
-   "scenarios": [
-    "progress",
-    "reach"
-   ]
-  },
-  "jargon|takes|takes/full/metric_cards.pitch/change_chip": {
-   "check": "jargon",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.pitch/change_chip",
-   "count": 65,
-   "example": "Jargon “st without 'semitones'” in visible text: “Lower than your last take (-1.6 st)”",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "jargon|takes|takes/full/metric_cards.pitch_floor/change_chip": {
-   "check": "jargon",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.pitch_floor/change_chip",
-   "count": 32,
-   "example": "Jargon “st without 'semitones'” in visible text: “Lower low points than your last take (-2.1 st)”",
-   "scenarios": [
-    "takes_report"
-   ]
-  },
-  "jargon|takes|takes/full/metric_cards.pitch_range/change_chip": {
-   "check": "jargon",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.pitch_range/change_chip",
-   "count": 57,
-   "example": "Jargon “st without 'semitones'” in visible text: “Flatter than your last take (-3.1 st)”",
-   "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -291,42 +76,8 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/shift_view/value_labels.semitones",
-   "count": 46,
+   "count": 44,
    "example": "Jargon “st without 'semitones'” in visible text: “0 st”",
-   "scenarios": [
-    "reach",
-    "takes_report"
-   ]
-  },
-  "next_action|takes|takes/full/metric_cards.cpp": {
-   "check": "next_action",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.cpp",
-   "count": 10,
-   "example": "“Can't judge” on Clarity says why (“Too much background noise to judge weight and clarity”) but not what to do",
-   "scenarios": [
-    "takes_report"
-   ]
-  },
-  "next_action|takes|takes/full/metric_cards.delta_f": {
-   "check": "next_action",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.delta_f",
-   "count": 4,
-   "example": "“Can't judge” on Resonance says why (“Too few clear formant readings to judge resonance”) but not what to do",
-   "scenarios": [
-    "takes_report"
-   ]
-  },
-  "next_action|takes|takes/full/metric_cards.h1h2": {
-   "check": "next_action",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.h1h2",
-   "count": 10,
-   "example": "“Can't judge” on Vocal weight says why (“Too much background noise to judge weight and clarity”) but not what to do",
    "scenarios": [
     "takes_report"
    ]
@@ -336,34 +87,34 @@
    "severity": "warn",
    "screen": "dashboard",
    "widget_path": "dashboard/latest/summary/Section/help",
-   "count": 2,
-   "example": "HelpTip “?” is covered by toasts",
+   "count": 1,
+   "example": "HelpTip “” is covered by toasts",
    "scenarios": [
-    "error_status"
+    "error_status",
+    "no_mic"
    ]
   },
   "overlap|dashboard|dashboard/latest/summary/tip_rows.*/chips.*": {
    "check": "overlap",
    "severity": "warn",
    "screen": "dashboard",
-   "widget_path": "dashboard/latest/summary/tip_rows.0/chips.0",
-   "count": 8,
+   "widget_path": "dashboard/latest/summary/tip_rows.*/chips.*",
+   "count": 1,
    "example": "MomentChip “22.6–23.4 s” is covered by toasts",
    "scenarios": [
     "error_status",
     "no_mic"
    ]
   },
-  "overlap|dashboard|dashboard/recent/rows.*": {
+  "overlap|takes|takes/full/metric_cards.pitch_range/details/header": {
    "check": "overlap",
    "severity": "warn",
-   "screen": "dashboard",
-   "widget_path": "dashboard/recent/rows.3",
-   "count": 14,
-   "example": "RecentRow “” is covered by toasts",
+   "screen": "takes",
+   "widget_path": "takes/full/metric_cards.pitch_range/details/header",
+   "count": 2,
+   "example": "_Header “” is covered by toasts",
    "scenarios": [
-    "error_status",
-    "no_mic"
+    "reanalysis_running"
    ]
   },
   "small_target|dashboard|dashboard/latest/summary/Section/help": {
@@ -371,21 +122,12 @@
    "severity": "warn",
    "screen": "dashboard",
    "widget_path": "dashboard/latest/summary/Section/help",
-   "count": 130,
+   "count": 16,
    "example": "Click target 24×24 px is under 28×28",
    "scenarios": [
-    "error_status",
-    "listening_silence",
-    "no_mic",
-    "noisy_input",
     "progress",
-    "reach",
     "reanalysis_running",
-    "record_take",
-    "sing_truth_scale",
-    "speak_real_replay",
-    "speak_truth_glide",
-    "speak_truth_steady"
+    "record_take"
    ]
   },
   "small_target|dashboard|dashboard/latest/summary/overall/HelpTip": {
@@ -393,21 +135,12 @@
    "severity": "warn",
    "screen": "dashboard",
    "widget_path": "dashboard/latest/summary/overall/HelpTip",
-   "count": 130,
+   "count": 16,
    "example": "Click target 24×24 px is under 28×28",
    "scenarios": [
-    "error_status",
-    "listening_silence",
-    "no_mic",
-    "noisy_input",
     "progress",
-    "reach",
     "reanalysis_running",
-    "record_take",
-    "sing_truth_scale",
-    "speak_real_replay",
-    "speak_truth_glide",
-    "speak_truth_steady"
+    "record_take"
    ]
   },
   "small_target|dashboard|dashboard/latest/summary/tip_rows.*/chips.*": {
@@ -415,21 +148,12 @@
    "severity": "warn",
    "screen": "dashboard",
    "widget_path": "dashboard/latest/summary/tip_rows.0/chips.0",
-   "count": 266,
+   "count": 30,
    "example": "Click target 94×26 px is under 28×28",
    "scenarios": [
-    "error_status",
-    "listening_silence",
-    "no_mic",
-    "noisy_input",
     "progress",
-    "reach",
     "reanalysis_running",
-    "record_take",
-    "sing_truth_scale",
-    "speak_real_replay",
-    "speak_truth_glide",
-    "speak_truth_steady"
+    "record_take"
    ]
   },
   "small_target|progress|progress/QScrollArea/QWidget/Collapsible/header": {
@@ -438,7 +162,7 @@
    "screen": "progress",
    "widget_path": "progress/QScrollArea/QWidget/Collapsible/header",
    "count": 4,
-   "example": "Click target 1824×26 px is under 28×28",
+   "example": "Click target 1784×26 px is under 28×28",
    "scenarios": [
     "empty"
    ]
@@ -448,24 +172,11 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/Section/help",
-   "count": 63,
+   "count": 32,
    "example": "Click target 24×24 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
-    "takes_report"
-   ]
-  },
-  "small_target|takes|takes/full/metric_cards.cpp/details/header": {
-   "check": "small_target",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.cpp/details/header",
-   "count": 4,
-   "example": "Click target 427×26 px is under 28×28",
-   "scenarios": [
     "takes_report"
    ]
   },
@@ -474,24 +185,11 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.delta_f/details/header",
-   "count": 41,
-   "example": "Click target 428×26 px is under 28×28",
+   "count": 24,
+   "example": "Click target 414×26 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
-    "takes_report"
-   ]
-  },
-  "small_target|takes|takes/full/metric_cards.h1h2/details/header": {
-   "check": "small_target",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "takes/full/metric_cards.h1h2/details/header",
-   "count": 4,
-   "example": "Click target 428×26 px is under 28×28",
-   "scenarios": [
     "takes_report"
    ]
   },
@@ -500,11 +198,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.pitch/details/header",
-   "count": 39,
-   "example": "Click target 427×26 px is under 28×28",
+   "count": 26,
+   "example": "Click target 414×26 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -515,11 +211,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/metric_cards.pitch_range/details/header",
-   "count": 39,
-   "example": "Click target 427×26 px is under 28×28",
+   "count": 24,
+   "example": "Click target 414×26 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -530,11 +224,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/summary/FlowGrid/Section/help",
-   "count": 73,
+   "count": 64,
    "example": "Click target 24×24 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -545,11 +237,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/summary/overall/HelpTip",
-   "count": 69,
+   "count": 60,
    "example": "Click target 24×24 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
@@ -560,42 +250,34 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "takes/full/summary/tip_rows.0/chips.0",
-   "count": 268,
+   "count": 150,
    "example": "Click target 94×26 px is under 28×28",
    "scenarios": [
-    "no_mic",
-    "reach",
     "reanalysis_running",
     "record_take",
     "takes_report"
    ]
   },
-  "truncation|takes|takes/cards.*/headline": {
+  "truncation|progress|progress/charts.cpp/plot/TextItem": {
    "check": "truncation",
-   "severity": "error",
-   "screen": "takes",
-   "widget_path": "takes/cards.20261023T092126-828853/headline",
-   "count": 365,
-   "example": "Wrapped text needs 38 px of height but has 28 px: “Overall this take sits in the typically masculine zone.”",
+   "severity": "warn",
+   "screen": "progress",
+   "widget_path": "progress/charts.cpp/plot/TextItem",
+   "count": 2,
+   "example": "Graph label “2” runs outside the plot",
    "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
+    "progress"
    ]
   },
-  "unlabelled_pair|dashboard|dashboard/latest/summary/tip_rows.*/text": {
+  "unlabelled_pair|dashboard|dashboard/latest/summary/tip_rows.*/why": {
    "check": "unlabelled_pair",
    "severity": "warn",
    "screen": "dashboard",
-   "widget_path": "dashboard/latest/summary/tip_rows.0/text",
-   "count": 24,
-   "example": "Live pitch 82 Hz sits beside the last take's 146 Hz: the live readout doesn't say “now”",
+   "widget_path": "dashboard/latest/summary/tip_rows.0/why",
+   "count": 8,
+   "example": "Live pitch 158 Hz sits beside the last take's 165 Hz: the live readout doesn't say “now”",
    "scenarios": [
-    "noisy_input",
-    "record_take",
-    "speak_real_replay"
+    "record_take"
    ]
   },
   "vocabulary|takes|words:name.delta_f": {
@@ -603,10 +285,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "words:name.delta_f",
-   "count": 46,
+   "count": 44,
    "example": "One quantity under 2 names on one screen: Brightness, Resonance",
    "scenarios": [
-    "reach",
     "takes_report"
    ]
   },
@@ -615,10 +296,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "words:name.pitch_range",
-   "count": 46,
+   "count": 44,
    "example": "One quantity under 2 names on one screen: Intonation, Intonation range",
    "scenarios": [
-    "reach",
     "takes_report"
    ]
   },
@@ -627,54 +307,9 @@
    "severity": "warn",
    "screen": "takes",
    "widget_path": "words:unit.semitones",
-   "count": 12,
+   "count": 44,
    "example": "Semitones are written both “st” and “semitones” on one screen",
    "scenarios": [
-    "takes_report"
-   ]
-  },
-  "vocabulary|takes|words:zone.feminine": {
-   "check": "vocabulary",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "words:zone.feminine",
-   "count": 73,
-   "example": "The feminine zone is called Feminine and typically feminine on one screen",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "vocabulary|takes|words:zone.masculine": {
-   "check": "vocabulary",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "words:zone.masculine",
-   "count": 73,
-   "example": "The masculine zone is called Masculine and typically masculine on one screen",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
-    "takes_report"
-   ]
-  },
-  "vocabulary|takes|words:zone.overlap": {
-   "check": "vocabulary",
-   "severity": "warn",
-   "screen": "takes",
-   "widget_path": "words:zone.overlap",
-   "count": 73,
-   "example": "The overlap zone is called Overlap and overlap / androgynous on one screen",
-   "scenarios": [
-    "no_mic",
-    "reach",
-    "reanalysis_running",
-    "record_take",
     "takes_report"
    ]
   }

@@ -108,7 +108,8 @@ def test_takes_folder_crud(make_window, tmp_path):
     assert len(again.core.progress_entries()) == 1
 
     assert again.core.delete(loaded["uid"])
-    assert again.core.takes() == [] and list(folder.iterdir()) == []
+    assert again.core.takes() == [] and [p.name for p in folder.iterdir()] == [".trash"]   # deleted takes wait in .trash
+    assert len(list((folder / ".trash").iterdir())) == 2
     assert again.core.progress_entries() == []
 
 

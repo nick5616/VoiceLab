@@ -36,7 +36,7 @@ QUANTITY_NAMES = {
     "pitch_range": ["Intonation", "Intonation range", "Intonation Range"],
     "h1h2": ["Weight", "Heavy ↔ Light", "Vocal weight"],
     "cpp": ["Clarity"],
-    "pitch_floor": ["Pitch floor", "Low points"],
+    "pitch_floor": ["Lowest notes", "Pitch floor", "Low points"],
 }
 NAME_TO_QUANTITY = {name.lower(): key for key, names in QUANTITY_NAMES.items() for name in names}
 

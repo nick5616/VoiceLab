@@ -4,6 +4,7 @@ events say. No UI toolkit.
 
 Events (Events.emit): "take_added"(take) (also for every take loaded from the folder),
 "take_ready"(take) (only a new take: recorded, imported or an exercise), "take_updated"(take), "take_removed"(uid),
+"take_trashed"(uid, name) (a saved take moved to the takes folder's .trash: undo_delete(uid) brings it back),
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
@@ -25,6 +26,7 @@ import register
 import report
 import session_plan
 import speech
+import take_trash
 import take_view
 import voice_map
 from analysis import SAMPLE_RATE, score_exercise
@@ -37,6 +39,7 @@ from jobs import JobRunner
 from live_session import LiveSession
 from playback import Player
 from profile_store import TARGET_KEYS
+import progress
 from progress import collect_entries
 from speech import READING_PASSAGES, VowelCheckSession
 from take_register import (acoustic_grade, analyze_recording, analyze_with_options, finish_take, fit_labelled,
@@ -219,6 +222,7 @@ class VoiceLabCore:
         self.register_again = False     # something changed while a register job ran
         self.register_failed = set()    # uids that couldn't be scored, so they aren't retried
         self.reanalysis_failed = set()  # uids that couldn't be re-analysed, so they aren't retried this session
+        self._trashed = {}              # uid -> (take, its number, take_trash receipt): deleted, can be undone
         self.reanalysis_total = 0       # takes queued in this round, for the status text
         self.reanalysis_done = 0
         self.jobs = {"analysis": None, "load": None, "register": None, "reanalysis": None, "voicemap": None}
@@ -795,6 +799,7 @@ class VoiceLabCore:
             return
         # Keep takes that aren't in the folder, and any saved while it loaded;
         # takes whose files were deleted outside VoiceLab go.
+        take_trash.purge(self.store.folder)       # phase 11 / 04: trash older than a month is emptied
         loaded = {d["uid"] for d in result["takes"]}
         kept = [d for d in self.shown_takes() if d.get("uid") not in loaded and
                 (not d.get("file") or self.store.path(d).exists())]
@@ -841,9 +846,10 @@ class VoiceLabCore:
         text, name = take_view.delete_question(data, self.number(data))
         if confirm is not None and not confirm(text):
             return False
+        number, receipt = self.number(data), None
         if data.get("file") and self.store:
             try:
-                self.store.delete(data)
+                receipt = self._move_to_trash(data)         # phase 11 / 04: a slip can be undone
             except OSError as e:
                 self._status(f"Couldn't delete: {e}", "error")
                 return False
@@ -853,9 +859,39 @@ class VoiceLabCore:
             self.shown -= 1
         self._takes = [d for d in self._takes if d is not data]
         self.events.emit("take_removed", data.get("uid"))
+        if receipt is not None:
+            self._trashed[data.get("uid")] = (data, number, receipt)
+            self.events.emit("take_trashed", data.get("uid"), name)
         self._status(f"Deleted {name}")
         self.events.emit("progress_changed")
         return True
+
+    # phase 11 / 04 takes: undo delete, practice days
+    def _move_to_trash(self, data):
+        """The take's audio and sidecar into the takes folder's .trash; returns the receipt."""
+        return take_trash.move_to_trash(self.store.folder, [self.store.path(data), self.store.sidecar(data)])
+
+    def can_undo_delete(self, uid):
+        return uid in self._trashed
+
+    def undo_delete(self, uid):
+        """Bring a deleted take back (its files from .trash, its number and place in the list). True when
+        it came back; "take_added" tells the UI, as for a take loaded from the folder."""
+        if uid not in self._trashed:
+            return False
+        data, number, receipt = self._trashed.pop(uid)
+        if not take_trash.restore(receipt):
+            self._status("Couldn't bring the take back: its files are gone from the .trash folder", "warning")
+            return False
+        self._add(data, number)
+        self._status(f"Brought back Take #{number}" if number else "Brought the take back", "success")
+        self.events.emit("progress_changed")
+        return True
+
+    def practice_days(self, window=progress.PRACTICE_WINDOW_DAYS, now=None):
+        """{"days": how many of the last `window` days have a take, "window", "text": the quiet line
+        ("Practised 4 of the last 7 days") or "" with none}."""
+        return progress.practice_days(self.progress_entries(), window=window, now=now)
 
     # --- REGISTER ---
 

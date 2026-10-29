@@ -15,17 +15,12 @@ ROW_HEIGHT = 52                 # px: two lines of text and some air
 
 def row_summary(rep):
     """(chip text, chip kind, value text) a recent row shows from a take's report."""
-    if rep["mode"] == "sing":
-        tuning = next((d for d in rep["dimensions"] if d["key"] == "tuning"), None)
-        return "Sing", "neutral", tuning["display"] if tuning and tuning.get("value") is not None else ""
-    zone = rep["overall"].get("zone")
-    chip = theme.ZONE_SHORT.get(zone, "No placement") if zone else "No placement"
-    pitch = next((d for d in rep["dimensions"] if d["key"] == "pitch"), None)
-    return chip, zone or "neutral", pitch["display"] if pitch and pitch.get("value") is not None else "—"
+    return take_view.row_chip(rep)
 
 
 class RecentRow(ThemedWidget):
-    """One take in the recent list; clicked(uid)."""
+    """One take in a list: quality dot, name and date, where it lands overall, its pitch; clicked(uid).
+    The Takes screen's list uses it too (set_selected, set_status: "New" or "Updating…")."""
 
     clicked = pyqtSignal(str)
 
@@ -33,35 +28,49 @@ class RecentRow(ThemedWidget):
         super().__init__()
         self.uid = take.get("uid")
         self.hover = False
+        self.selected = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(ROW_HEIGHT)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        head = take_view.header(take, core.number(take))
         rep = report_for(core, self.uid)
-        chip_text, kind, value = row_summary(rep)
+        view = take_view.row_view(take, rep, core.number(take))
+        self.view = view
         row = QHBoxLayout(self)
         row.setContentsMargins(theme.S, theme.XS, theme.M, theme.XS)
         row.setSpacing(theme.M)
-        self.dot = StatusDot(head["dot"])
-        self.dot.setToolTip(head["tier_text"])
+        self.dot = StatusDot(view["dot"])
+        self.dot.setToolTip(view["tier_text"])
         row.addWidget(self.dot)
         words = QVBoxLayout()
         words.setSpacing(0)
-        self.title = ElidedLabel(head["title"] or head["placeholder"], role="label")
-        self.subtitle = ElidedLabel(" · ".join(p for p in (head["date"], head["task"]) if p), role="caption",
-                                    tone="muted")
+        self.title = ElidedLabel(view["title"], role="label")
+        self.subtitle = ElidedLabel(view["subtitle"], role="caption", tone="muted")
         words.addWidget(self.title)
         words.addWidget(self.subtitle)
         row.addLayout(words, 1)
-        self.chip = Chip(chip_text, kind=kind, dot=kind != "neutral")
-        self.chip.setToolTip(rep["headline"])
+        self.status = Chip("", kind="accent", dot=True)
+        self.status.hide()
+        row.addWidget(self.status)
+        self.chip = Chip(view["chip"], kind=view["kind"], dot=view["kind"] != "neutral")
+        self.chip.setToolTip(view["tooltip"])
         row.addWidget(self.chip)
-        self.value = Label(value, role="numeric", tone="secondary")
+        self.value = Label(view["value"], role="numeric", tone="secondary")
         self.value.setFixedWidth(64)
         self.value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.value)
-        self.setToolTip(rep["headline"])
-        self.setAccessibleName(f"{head['title'] or head['placeholder']}, {head['subtitle']}: {rep['headline']}")
+        self.setToolTip(view["tooltip"])
+        self.setAccessibleName(f"{view['title']}, {view['subtitle']}: {view['tooltip']}")
+
+    def set_selected(self, selected):
+        self.selected = bool(selected)
+        self.update()
+
+    def set_status(self, text):
+        """A short word on the row ("New", "Updating…"), or "" for none."""
+        self.status.setVisible(bool(text))
+        self.chip.setVisible(not text or text == take_view.NEW_TEXT)       # "Updating…" stands in for the stale placement
+        if text:
+            self.status.set_text(text, kind="accent" if text == take_view.NEW_TEXT else "info")
 
     def mouseReleaseEvent(self, event):
         if self.rect().contains(event.position().toPoint()):
@@ -83,10 +92,11 @@ class RecentRow(ThemedWidget):
 
     def paintEvent(self, event):
         t = theme.current()
-        if self.hover or self.hasFocus():
+        if self.selected or self.hover or self.hasFocus():
             rounded(painter(self), QRectF(self.rect()), theme.RADIUS["medium"],
-                    fill=t.q("surface_raised") if self.hover else None,
-                    border=t.q("accent") if self.hasFocus() else None)
+                    fill=t.q("accent_soft") if self.selected else t.q("surface_raised") if self.hover else None,
+                    border=t.q("accent") if (self.selected or self.hasFocus()) else None,
+                    width=2 if self.selected else 1)
 
 
 class RecentTakes(Card):
