@@ -4,7 +4,7 @@
  "scenarios": [
   "C:/tmp/phase11-work/04-takes/lab/after"
  ],
- "count": 25,
+ "count": 26,
  "entries": {
   "indicator_contrast|dashboard|dashboard/latest/summary/overall/bar": {
    "check": "indicator_contrast",
@@ -312,6 +312,18 @@
    "scenarios": [
     "takes_report"
    ]
+  },
+  "overlap|dashboard|dashboard/latest/open_btn": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "dashboard",
+   "widget_path": "dashboard/latest/open_btn",
+   "count": 1,
+   "example": "Button “Open report” is covered by toasts",
+   "scenarios": [
+    "error_status"
+   ],
+   "why": "integration: a transient, dismissable toast stacked bottom-right over content at 1280x720 (spec 05 toast placement; listed as an open finding in the phase 11 integration report)"
   }
  }
 }

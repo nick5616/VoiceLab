@@ -4,7 +4,7 @@
  "scenarios": [
   "C:/tmp/phase11-work/03-live/lab/after"
  ],
- "count": 21,
+ "count": 22,
  "entries": {
   "fold|dashboard|dashboard/right/edge": {
    "check": "fold",
@@ -290,6 +290,18 @@
    "scenarios": [
     "no_mic"
    ]
+  },
+  "overlap|live|live/view/cards/cards.register/help": {
+   "check": "overlap",
+   "severity": "warn",
+   "screen": "live",
+   "widget_path": "live/view/cards/cards.register/help",
+   "count": 1,
+   "example": "HelpTip “?” is covered by toasts",
+   "scenarios": [
+    "no_mic"
+   ],
+   "why": "integration: a transient, dismissable toast stacked bottom-right over content at 1280x720 (spec 05 toast placement; listed as an open finding in the phase 11 integration report)"
   }
  }
 }

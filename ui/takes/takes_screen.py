@@ -31,6 +31,7 @@ class SearchBox(QLineEdit):
     def __init__(self, placeholder):
         super().__init__()
         self.setPlaceholderText(placeholder)
+        self.setAccessibleName("Search takes")     # the placeholder disappears once you type (spec 05: every stop named)
         self.setClearButtonEnabled(True)
         theme.changed.connect(self.restyle)
         self.restyle()
