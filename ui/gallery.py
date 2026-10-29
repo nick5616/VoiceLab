@@ -10,11 +10,11 @@ import argparse
 import os
 import sys
 
-from PyQt6.QtCore import QEventLoop, QRectF, Qt, QTimer
+from PyQt6.QtCore import QCoreApplication, QEvent, QEventLoop, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from ui import theme
+from ui import anim, theme
 from ui.components import (ActivityCenter, Badge, Banner, BigNumber, Button, Caption, Card, Chip, Collapsible,
                            ConfidenceChip, Divider, EmptyState, FlowGrid, Headline, HelpTip, IconButton, Label,
                            MetricCard, MomentChip, NavRail, ProgressStrip, RecordButton, Section, SegmentedControl,
@@ -413,8 +413,10 @@ def render(path, width=1440, name=None):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     image.save(path)
     size = (image.width(), image.height())
+    anim.stop_all(gallery)              # looping pulses and shimmers must not outlive the widgets they move
     gallery.close()
     gallery.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     return size
 
 

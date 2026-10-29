@@ -1,15 +1,16 @@
-"""The first-run welcome: a kind word, the voice goal, the takes folder and the mic check. Every step can
-be skipped; Settings can open it again. The shell passes in what the steps do (choose a folder, run the
-mic check); the choices go to the core."""
+"""The first-run welcome: a kind word, the voice goal, the mic check, the takes folder and a first try: say a
+sentence, see that the app hears you, then record the first take. Every step can be skipped; Settings can
+open it again. The shell passes in what the steps do (choose a folder, run the mic check); the choices go
+to the core."""
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 
 from app_core import VOICE_GOAL_CHOICES, VOICE_GOAL_TEXT
 from ui import theme
-from ui.components import Button, Caption, Headline, Label, SegmentedControl
+from ui.components import Button, Caption, Headline, Label, LevelMeter, SegmentedControl
 
-STEPS = ("welcome", "goal", "folder", "mic")
+STEPS = ("welcome", "goal", "mic", "folder", "try")
 WELCOME_TITLE = "Welcome to VoiceLab"
 WELCOME_POINTS = [
     ("A tool, not a judge",
@@ -24,8 +25,16 @@ WELCOME_POINTS = [
 ]
 GOAL_TITLE = "What would you like to work toward?"
 FOLDER_TITLE = "Where should your takes live?"
-FOLDER_TEXT = ("Pick a folder and every take is saved there as a WAV file with its analysis beside it, "
-               "so your progress builds up across sessions. You can change it any time in Settings.")
+FOLDER_TEXT = ("Every take is saved in one folder, as a WAV file with its analysis beside it, so your progress "
+               "builds up across sessions. You can change it any time in Settings.")
+USE_FOLDER = "Use this folder"
+TRY_TITLE = "Try it"
+TRY_TEXT = "Say anything, like “Hi, how are you today?” and watch the bar move."
+TRY_WAITING = "Waiting for your voice…"
+TRY_HEARD = "I can hear you. You're all set."
+TRY_QUIET = "I can hear something, but very quietly. Move a little closer."
+TRY_NO_SIGNAL = "I'm not getting any audio from the mic. Check the mic step, or choose another mic in Settings."
+FIRST_TAKE = "Record my first take"
 MIC_TITLE = "Check your mic"
 MIC_TEXT = ("Eight seconds: stay quiet for a moment, then say a steady “ah”. VoiceLab tells you if the room "
             "is noisy, the mic too far, or the desk rumbling, so the readings you get can be trusted.")
@@ -36,6 +45,7 @@ class Onboarding(QDialog):
     or skipped (the core remembers it)."""
 
     completed = pyqtSignal()
+    first_take = pyqtSignal()           # the last step's main button: record the first take
 
     def __init__(self, core, choose_folder, run_mic_check, parent=None):
         super().__init__(parent)
@@ -58,6 +68,7 @@ class Onboarding(QDialog):
         nav = QHBoxLayout()
         self.dots = Caption("")
         self.skip_all = Button("Skip the welcome", variant="ghost")
+        self.heard = False              # the try step heard a voice
         self.skip_all.clicked.connect(self.finish)
         self.back_btn = Button("Back", variant="ghost", icon="ph.arrow-left")
         self.back_btn.clicked.connect(lambda: self.go(self.index() - 1))
@@ -110,18 +121,35 @@ class Onboarding(QDialog):
     def _folder_page(self):
         page, box = self._page(FOLDER_TITLE)
         box.addWidget(Label(FOLDER_TEXT, role="body", tone="secondary", wrap=True))
-        self.folder_label = Label("", role="label")
+        self.folder_label = Label("", role="heading", wrap=True)
         box.addWidget(self.folder_label)
-        self.folder_btn = Button("Choose a folder…", variant="secondary", icon="ph.folder-open")
+        row = QHBoxLayout()
+        self.use_folder_btn = Button(USE_FOLDER, variant="primary", icon="ph.folder-open")
+        self.use_folder_btn.clicked.connect(self._use_folder)
+        self.folder_btn = Button("Choose another…", variant="ghost")
         self.folder_btn.clicked.connect(self._choose_folder)
-        box.addWidget(self.folder_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        row.addWidget(self.use_folder_btn)
+        row.addWidget(self.folder_btn)
+        row.addStretch(1)
+        box.addLayout(row)
+        box.addStretch(1)
+        return page
+
+    def _try_page(self):
+        page, box = self._page(TRY_TITLE)
+        box.addWidget(Label(TRY_TEXT, role="heading", wrap=True))
+        self.meter = LevelMeter()
+        box.addWidget(self.meter)
+        self.try_label = Label(TRY_WAITING, role="body", tone="secondary", wrap=True)
+        self.try_label.setAccessibleName("Whether VoiceLab hears you")
+        box.addWidget(self.try_label)
         box.addStretch(1)
         return page
 
     def _mic_page(self):
         page, box = self._page(MIC_TITLE)
         box.addWidget(Label(MIC_TEXT, role="body", tone="secondary", wrap=True))
-        self.mic_btn = Button("Run the mic check", variant="secondary", icon="ph.microphone")
+        self.mic_btn = Button("Set up my mic", variant="secondary", icon="ph.microphone")
         self.mic_btn.clicked.connect(self.run_mic_check)
         box.addWidget(self.mic_btn, 0, Qt.AlignmentFlag.AlignLeft)
         self.mic_result = Label("", role="body", wrap=True)
@@ -142,15 +170,39 @@ class Onboarding(QDialog):
         self.stack.setCurrentIndex(index)
         last = index == len(STEPS) - 1
         self.back_btn.setVisible(index > 0)
-        self.next_btn.setText("Start using VoiceLab" if last else "Next")
+        self.next_btn.setText(FIRST_TAKE if last else "Next")
+        self.next_btn.set_icon("ph.microphone-fill" if last else "ph.arrow-right")
+        self.skip_all.setText("Finish without recording" if last else "Skip the welcome")
         self.dots.setText(f"Step {index + 1} of {len(STEPS)}")
         self._refresh()
 
     def next(self):
         if self.index() == len(STEPS) - 1:
-            self.finish()
+            self.finish(record=True)
         else:
             self.go(self.index() + 1)
+
+    def _use_folder(self):
+        """One click: save takes in the suggested folder."""
+        self.core.set_takes_folder(str(self.core.default_takes_folder()))
+        self._refresh()
+
+    def show_live(self, state, f0=None, level=0.0):
+        """A live frame while this welcome is open: the try step shows that the app hears you."""
+        if self.step() != "try":
+            return
+        self.meter.set_level(level)
+        voiced = f0 is not None and f0 == f0
+        if state == "no_signal":
+            self.try_label.setText(TRY_NO_SIGNAL)
+        elif state == "too_quiet" and not self.heard:
+            self.try_label.setText(TRY_QUIET)
+        elif voiced or state == "hearing":
+            self.heard = True
+            self.try_label.setText(TRY_HEARD)
+            self.try_label.set_tone("primary")
+        elif not self.heard:
+            self.try_label.setText(TRY_WAITING)
 
     def _choose_folder(self):
         self.choose_folder()
@@ -158,9 +210,9 @@ class Onboarding(QDialog):
 
     def _refresh(self):
         store = self.core.store
-        self.folder_label.setText(f"Saving to {store.folder}" if store else "")
-        self.folder_label.setVisible(store is not None)
-        self.folder_btn.setText("Choose another folder…" if store else "Choose a folder…")
+        self.folder_label.setText(f"Saving to {store.folder}" if store else str(self.core.default_takes_folder()))
+        self.use_folder_btn.setVisible(store is None)
+        self.folder_btn.setText("Choose another folder…" if store else "Choose another…")
         lines = self.core.mic_check_text()
         self.mic_result.setText(lines[0] if lines else "")
 
@@ -168,13 +220,16 @@ class Onboarding(QDialog):
         """The shell's mic check finished: show what it found."""
         self._refresh()
 
-    def finish(self):
-        """Done or skipped: remembered, so it doesn't come back (Settings can reopen it)."""
+    def finish(self, record=False):
+        """Done or skipped: remembered, so it doesn't come back (Settings can reopen it). `record`: the last
+        step's button, which goes on to the first take."""
         if self.core.should_ask_takes_folder():
             self.core.decline_takes_folder()
         self.core.finish_onboarding()
         self.completed.emit()
         self.accept()
+        if record:
+            self.first_take.emit()
 
     def reject(self):
         """Closing the window skips the rest."""

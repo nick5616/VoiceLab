@@ -20,6 +20,7 @@ GAP = 2                     # px surface gap between zones (dataviz spacer)
 MARKER_WIDTH = 5            # px; with a 2 px surface ring
 LABEL_PAD = 12              # px a zone label needs beside its text to be drawn
 ZONE_BAR_MIN_WIDTH = 160    # px
+LEGEND_ROW = 20             # px: the zone names under a bar too narrow to name its zones inside
 
 
 def _free(a, b, blocked):
@@ -50,8 +51,9 @@ class ZoneBar(ThemedWidget):
     the shape of report.ZONES[key]["zones"]."""
 
     def __init__(self, scale=(0.0, 1.0), zones=None, log=False, unit="", fmt="{:.0f}", ticks=True,
-                 labels=True, compact=False, parent=None):
+                 labels=True, compact=False, parent=None, prefer_long=False):
         super().__init__(parent)
+        self.prefer_long = prefer_long  # try the long zone words ("typically feminine") before the short ones
         self.scale, self.log = tuple(scale), log
         self.zones = list(zones or [])
         self.reverse = bool(self.zones) and self.zones[0].get("id") == "feminine"   # see set_zones
@@ -66,6 +68,8 @@ class ZoneBar(ThemedWidget):
         self.end_labels = None          # ("Dark", "Bright") under the ends
         self.gap_color = "surface"      # the token the bar sits on (its gaps and marker ring)
         self.drawn_labels = []          # [(zone id, text)] from the last paint, for tests
+        self.legend = False             # True: the zone names sit under the bar, as a legend (no room inside)
+        self.label_form = "long" if prefer_long else "short"     # the one set of words for every zone: long, short, legend
         self.setMinimumWidth(ZONE_BAR_MIN_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self._height())
@@ -86,10 +90,44 @@ class ZoneBar(ThemedWidget):
         band = COMPACT_BAND if self.compact else BAND_HEIGHT
         head = 7 if self.compact else HEADROOM
         foot = TICK_ROW if (self.show_ticks or self.end_labels) and not self.compact else 7
-        return head + band + foot
+        return head + band + foot + (LEGEND_ROW if self.legend and not self.compact else 0)
 
     def sizeHint(self):
         return QSize(320, self._height())
+
+    def _texts(self, form):
+        """Each zone's words in a form: the long label, or the short one (theme.ZONE_SHORT)."""
+        return [(z.get("label") if form == "long" else theme.ZONE_SHORT.get(z.get("id")) or z.get("label") or "")
+                for z in self.zones]
+
+    def _pick_form(self):
+        """One set of words for every zone of this bar, chosen by the bar's width: the long labels if each
+        fits inside its zone, else the short ones, else a legend under the bar (never a mix of wordings)."""
+        if not self.zones or not self.show_labels:
+            return "long"
+        font = theme.font("caption", size=11 if self.compact else 12, weight=600)
+        span = max(1.0, self.width() - 2 * END_PAD)
+        widths = []
+        for z in self.zones:
+            fa, fb = self._zone_span(z)
+            widths.append((fb - fa) * span)
+        for form in (("long", "short") if self.prefer_long else ("short",)):
+            texts = self._texts(form)
+            if all(not t or text_width(font, t) + LABEL_PAD <= w for t, w in zip(texts, widths)):
+                return form
+        return "legend" if not self.compact else "short"
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_form()
+
+    def _sync_form(self):
+        form = self._pick_form()
+        legend = form == "legend"
+        if form != self.label_form or legend != self.legend:
+            self.label_form, self.legend = form, legend
+            self.setFixedHeight(self._height())
+            self.update()
 
     # --- mapping ---
     def fraction(self, value):
@@ -141,6 +179,7 @@ class ZoneBar(ThemedWidget):
         # (clarity) is drawn mirrored so it reads the same way
         self.reverse = bool(self.zones) and self.zones[0].get("id") == "feminine"
         self.shown = self.fraction(self.value)
+        self._sync_form()
         self.update()
 
     def set_value(self, value, animate=True):
@@ -205,6 +244,28 @@ class ZoneBar(ThemedWidget):
                 out.append(z["hi"])
         return out
 
+    def _paint_legend(self, p, t, spans, band_bottom):
+        """The zone names in a row under the bar: a swatch in the zone's colour, then its words in the short form
+        when the long ones would not fit the row. The row sits below the tick labels."""
+        font = theme.font("caption", weight=600)
+        p.setFont(font)
+        y = band_bottom + (7 if self.target or self.shown is not None else 4) + TICK_ROW - 4
+        items = [(z, colors, z.get("label") or "") for z, _, colors in spans]
+        total = sum(12 + text_width(font, w) for _, _, w in items) + theme.M * (len(items) - 1)
+        if total > self.width() - 2 * END_PAD:
+            items = [(z, colors, theme.ZONE_SHORT.get(z.get("id")) or w) for z, colors, w in items]
+            total = sum(12 + text_width(font, w) for _, _, w in items) + theme.M * (len(items) - 1)
+        x = max(END_PAD, (self.width() - total) / 2)
+        for z, colors, word in items:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(colors["edge"]))
+            p.drawRoundedRect(QRectF(x, y + 5, 8, 8), 2, 2)
+            p.setPen(t.q("text_secondary"))
+            w = text_width(font, word)
+            p.drawText(QRectF(x + 12, y, w + 2, 18), int(Qt.AlignmentFlag.AlignVCenter), word)
+            self.drawn_labels.append((z.get("id"), word))
+            x += 12 + w + theme.M
+
     # --- painting ---
     def paintEvent(self, event):
         t = theme.current()
@@ -265,9 +326,11 @@ class ZoneBar(ThemedWidget):
                 blocked += [(target_rect.left() - 4, target_rect.left() + 4),
                             (target_rect.right() - 4, target_rect.right() + 4)]
             for z, rect, colors in spans:
+                if self.label_form == "legend":
+                    break
                 free = sorted(_free(rect.left(), rect.right(), blocked), key=lambda ab: ab[0] - ab[1])
-                options = (z.get("label"), theme.ZONE_SHORT.get(z.get("id")), (z.get("label") or "").split(" ")[-1])
-                spot = next(((text, ab) for text in options if text for ab in free
+                word = z.get("label") if self.label_form == "long" else theme.ZONE_SHORT.get(z.get("id")) or z.get("label")
+                spot = next(((text, ab) for text in (word,) if text for ab in free
                              if text_width(font, text) + LABEL_PAD <= ab[1] - ab[0]), None)
                 if spot:
                     text, (fa, fb) = spot
@@ -307,6 +370,9 @@ class ZoneBar(ThemedWidget):
             needle = QRectF(x - MARKER_WIDTH / 2, top - over, MARKER_WIDTH, band_h + 2 * over)
             rounded(p, needle.adjusted(-2, -2, 2, 2), MARKER_WIDTH / 2 + 2, fill=gap)
             rounded(p, needle, MARKER_WIDTH / 2, fill=ink)
+
+        if self.label_form == "legend" and self.legend and not self.compact:
+            self._paint_legend(p, t, spans, top + band_h)
 
         # ticks and end labels
         if not self.compact:

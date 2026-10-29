@@ -12,6 +12,7 @@ from ui.components.feedback import (ActivityCenter, Banner, EmptyState, Progress
                                     Toast, ToastStack)
 from ui.components.layout import Card, Collapsible, Divider, FlowGrid, Section, WrapRow
 from ui.components.moments import MomentChip
+from ui.components.status import FitLabel, LevelMeter, MicIndicator, RecordingLine, RecordingPill
 from ui.components.text import Caption, ElidedLabel, HelpTip, Headline
 
 __all__ = [
@@ -22,5 +23,5 @@ __all__ = [
     "ConfidenceChip", "Chip", "Badge", "StatusDot",
     "Button", "IconButton", "SegmentedControl", "Tabs", "RecordButton", "NavRail", "Toggle", "Select",
     "Spinner", "ProgressStrip", "ActivityCenter", "Skeleton", "Toast", "ToastStack", "Banner", "EmptyState",
-    "MomentChip",
+    "MomentChip", "MicIndicator", "RecordingPill", "RecordingLine", "FitLabel", "LevelMeter",
 ]

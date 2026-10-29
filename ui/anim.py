@@ -65,6 +65,20 @@ def stop(owner, name):
             pass
 
 
+def stop_all(widget):
+    """Stop every animation of `widget` and its children, and every tween without an owner: call it
+    before a top-level widget is dropped, so no setter fires into a freed C++ object."""
+    for obj in [widget] + widget.findChildren(QObject):
+        for name in list(obj.__dict__.get("_ui_anims", {})):
+            stop(obj, name)
+    for anim in list(_unowned):
+        try:
+            anim.stop()
+        except RuntimeError:
+            pass
+    _unowned.clear()
+
+
 def running(owner, name):
     """True while the named animation on `owner` runs."""
     anim = owner.__dict__.get("_ui_anims", {}).get(name)

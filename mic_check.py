@@ -197,3 +197,68 @@ class MicCheckSession:
         if self.phase in ("silence", "voice"):
             self.engine.stop_take()
         self.phase = "idle"
+
+
+# --- phase 11 / 05: a checklist with a fix each, a retest that says what changed, and the live level ---
+ADVICE_ISSUES = {                   # advice text -> the problem it answers, in a few plain words
+    DISTANCE_ADVICE: "Your voice is quiet, or the room is noisy",
+    WHINE_ADVICE: "A steady whine from the mic",
+    RUMBLE_ADVICE: "Low rumble",
+    CLIP_ADVICE: "Your voice is clipping",
+    PATH_ADVICE: "An older Windows audio path",
+    ENHANCEMENTS_ADVICE: "Windows audio enhancements",
+    INTERFACE_ADVICE: "A small USB mic limits the quality",
+    NO_VOICE_ADVICE: "No voice heard",
+}
+LEVEL_WINDOW_SECONDS = 0.15         # s of recent audio the live level meter looks at
+CHANGE_DB = 3.0                     # dB a level must move to be called louder or quieter (own judgement)
+
+
+def findings(result):
+    """[{"issue", "fix"}] for a mic check result: each problem with the one thing to try. Empty when the input
+    is good."""
+    return [{"issue": ADVICE_ISSUES.get(advice, "Something to improve"), "fix": advice}
+            for advice in result.get("advice") or [] if advice != GOOD_ADVICE]
+
+
+def compare(old, new):
+    """Plain lines on what a retest changed against the check before it: 'Rumble: was loud, now gone'."""
+    if not old or not new:
+        return []
+    lines = []
+    for key, name, was, gone in (("rumble", "Rumble", "was loud", "now gone"), ("whine", "Whine", "was there", "now gone"),
+                                 ("clipped", "Clipping", "was there", "now gone")):
+        if old.get(key) and not new.get(key):
+            lines.append(f"{name}: {was}, {gone}")
+        elif new.get(key) and not old.get(key):
+            lines.append(f"{name}: new since the last test")
+        elif new.get(key):
+            lines.append(f"{name}: still there")
+    for key, name, better_if_higher in (("voice_db", "Your voice", True), ("noise_db", "Background noise", False)):
+        a, b = old.get(key), new.get(key)
+        if a is None or b is None or np.isnan(a) or np.isnan(b) or abs(b - a) < CHANGE_DB:
+            continue
+        louder = b > a
+        lines.append(f"{name}: {abs(b - a):.0f} dB {'louder' if louder else 'quieter'}"
+                     + (" (better)" if louder == better_if_higher else ""))
+    if not lines:
+        lines.append("Nothing changed since the last test.")
+    return lines
+
+
+def level_dbfs(samples):
+    """The level of a short stretch of mic audio in dBFS (RMS); -120 for none or silence."""
+    samples = np.asarray(samples, dtype=float)
+    if samples.size == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(samples ** 2)))
+    return 20 * np.log10(rms) if rms > 1e-6 else -120.0
+
+
+def capture_note(info):
+    """One line on how the mic is being read ('Reading your mic at 48 kHz'), or None when unknown."""
+    rate = (info or {}).get("native_rate")
+    if not rate:
+        return None
+    way = "the fast Windows path" if (info or {}).get("path") == "wasapi" else "an older Windows path"
+    return f"Reading your mic at {rate / 1000:g} kHz through {way}."

@@ -100,7 +100,7 @@ QPushButton {{ background: {rgba(c['bg'])}; color: {c['text'].name()}; border: 1
     min-height: {height - 2}px; max-height: {height - 2}px; }}
 QPushButton:hover {{ background: {rgba(c['hover'])}; color: {hover_text}; }}
 QPushButton:pressed {{ background: {rgba(c['pressed'])}; }}
-QPushButton:focus {{ border: 1px solid {t['accent'] if self.variant != 'primary' else t['text']}; }}
+QPushButton:focus {{ border: 2px solid {t['accent'] if self.variant != 'primary' else t['text']}; padding: 0 {max(0, pad + (2 if not self.small else 0) - 1)}px; }}
 QPushButton:disabled {{ background: {t['surface_raised'] if self.variant in ('primary', 'secondary') else 'transparent'};
     color: {t['text_muted']}; border: 1px solid {t['border']}; }}
 """)
@@ -193,6 +193,7 @@ class SegmentedControl(ThemedWidget):
         self.hover = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(" / ".join(o[1] for o in self.options))      # a screen reader says the choices
         self.setFixedHeight(SEGMENT_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.restyle()
@@ -281,6 +282,7 @@ class Tabs(ThemedWidget):
         self.hover = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Views: " + ", ".join(o[1] for o in self.options))
         self.setFixedHeight(TAB_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -532,6 +534,7 @@ class NavRail(ThemedWidget):
         self.hover = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Main navigation")
         self.setFixedWidth(NAV_WIDTH)
         self.setMinimumHeight(NAV_ITEM * len(self.keys) + theme.XL)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
@@ -706,10 +709,16 @@ class Select(QComboBox):
     def __init__(self, options=(), current=None, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(140)
+        self.setAccessibleName("Choose one")                 # callers with a tooltip or label give a better name
         self.set_options(options, current)
         self.currentIndexChanged.connect(lambda i: i >= 0 and self.changed.emit(self.itemData(i)))
         theme.changed.connect(self.restyle)
         self.restyle()
+
+    def setToolTip(self, text):
+        super().setToolTip(text)
+        if text:
+            self.setAccessibleName(text.split(".")[0][:60])
 
     def set_options(self, options, current=None):
         self.blockSignals(True)

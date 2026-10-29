@@ -10,12 +10,15 @@ from PyQt6.QtGui import QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMessageBox,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from app_core import EGG_QUESTION, ISOLATE_QUESTION, REST_TOOLTIP, VOICE_GOAL_CHOICES, status_display
+import shell_state
+from app_core import REST_TOOLTIP, VOICE_GOAL_CHOICES, status_display
 from ui import theme
-from ui.components import (ActivityCenter, Banner, Button, ElidedLabel, IconButton, Label, NavRail, RecordButton,
-                           SegmentedControl, Select, StatusDot, ToastStack)
+from ui.components import (ActivityCenter, Banner, Button, FitLabel, IconButton, Label, MicIndicator, NavRail,
+                           RecordButton, RecordingLine, RecordingPill, SegmentedControl, Select, ThemedWidget,
+                           ToastStack)
 from ui.mic_check_dialog import MicCheckDialog
 from ui.onboarding import Onboarding
+from ui.sheets import ImportSheet, ShortcutSheet
 from ui.screens import ProgressScreen, TakesScreen
 from ui.screens.dashboard import DashboardScreen
 from ui.takes import listen
@@ -23,6 +26,7 @@ from ui.screens.live import LiveScreen
 from ui.screens.practice import PracticeScreen
 from ui.screens.settings import SettingsScreen
 
+REANALYSED_PREFIX = "Re-analysed"       # the core's success status when the older takes are done
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 NAV = [("dashboard", "ph.squares-four", "Dashboard"), ("live", "ph.activity", "Live"),
        ("practice", "ph.barbell", "Practice"), ("takes", "ph.list-bullets", "Takes"),
@@ -35,7 +39,11 @@ BANNER_HOLD_MS = 3000           # an input banner stays at least this long, so i
 REST_TOAST_MS = 15000           # the rest nudge stays a little longer than other toasts
 MODES = [("speak", "Speak", "ph.chat-circle"), ("sing", "Sing", "ph.music-note")]
 GOALS = [(g or "exploring", label) for g, label in VOICE_GOAL_CHOICES]
-TOP_BAR_HEIGHT = 60             # px: room for the 44 px input banner
+TOP_BAR_HEIGHT = 60             # px: room for the two-line input banner
+MIC_POLL_MS = 1000              # ms between looks at the mic's heartbeat
+OFFER_UPDATE_KEY = "update"     # the banner action that accepts the re-analysis offer
+SHORTCUT_HINT = "Keyboard shortcuts (?)"
+BASELINE_TOAST_MS = 15000       # the baseline question stays a little longer than other toasts
 ACTION_BAR_HEIGHT = 112         # px: the record button and its caption
 RECORD_SIZE = 56                # px: the record button's circle
 
@@ -45,13 +53,13 @@ def ask(parent, title, text):
     return QMessageBox.question(parent, title, text) == QMessageBox.StandardButton.Yes
 
 
-class Bar(QWidget):
-    """A flat strip on the surface colour with a hairline on one edge (top bar, action bar)."""
+class Bar(ThemedWidget):
+    """A flat strip on the surface colour with a hairline on one edge (top bar, action bar). It follows the
+    theme through ThemedWidget, so its hook goes away with it (a lambda would outlive the bar)."""
 
     def __init__(self, edge="bottom"):
         super().__init__()
         self.edge = edge
-        theme.changed.connect(lambda *_: self.update())
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -65,17 +73,21 @@ class Bar(QWidget):
 
 
 class ActivityButton(ActivityCenter):
-    """The top bar's activity: a spinner and a count; click it to see each job and its progress."""
+    """The top bar's activity: a spinner and the job's name ("Updating takes 3/11"); click it to see each job,
+    what it is doing and what it changes."""
 
     def __init__(self):
         super().__init__(expanded=False)
-        self.setMinimumWidth(160)
+        self.setMinimumWidth(168)
+        self.setMaximumWidth(260)
         self.popup = QFrame(self, Qt.WindowType.Popup)      # parented: deleted with the button, never by the GC
         box = QVBoxLayout(self.popup)
         box.setContentsMargins(0, 0, 0, 0)
         self.detail = ActivityCenter(expanded=True)
-        self.detail.setMinimumWidth(360)
+        self.detail.setMinimumWidth(380)
+        self.detail.setMaximumWidth(460)
         box.addWidget(self.detail)
+        self.setAccessibleName("Background work")
 
     def set_jobs(self, jobs):
         super().set_jobs(jobs)
@@ -94,6 +106,10 @@ class ActivityButton(ActivityCenter):
 
 
 class TopBar(Bar):
+    """Speak / Sing, the goal, the mic (name, state in words, level), a quiet status line, the recording
+    pill, the session time and what is running. Nothing in it is cut: the status line shows a whole phrase
+    that fits, or none."""
+
     def __init__(self, core):
         super().__init__("bottom")
         self.setFixedHeight(TOP_BAR_HEIGHT)
@@ -105,21 +121,40 @@ class TopBar(Bar):
         self.mode.setToolTip("Speak or sing: the readings, zones and tips follow the mode.")
         row.addWidget(self.mode)
         row.addSpacing(theme.S)
-        row.addWidget(Label("Goal", role="label", tone="muted"))
+        self.goal_label = Label("Goal", role="label", tone="muted")
+        row.addWidget(self.goal_label)
         self.goal = Select(GOALS, current=core.profile.voice_goal or "exploring")
         self.goal.setToolTip("Where the tips after each take point. Change it here or in Settings.")
         self.goal.changed.connect(lambda key: core.set_voice_goal(None if key == "exploring" else key))
         row.addWidget(self.goal)
         row.addSpacing(theme.S)
-        self.mic = StatusDot("ok", "Mic")
+        self.mic = MicIndicator()
         row.addWidget(self.mic)
-        self.status = ElidedLabel("", role="caption", tone="muted")
+        self.status = FitLabel("", role="caption", tone="muted")
         row.addWidget(self.status, 1)
+        self.recording = RecordingPill()
+        row.addWidget(self.recording)
         self.session = Label("", role="caption", tone="secondary")
         self.session.setToolTip(REST_TOOLTIP)
         row.addWidget(self.session)
         self.activity = ActivityButton()
         row.addWidget(self.activity)
+
+    def make_room(self, on):
+        """While the input banner shows, the goal, the quiet status line and the session time give way to it:
+        the banner takes their width, so it never pushes the screen below it about."""
+        self.room = on
+        for w in (self.goal_label, self.goal, self.session):
+            w.setVisible(not on)
+        self.status.setVisible(not on and not self.recording.isVisible())
+
+    def set_recording(self, on):
+        """The REC pill in, the quiet status line out (unless the banner already took its place)."""
+        if on and not self.recording.isVisible():
+            self.recording.start()
+        elif not on and self.recording.isVisible():
+            self.recording.stop()
+        self.status.setVisible(not on and not getattr(self, "room", False))
 
 
 class ActionBar(Bar):
@@ -177,14 +212,21 @@ class AppWindow(QMainWindow):
         self.last_status = core.status
         self.status_label = Label(core.status[0])      # the last status, toast or not (hidden; tests read it)
         self.status_label.hide()
-        self.banner_info = None
+        self.banner_info = None         # the live snapshot's input banner, if any
+        self.live_state = None          # the snapshot's state (hearing, silent, ...) the mic block shows
         self.apply_ui_prefs(dict(self.profile.ui))
 
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QHBoxLayout(central)
+        frame = QVBoxLayout(central)
+        frame.setContentsMargins(0, 0, 0, 0)
+        frame.setSpacing(0)
+        self.rec_line = RecordingLine()
+        frame.addWidget(self.rec_line)
+        outer = QHBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
+        frame.addLayout(outer, 1)
         self.nav = NavRail(NAV, FOOTER, current="dashboard")
         self.nav.selected.connect(self.go)
         rail = Bar("right")
@@ -200,17 +242,18 @@ class AppWindow(QMainWindow):
         self.top = TopBar(core)
         self.activity = self.top.activity
         main.addWidget(self.top)
-        # The one input banner lives in the top bar, in place of the quiet status line, so it never
-        # pushes the screens about when it comes and goes.
+        # One banner in the top bar, in place of the goal, the status line and the session time while it shows,
+        # so it never pushes the screens about when it comes and goes. It wraps to two lines; it never cuts.
         self.banner = Banner("", kind="warning", action="Mic check", on_action=self._banner_action)
         self.banner.hide()
-        one_line = ElidedLabel("", role="body")        # one line in the top bar; the full text on hover
-        self.banner.layout().replaceWidget(self.banner.label, one_line)
-        self.banner.label.deleteLater()
-        self.banner.label = one_line
-        self.banner.setMinimumHeight(40)
+        self.banner.set_compact(True)
+        self.banner.stack_narrow = False        # it lives in the top bar: one row, text to the left of the button
         row = self.top.layout()
         row.insertWidget(row.indexOf(self.top.status) + 1, self.banner, 1)
+        self.offer = Banner("", kind="info", action="Update now", on_action=self.accept_update, second_action="Later",
+                            on_second=self.defer_update)
+        self.offer.hide()
+        main.addWidget(self.offer)
         self.banner_timer = QTimer(self)
         self.banner_timer.setSingleShot(True)
         self.banner_timer.setInterval(BANNER_HOLD_MS)
@@ -248,6 +291,11 @@ class AppWindow(QMainWindow):
         self.session_timer.timeout.connect(self.update_session)
         self.shortcuts = {}
         self._shortcuts()
+        self.shortcut_sheet = None
+        self.mic_timer = QTimer(self)
+        self.mic_timer.setInterval(MIC_POLL_MS)
+        self.mic_timer.timeout.connect(self.poll_mic)
+        self.mic_timer.start()
 
         signals.frame_ready.connect(self.on_frame)
         listen(self, core, dict((("status", self.set_status), ("controls_changed", self.show_controls),
@@ -257,7 +305,9 @@ class AppWindow(QMainWindow):
                               ("ui_changed", self.apply_ui_prefs), ("take_added", lambda *_: self.update_badges()),
                               ("takes_loaded", lambda *_: self.update_badges()),
                               ("take_updated", lambda *_: self.update_badges()),
-                              ("mic_changed", lambda info: self.update_mic_status()))))
+                              ("take_ready", self._take_ready), ("update_offered", self._update_offered),
+                              ("reanalysis_done", self._reanalysis_done),
+                              ("mic_changed", lambda info: self.show_banner(self.banner_info, force=True)))))
         self.update_folder()
         self.show_controls(core.controls())
         self.update_mic_status()
@@ -275,6 +325,7 @@ class AppWindow(QMainWindow):
         self.stack.setCurrentWidget(self.screens[key])
         self.nav.set_current(key)
         self.action_bar.setVisible(key in ACTION_BAR_SCREENS)
+        self.toasts.set_bottom_inset(ACTION_BAR_HEIGHT if key in ACTION_BAR_SCREENS else 0)
         self.action_bar.replay_btn.setVisible(key != "live")      # the Live screen has its own
 
     def open_report(self, uid):
@@ -285,7 +336,8 @@ class AppWindow(QMainWindow):
 
     def _shortcuts(self):
         keys = {"record": ("Space", self.toggle_recording), "replay": ("R", self.replay),
-                "import": ("Ctrl+I", self.import_audio), "fullscreen": ("F11", self.toggle_fullscreen)}
+                "import": ("Ctrl+I", self.import_audio), "fullscreen": ("F11", self.toggle_fullscreen),
+                "shortcuts": ("?", self.show_shortcuts)}
         for i, key in enumerate(SCREENS, start=1):
             keys[f"screen_{key}"] = (f"Ctrl+{i}", lambda k=key: self.go(k))
         for name, (sequence, fn) in keys.items():
@@ -299,7 +351,7 @@ class AppWindow(QMainWindow):
     # --- frames ---
 
     def on_frame(self, frame):
-        """One live frame: the core follows it, the visible screen draws it."""
+        """One live frame: the core follows it, the visible screen draws it, the mic block shows the level."""
         views = self.core.on_frame(frame)
         screen = self.stack.currentWidget()
         if hasattr(screen, "show_frame"):
@@ -309,59 +361,98 @@ class AppWindow(QMainWindow):
         banner = views["live"]["banner"]
         if banner != self.banner_info:
             self.show_banner(banner)
+        level = shell_state.mic_level_fraction(frame.get("level"))
+        self.top.mic.set_level(level)
+        state = shell_state.live_state(frame, views["live"])
+        if state != self.live_state:
+            self.live_state = state
+            self.update_mic_status()
+        if self.onboarding is not None:
+            self.onboarding.show_live(state, frame.get("f0"), level)
 
     # --- banner, status and toasts ---
 
     def show_banner(self, info, force=False):
-        """The one input banner; once shown it stays at least BANNER_HOLD_MS."""
+        """The input banner (what the live frames say is wrong with the input); once shown it stays at least
+        BANNER_HOLD_MS. A mic that is missing or stopped outranks it."""
         self.banner_info = info
-        if info is None:
+        shown = self.core.mic_banner() or info
+        if shown is None:
             if not self.banner.isHidden() and self.banner_timer.isActive() and not force:
                 return
             self.banner.hide()
-            self.top.status.show()
+            self.top.make_room(False)
         else:
-            self.banner.kind = info["kind"]
-            self.banner.set_text(info["text"])
-            self.banner.action.setText(info["action"])
-            self.banner.setAccessibleName(f"{info['kind']}: {info['text']}")
+            self.banner.kind = shown["kind"]
+            self.banner.set_text(shown["text"], shown.get("more"))
+            self.banner.action.setText(shown["action"])
             if self.banner.isHidden():
-                self.top.status.hide()
+                self.top.make_room(True)
                 self.banner.show()
                 self.banner_timer.start()
             self.banner.update()
         self.update_mic_status()
 
     def _banner_action(self):
-        if self.banner_info and self.banner_info["target"] == "settings":
+        target = (self.core.mic_banner() or self.banner_info or {}).get("target")
+        if target == "mic":
+            self.run_action("choose_mic")
+        elif target == "settings":
             self.go("settings")
         else:
             self.mic_check()
 
     def set_status(self, text, level="info"):
-        """A core "status": a toast for successes, warnings and errors, a quiet line otherwise."""
+        """A core "status": a toast for successes, warnings and errors (an error with the button that fixes
+        it), a quiet line otherwise."""
         self.last_status = (text, level)
         self.status_label.setText(text)
         shown = status_display(text, level)
-        if shown["toast"]:
-            self.toasts.show_toast(text, shown["toast"],
-                                   action="Mic check" if "mic" in text.lower() and level != "success" else None,
-                                   on_action=self.mic_check)
+        if shown["toast"] and text.startswith(REANALYSED_PREFIX):
+            pass                        # "reanalysis_done" gives this one a toast with its own button
+        elif shown["toast"]:
+            action = shell_state.error_action(text, level)
+            self.toasts.show_toast(text, shown["toast"], action=action[1] if action else None,
+                                   on_action=(lambda checked=False, key=action[0]: self.run_action(key))
+                                   if action else None)
         else:
-            self.top.status.setText(shown["line"])
+            self.top.status.set_alternatives(shown["line"], (shown["line"] or "").split(":")[0])
         self.update_badges()
+
+    def run_action(self, key):
+        """The button of a toast or banner: what to do about the problem it names."""
+        if key == "choose_mic":
+            self.go("settings")
+            self.settings.show_mic()
+        elif key == "mic_check":
+            self.mic_check()
+        elif key == "choose_folder":
+            self.choose_takes_folder()
+        elif key == "open_takes":
+            self.go("takes")
+        elif key == "rebuild_map":
+            self.go("practice")
+            self.rebuild_voice_map()
+        elif key == "update_takes":
+            self.accept_update()
+        else:
+            self.go("settings")
 
     def status_text(self):
         """The last core status, whether it became a toast or the quiet line."""
         return self.last_status[0]
 
-    def show_toast(self, text, kind="info", timeout_ms=None):
-        if timeout_ms:
-            return self.toasts.show_toast(text, kind, timeout_ms=timeout_ms)
+    def show_toast(self, text, kind="info", timeout_ms=None, action=None, on_action=None):
+        if timeout_ms or action:
+            return self.toasts.show_toast(text, kind, action=action, on_action=on_action,
+                                          **({"timeout_ms": timeout_ms} if timeout_ms else {}))
         return self.toasts.show_toast(text, kind)
 
     def _busy(self, jobs):
-        self.activity.set_jobs(jobs)
+        described = self.core.describe_jobs(jobs)
+        self.activity.set_jobs(described)
+        summary = shell_state.activity_summary(described)
+        self.activity.set_summary(summary["text"] if described else None, summary["tooltip"])
         self.update_badges()
         self.show_record_state()
 
@@ -370,9 +461,56 @@ class AppWindow(QMainWindow):
         self.nav.set_badge("takes", str(n) if n else None)
 
     def update_mic_status(self):
-        status = self.core.mic_status(self.banner_info)
-        self.top.mic.set_state(status["state"] if status["state"] != "warn" else "warn", status["label"])
-        self.top.mic.setToolTip(status["tooltip"])
+        status = self.core.mic_status(self.banner_info, self.live_state)
+        ind = self.core.mic_indicator(self.live_state, self.banner_info)
+        tooltip = f"{status['full']}\n{ind['tooltip']}"
+        if status["state"] != "ok" and status["tooltip"] != ind["tooltip"]:
+            tooltip += f"\n{status['tooltip']}"
+        self.top.mic.set_mic(status["label"], ind["words"], ind["dot"], ind["key"], tooltip, status["full"])
+
+    def poll_mic(self):
+        """About once a second: the mic's heartbeat. A mic that stopped (or came back) changes the banner and
+        the mic block."""
+        before = self.core.mic_lost
+        self.core.check_mic()
+        if self.core.mic_lost != before:
+            self.show_banner(self.banner_info, force=True)
+
+    def _take_ready(self, take):
+        """A new take is analysed: say so, with the button that opens its report; once, offer a baseline."""
+        ready = self.core.take_ready_toast(take)
+        uid = take.get("uid")
+        if ready:
+            self.toasts.show_toast(ready[0], "success", action=ready[1], timeout_ms=REST_TOAST_MS,
+                                   on_action=lambda checked=False: self.open_report(uid))
+        question = self.core.baseline_prompt(take)
+        if question:
+            self.toasts.show_toast(question[0], "info", action=question[1], timeout_ms=BASELINE_TOAST_MS,
+                                   on_action=lambda checked=False: self.set_baseline(uid))
+
+    def _reanalysis_done(self, count):
+        self.toasts.show_toast(f"Updated {count} take{'s' if count != 1 else ''} to the new analysis.", "success",
+                               action=shell_state.ACTIONS["rebuild_map"], timeout_ms=REST_TOAST_MS,
+                               on_action=lambda checked=False: self.run_action("rebuild_map"))
+
+    def _update_offered(self, count, seconds):
+        """Takes made by an older analysis: ask before changing their numbers."""
+        self.offer.set_text(self.core.update_offer_text(count))
+        self.offer.show()
+
+    def accept_update(self):
+        self.offer.hide()
+        self.core.accept_reanalysis()
+
+    def defer_update(self):
+        self.offer.hide()
+        self.core.defer_reanalysis()
+
+    def show_shortcuts(self):
+        """The keyboard cheat-sheet."""
+        self.shortcut_sheet = ShortcutSheet(self)
+        self.shortcut_sheet.open()
+        return self.shortcut_sheet
 
     # --- session ---
 
@@ -416,9 +554,15 @@ class AppWindow(QMainWindow):
         self.record_btn.set_state(state)
         self.record_btn.setToolTip("Stop (Space)" if state == "recording" else "Record a take (Space)")
         self.record_btn.update()
+        # the recording signature: a red line along the top, a REC pill in the top bar, the quiet line away
+        recording = state == "recording"
+        self.rec_line.set_on(recording)
+        self.top.set_recording(recording)
+        self.update_mic_status()
 
     def toggle_recording(self):
-        if self.core.is_recording or self.core.controls()["record"] and self.core.mic_available:
+        usable = self.core.mic_available and not self.core.mic_lost
+        if self.core.is_recording or self.core.controls()["record"] and usable:
             self.core.toggle_recording()
 
     def start_recording(self):
@@ -443,40 +587,30 @@ class AppWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILE_FILTER)
         if not path:
             return
-        proceed, egg_channel = self.choose_egg_channel(path)
-        if not proceed:
+        options = self.choose_import_options(path)
+        if options is None:
             return
-        isolate = False
-        if self.core.can_isolate():
-            answer = QMessageBox.question(
-                self, "Isolate vocals?", ISOLATE_QUESTION,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.No)
-            if answer == QMessageBox.StandardButton.Cancel:
-                return
-            isolate = answer == QMessageBox.StandardButton.Yes
+        isolate, egg_channel = options
         self.core.import_file(path, isolate, egg_channel)
 
-    def choose_egg_channel(self, path):
-        """(proceed, channel): for a stereo file, asks whether one channel is an EGG.
-        channel is 0, 1 or None (no EGG: the file is mixed to mono)."""
-        if self.core.file_channels(path) != 2:
-            return True, None
-        box = QMessageBox(QMessageBox.Icon.Question, "EGG channel?", EGG_QUESTION, parent=self)
-        buttons = [(box.addButton(text, QMessageBox.ButtonRole.AcceptRole), channel) for text, channel in
-                   (("Channel 1 is EGG", 0), ("Channel 2 is EGG", 1), ("No EGG: mix to mono", None))]
-        box.addButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-        for button, channel in buttons:
-            if box.clickedButton() is button:
-                return True, channel
-        return False, None
+    def choose_import_options(self, path):
+        """(isolate, egg_channel), or None when cancelled. One sheet asks only what applies: voice only or with
+        music (when vocals can be separated) and, for a stereo file, whether a channel is a second sensor. A
+        plain mono file with nothing to choose imports straight away."""
+        can_isolate = self.core.can_isolate()
+        stereo = self.core.file_channels(path) == 2
+        if not (can_isolate or stereo):
+            return False, None
+        sheet = ImportSheet(Path(path).name, can_isolate, stereo, self)
+        if sheet.exec() != sheet.DialogCode.Accepted:
+            return None
+        return sheet.answers()
 
     # --- takes folder and Voice Map ---
 
     def update_folder(self):
         text, tooltip = self.core.folder_label()
-        self.action_bar.folder_btn.setText(text.strip())
+        self.action_bar.folder_btn.setText(f"Folder: {text.strip()}" if self.core.store else text.strip())
         self.action_bar.folder_btn.setToolTip(tooltip)
         self.action_bar.reload_btn.setVisible(self.core.store is not None)
 
@@ -507,7 +641,7 @@ class AppWindow(QMainWindow):
         """Open the mic check (non-modal); its result is kept in the profile. Nothing without an engine."""
         if self.engine is None:
             return None
-        self.mic_dialog = MicCheckDialog(self.engine, self)
+        self.mic_dialog = MicCheckDialog(self.engine, self, core=self.core)
         self.mic_dialog.finished_check.connect(self._mic_checked)
         self.mic_dialog.show()
         return self.mic_dialog
@@ -525,6 +659,7 @@ class AppWindow(QMainWindow):
         """The welcome steps (first run, or from Settings)."""
         self.onboarding = Onboarding(self.core, self.choose_takes_folder, self.mic_check, self)
         self.onboarding.completed.connect(self._onboarded)
+        self.onboarding.first_take.connect(self.start_recording)
         self.onboarding.open()
         return self.onboarding
 

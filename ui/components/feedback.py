@@ -1,7 +1,9 @@
 """Feedback: Spinner, ProgressStrip, ActivityCenter, Skeleton, Toast (+ ToastStack), Banner and EmptyState."""
+import re
+
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QLinearGradient, QPen
-from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from ui import anim, theme
 from ui.components.base import KIND_ICONS, KINDS, Label, ThemedWidget, draw_icon, mix, painter, rounded, rounded_path
@@ -153,7 +155,9 @@ class ActivityCenter(ThemedWidget):
         box = QVBoxLayout(self)
         box.setContentsMargins(theme.M, theme.S, theme.M, theme.S)
         box.setSpacing(theme.XS)
+        self.summary = None             # (text, tooltip) the shell supplies: names the job instead of counting
         self.header = QWidget()
+        self.header.setMinimumHeight(28)    # a comfortable click target
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
         head = QHBoxLayout(self.header)
         head.setContentsMargins(0, 0, 0, 0)
@@ -183,6 +187,11 @@ class ActivityCenter(ThemedWidget):
 
     def count(self):
         return len(self.rows)
+
+    def set_summary(self, text, tooltip=""):
+        """The collapsed header's words ("Updating takes 3/11") and its tooltip; None goes back to a count."""
+        self.summary = (text, tooltip) if text else None
+        self._sync()
 
     def set_expanded(self, expanded):
         self.expanded = expanded
@@ -216,7 +225,10 @@ class ActivityCenter(ThemedWidget):
         self.spinner.setVisible(busy)
         self.idle_dot.setVisible(not busy)
         if busy:
-            self.title.setText(f"{n} task{'s' if n != 1 else ''} running" if self.expanded else f"{n} running")
+            if self.summary and not self.expanded:
+                self.title.setText(self.summary[0])
+            else:
+                self.title.setText(f"{n} task{'s' if n != 1 else ''} running" if self.expanded else f"{n} running")
         else:
             self.title.setText("Nothing running")
         self.title.set_tone("primary" if busy else "muted")
@@ -224,8 +236,8 @@ class ActivityCenter(ThemedWidget):
         self.chevron.set_angle(90 if self.expanded else 0)
         self.list.setVisible(busy and self.expanded)
         self.setToolTip("" if self.expanded or not busy else
-                        "\n".join(r.label.text() + (f" · {r.percent.text()}" if r.percent.text() else "")
-                                  for r in self.rows.values()))
+                        (self.summary[1] if self.summary and self.summary[1] else "\n".join(r.label.text() + (f" · {r.percent.text()}" if r.percent.text() else "")
+                                  for r in self.rows.values())))
         if self.hide_when_idle:
             self.setVisible(busy)
         self.updateGeometry()
@@ -393,6 +405,7 @@ class ToastStack(QWidget):
         self.toasts = []
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
         self.setFixedWidth(TOAST_WIDTH)
+        self.inset = 0                      # px kept clear at the bottom (a bar of buttons the toasts must not cover)
         if self.overlay:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             parent.installEventFilter(self)
@@ -412,6 +425,11 @@ class ToastStack(QWidget):
         self._place()
         return toast
 
+    def set_bottom_inset(self, pixels):
+        """Keep the stack this far above the window's bottom edge, so it never covers a bar of controls."""
+        self.inset = max(0, int(pixels))
+        self._place()
+
     def _closed(self, toast):
         if toast in self.toasts:
             self.toasts.remove(toast)
@@ -428,30 +446,57 @@ class ToastStack(QWidget):
             return
         parent = self.parentWidget()
         h = self.sizeHint().height()
-        self.setGeometry(parent.width() - TOAST_WIDTH - theme.XL, parent.height() - h - theme.XL, TOAST_WIDTH, h)
+        self.setGeometry(parent.width() - TOAST_WIDTH - theme.XL, parent.height() - h - theme.XL - self.inset,
+                         TOAST_WIDTH, h)
         self.raise_()
 
     def sizeHint(self):
         return QSize(TOAST_WIDTH, self.box.sizeHint().height())
 
 
+STACK_BELOW = 560           # px: a Banner narrower than this puts its buttons under its text
+MORE_PATTERN = re.compile(r"\s*\(\+(\d+) more\)\s*$")    # a lead sentence that ends "(+2 more)"
+
+
 class Banner(ThemedWidget):
-    """One persistent issue line with an action ("Too noisy to judge brightness · Run mic check")."""
+    """One persistent issue line with an action ("Too noisy to judge brightness · Run mic check"). Further
+    issues (`more`, a list of sentences) are never squeezed into the sentence: a link "and 2 more issues"
+    expands them under it. Text that ends "(+2 more)" is turned into that link."""
 
     action_clicked = pyqtSignal()
     dismissed = pyqtSignal()
 
-    def __init__(self, text, kind="warning", action=None, on_action=None, dismissible=False, parent=None):
+    def __init__(self, text, kind="warning", action=None, on_action=None, dismissible=False, more=None, parent=None,
+                 second_action=None, on_second=None):
         super().__init__(parent)
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
         self.kind = kind
+        self.lead, self.more, self.more_open = "", [], False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(theme.M + 30, theme.S, theme.S, theme.S)
-        row.setSpacing(theme.M)
-        self.label = Label(text, role="body", wrap=True)
-        row.addWidget(self.label, 1)
+        self.stack_narrow = True            # below STACK_BELOW px the buttons go under the text
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(theme.M + 30, theme.S, theme.S, theme.S)
+        self.grid.setHorizontalSpacing(theme.M)
+        self.grid.setVerticalSpacing(theme.XS)
+        self.label = Label("", role="body", wrap=True)
+        self.grid.addWidget(self.label, 0, 0)
+        self.grid.setColumnStretch(0, 1)
+        self.buttons = QWidget()
+        row = QHBoxLayout(self.buttons)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(theme.S)
+        self.grid.addWidget(self.buttons, 0, 1)
+        self.more_link = Button("", variant="ghost", small=True)
+        self.more_link.clicked.connect(self.toggle_more)
+        self.more_link.hide()
+        row.addWidget(self.more_link)
+        self.second = None
+        if second_action:                   # a quieter choice beside the main one ("Later")
+            self.second = Button(second_action, variant="ghost", small=True)
+            if on_second:
+                self.second.clicked.connect(on_second)
+            row.addWidget(self.second)
         self.action = None
         if action:
             self.action = Button(action, variant="secondary", small=True)
@@ -463,11 +508,62 @@ class Banner(ThemedWidget):
             close = IconButton("ph.x", "Dismiss", size=28)
             close.clicked.connect(self._dismiss)
             row.addWidget(close)
-        self.setAccessibleName(f"{kind}: {text}")
         self.setMinimumHeight(44)
+        self.set_text(text, more)
 
-    def set_text(self, text):
-        self.label.setText(text)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        narrow = self.stack_narrow and self.width() < STACK_BELOW
+        if narrow != self.__dict__.get("narrow"):
+            self.narrow = narrow
+            self.grid.removeWidget(self.buttons)
+            if narrow:
+                self.grid.addWidget(self.buttons, 1, 0, Qt.AlignmentFlag.AlignRight)
+            else:
+                self.grid.addWidget(self.buttons, 0, 1)
+            self.updateGeometry()
+
+    def set_text(self, text, more=None):
+        """The lead sentence, and optionally the further issues (a list of sentences)."""
+        text = text or ""
+        found = MORE_PATTERN.search(text)
+        if found:
+            text = text[:found.start()]
+            if more is None:
+                more = [""] * int(found.group(1))          # counted only: the tooltip may list them
+        self.lead, self.more = text, list(more or [])
+        self._show()
+
+    def set_compact(self, compact=True):
+        """A tighter banner for a bar: caption-size text and thin padding (two lines fit in 40 px)."""
+        self.label.set_role("caption" if compact else "body")
+        self.label.set_tone("primary")
+        self.grid.setContentsMargins(theme.M + 30, 3 if compact else theme.S, theme.S, 3 if compact else theme.S)
+        self.setMinimumHeight(40 if compact else 44)
+
+    def toggle_more(self):
+        self.more_open = not self.more_open
+        self._show()
+
+    def _more_items(self):
+        """The further issues as sentences; when only counted, the tooltip's lines after the first."""
+        if any(self.more):
+            return [m for m in self.more if m]
+        lines = [line for line in self.toolTip().split("\n") if line.strip()]
+        return lines[1:] if len(lines) > len(self.more) else []
+
+    def _show(self):
+        n = len(self.more)
+        shown = self.lead
+        if n and self.more_open and self._more_items():
+            shown = "\n".join([self.lead] + [f"• {m}" for m in self._more_items()])
+        self.label.setText(shown)
+        self.more_link.setVisible(bool(n))
+        if n:
+            self.more_link.setText("Hide the others" if self.more_open else f"and {n} more issue{'s' if n != 1 else ''}")
+        full = f"{shown} (and {n} more issue{'s' if n != 1 else ''})" if n and not self.more_open else shown
+        self.setAccessibleName(f"{self.kind}: {full}")
+        self.updateGeometry()
 
     def _dismiss(self):
         anim.collapse(self, then=self.dismissed.emit)

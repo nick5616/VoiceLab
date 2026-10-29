@@ -70,8 +70,10 @@ def voice(track, formants, lead=LEAD_SILENCE, tail=0.0, seed=0, level=None, **kw
 
 def first_run():
     beats = [beat("welcome", "start_up")]
-    beats += [beat(f"step-{i}", "click", path="onboarding/next_btn") for i in (2, 3, 4)]
-    beats += [beat("finish", "click", path="onboarding/next_btn"), feed("dashboard-silence",
+    beats += [beat(f"step-{i}", "click", path="onboarding/next_btn") for i in (2, 3, 4, 5)]
+    tr = synth.steady_track(150, 1.5)       # phase 11 / 05: the last step ("Try it") reacts to a voice
+    beats += [feed("try-it-hears-you", voice(tr, synth.NEUTRAL_FORMANTS)),
+              beat("finish", "click", path="onboarding/next_btn"), feed("dashboard-silence",
                                                                        lambda: synth.room_noise(2.0))]
     return {"id": "first_run", "title": "Onboarding, every step, then the empty dashboard", "profile": FRESH,
             "takes": "none", "beats": beats}
@@ -162,6 +164,15 @@ def no_mic():
     return {"id": "no_mic", "title": "The mic couldn't be opened", "profile": USER, "takes": "real",
             "truth": {"mic": "unavailable"}, "beats": [
                 beat("mic-error", "fake_mic_error"), go("live"), go("takes"), go("settings")]}
+
+
+def mic_lost():
+    """phase 11 / 05: the stream stops delivering audio (unplugged), then comes back."""
+    tr = synth.steady_track(150, 1.5)
+    return {"id": "mic_lost", "title": "The mic stops sending audio, then returns", "profile": USER, "takes": "real",
+            "truth": {"mic": "lost"}, "beats": [
+                feed("hearing", voice(tr, synth.NEUTRAL_FORMANTS)), beat("lost", "call", target="core.mark_mic_lost"),
+                go("live"), beat("back", "call", target="core.mark_mic_back")]}
 
 
 def reanalysis_running():
@@ -271,12 +282,13 @@ def reach():
 SCENARIOS = {f.__name__: f for f in (first_run, empty, listening_silence, speak_truth_steady, speak_truth_glide,
                                       speak_real_replay, record_take, noisy_input, no_mic, reanalysis_running,
                                       sing_truth_scale, practice_each, takes_report, progress, settings,
-                                      error_status, reach)}
+                                      error_status, reach, mic_lost)}
 GROUPS = {
     "live": ["empty", "listening_silence", "speak_truth_steady", "speak_truth_glide", "speak_real_replay",
              "record_take", "noisy_input", "sing_truth_scale"],
     "takes": ["empty", "record_take", "takes_report", "progress", "reanalysis_running"],
-    "shell": ["first_run", "no_mic", "error_status", "settings", "reanalysis_running", "noisy_input", "reach"],
+    "shell": ["first_run", "no_mic", "error_status", "settings", "reanalysis_running", "noisy_input", "reach",
+              "mic_lost", "record_take", "listening_silence"],
     "practice": ["practice_each", "sing_truth_scale"],
 }
 SMOKE = ["empty", "speak_truth_steady", "record_take", "no_mic", "error_status"]

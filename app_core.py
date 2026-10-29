@@ -7,11 +7,12 @@ Events (Events.emit): "take_added"(take) (also for every take loaded from the fo
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
-"voice_map_changed"(), "ui_changed"(prefs), "phrase_changed"(phrase), plus the practice sessions'
+"voice_map_changed"(), "update_offered"(count, seconds), "reanalysis_done"(count), "ui_changed"(prefs), "phrase_changed"(phrase), plus the practice sessions'
 "exercise_changed", "vowels_changed" and "practice".
 """
 import time
 from datetime import datetime
+from pathlib import Path
 
 import sounddevice as sd
 import soundfile as sf
@@ -23,6 +24,7 @@ import mic_check
 import profile_store
 import register
 import report
+import shell_state
 import speech
 import take_view
 import voice_map
@@ -73,6 +75,9 @@ VOICE_GOAL_CHOICES = [("feminine", "Feminine"), ("androgynous", "Androgynous"), 
 VOICE_GOAL_TEXT = ("Your goal only changes which way the tips after each take point. The zones and "
                    "measurements stay the same, and just exploring describes your voice without pushing "
                    "it anywhere.")
+REANALYSIS_SECONDS_PER_TAKE = 4  # s: the audit's run took about 40 s for 11 takes (own estimate, for "about N s")
+MIC_RETRY_SECONDS = 3.0         # s between quiet attempts to reopen a mic that stopped sending audio
+UPDATE_OFFER_TEXT = "Analysis improved. Update your {n} take{s} now (about {sec} s)? Numbers in older takes may change."
 STATUS_TOASTS = {"success": "success", "warning": "warning", "error": "error"}   # status level -> toast kind
 
 
@@ -222,6 +227,11 @@ class VoiceLabCore:
         self.jobs = {"analysis": None, "load": None, "register": None, "reanalysis": None, "voicemap": None}
         self.mic_available = True       # False when the mic couldn't be opened (import still works)
         self.mic_problem = None         # why, in words
+        # phase 11 / 05 shell
+        self.mic_lost = False           # the open stream stopped delivering audio (engine heartbeat)
+        self.mic_retry_at = 0.0         # clock() of the next quiet attempt to reopen a lost mic
+        self.reanalysis_accepted = False    # the user said yes to updating older takes (or an explicit call)
+        self.reanalysis_deferred = False    # the offer is open or was put off ("Later")
         self.phrase_index = 0           # the everyday phrase shown on the live screens
         self.phrase_practice = False    # takes are for the phrases (the Practice screen's Phrases)
         self.replay_length = 0.0        # seconds of the replay last started
@@ -421,7 +431,7 @@ class VoiceLabCore:
         if self.store:
             try:
                 self.store.save(results)
-                message = f"Saved {results['file']}"
+                message = f"Take #{self.take_count + 1} saved"
             except OSError as e:
                 message = f"Couldn't save the take: {e}"
                 self.profile.log_take(results)
@@ -627,6 +637,8 @@ class VoiceLabCore:
             return "analysing", "Analysing…"
         if not self.mic_available:
             return "disabled", "Mic unavailable"
+        if self.mic_lost:
+            return "disabled", "Mic stopped"
         if not self.controls()["record"]:
             return "disabled", "Practice running"
         return "idle", "Record"
@@ -635,29 +647,143 @@ class VoiceLabCore:
         """Whether the mic opened (VoiceLab still imports and plays without one)."""
         self.mic_available, self.mic_problem = bool(ok), (None if ok else problem)
         if not ok:
-            self._status(f"No microphone ({problem}). Import still works." if problem else
-                         "No microphone. Import still works.", "error")
+            self.mic_lost = False
+            plain = shell_state.plain_mic_error(problem)[0] if problem else "No microphone found."
+            self._status(f"{plain} Import still works.", "error")
         self.events.emit("mic_changed", {"device": self.profile.input_device, "egg_channel": self.profile.egg_channel,
                                          "capture": dict(getattr(self.engine, "capture_info", None) or {})})
         self._controls_changed()
 
-    def mic_status(self, banner=None):
-        """{"label", "state" ("ok" | "warn" | "error"), "tooltip"}: the mic in the top bar. `banner` is the
-        live snapshot's input banner, if any."""
-        name = self.profile.input_device or DEFAULT_MIC
-        if not self.mic_available:
-            return {"label": name, "state": "error", "tooltip": self.mic_problem or "The mic couldn't be opened."}
+    def mic_status(self, banner=None, live_state=None):
+        """{"label", "state" ("ok" | "warn" | "error" | "lost"), "tooltip", "full", "action"}: the mic in the
+        top bar. `label` is the short device name; `full` the whole name; `action` the key of the button
+        that fixes a problem (shell_state.ACTIONS) or None. `banner` is the live snapshot's input banner,
+        `live_state` its state (phase 11 / 05)."""
+        full = self.profile.input_device or DEFAULT_MIC
+        short = shell_state.short_device_name(full) if self.profile.input_device else DEFAULT_MIC
         egg = f" · EGG on channel {self.profile.egg_channel + 1}" if self.profile.egg_channel is not None else ""
+        if not self.mic_available:
+            text = shell_state.plain_mic_error(self.mic_problem)[0] if self.mic_problem else                 "VoiceLab can't use a microphone right now."
+            return {"label": short + egg, "state": "error", "tooltip": text, "full": full, "action": "choose_mic"}
+        if self.mic_lost or live_state == "no_signal":
+            return {"label": short + egg, "state": "lost", "tooltip": shell_state.LOST_TEXT, "full": full,
+                    "action": "choose_mic"}
         if banner:
-            return {"label": name + egg, "state": "warn", "tooltip": banner["text"]}
-        return {"label": name + egg, "state": "ok", "tooltip": f"Listening on {name}{egg}"}
+            return {"label": short + egg, "state": "warn", "tooltip": banner["text"], "full": full,
+                    "action": "mic_check"}
+        return {"label": short + egg, "state": "ok", "tooltip": f"Listening on {full}{egg}", "full": full,
+                "action": None}
+
+    def mic_banner(self):
+        """The persistent problem banner for a mic that is missing or stopped, or None: {"kind", "text",
+        "action", "target"} (the input banner's shape). It stays until the mic works again."""
+        if not self.mic_available:
+            text = shell_state.plain_mic_error(self.mic_problem)[0] if self.mic_problem else                 "No microphone found. Plug one in and choose it, or import a recording instead."
+            return {"kind": "error", "text": text, "action": shell_state.ACTIONS["choose_mic"], "target": "mic"}
+        if self.mic_lost:
+            return {"kind": "error", "text": shell_state.LOST_TEXT, "action": shell_state.ACTIONS["choose_mic"],
+                    "target": "mic"}
+        return None
+
+    def mic_indicator(self, live_state=None, banner=None):
+        """shell_state.mic_indicator for the current state of the mic, recording and practice."""
+        state = self.mic_status(banner, live_state)["state"]
+        practice = bool(self.engine is not None and (self.vowels.running or self.exercise.running))
+        return shell_state.mic_indicator(state, live_state, self.is_recording, practice)
+
+    def check_mic(self):
+        """Poll the engine's heartbeat (the shell calls this about once a second). A stream that stopped
+        delivering audio makes the mic "lost" ("mic_changed" and an error status); every MIC_RETRY_SECONDS it
+        is reopened quietly, and when audio flows again the mic is back ("mic_changed" and a success status).
+        Returns the mic status state."""
+        alive = getattr(self.engine, "mic_alive", None)
+        if self.engine is None or alive is None or not self.mic_available:
+            return self.mic_status()["state"]
+        if alive():
+            if self.mic_lost:
+                self.mark_mic_back()
+        elif not self.mic_lost:
+            self.mark_mic_lost()
+        elif self.clock() >= self.mic_retry_at:
+            self.mic_retry_at = self.clock() + MIC_RETRY_SECONDS
+            self.retry_mic()
+        return self.mic_status()["state"]
+
+    def mark_mic_lost(self):
+        """The mic stopped sending audio: "mic_changed", a persistent banner in the shell, Record disabled."""
+        self.mic_lost = True
+        self.mic_retry_at = self.clock() + MIC_RETRY_SECONDS
+        if self.is_recording:
+            self._status("The mic stopped while recording. Your take so far is kept.", "warning")
+        self.events.emit("mic_changed", self._mic_info(self.profile.input_device, self.profile.egg_channel))
+        self._controls_changed()
+
+    def mark_mic_back(self):
+        """Audio flows again: a success status and "mic_changed"."""
+        self.mic_lost = False
+        self._status(shell_state.RECONNECTED_TEXT, "success")
+        self.events.emit("mic_changed", self._mic_info(self.profile.input_device, self.profile.egg_channel))
+        self._controls_changed()
+
+    def retry_mic(self):
+        """Quietly try to open the chosen mic again (no error toast); True if the stream opened."""
+        if self.engine is None:
+            return False
+        try:
+            self.engine.open_stream(device_index(self.profile.input_device), self.profile.egg_channel,
+                                    **self.stream_options()) if self.profile.egg_channel is not None else                 self.engine.open_stream(device_index(self.profile.input_device), **self.stream_options())
+        except (sd.PortAudioError, ValueError):
+            return False
+        self.mic_available, self.mic_problem = True, None
+        return True
+
+    def describe_jobs(self, jobs=None):
+        """The running jobs in plain words (shell_state.describe_job): what each is and what it changes."""
+        out = []
+        for job in (self.runner.jobs() if jobs is None else jobs):
+            progress = None
+            if job.get("kind") == "reanalysis" and self.reanalysis_total:
+                progress = (min(self.reanalysis_total, self.reanalysis_done + 1), self.reanalysis_total)
+            out.append(shell_state.describe_job(job, progress))
+        return out
+
+    def activity_summary(self, jobs=None):
+        """{"text", "tooltip"} for the top bar's activity chip."""
+        return shell_state.activity_summary(self.describe_jobs(jobs))
+
+    def take_ready_toast(self, take):
+        """(text, action label) of the toast for a new take, or None for an exercise take (its screen shows it)."""
+        if take.get("exercise"):
+            return None
+        return shell_state.take_ready_text(self.number(take)), shell_state.ACTIONS["open_report"]
+
+    def baseline_prompt(self, take):
+        """The one-time question after the first good take, or None: 'Make this your starting point?'"""
+        if not shell_state.baseline_prompt_due(self.profile.baseline, self.profile.ui.get("baseline_prompted"), take):
+            return None
+        self.profile.set_ui(baseline_prompted=True)
+        return ("Make this take your starting point (baseline)? Later reports say how you've moved from it.",
+                shell_state.ACTIONS["set_baseline"])
 
     def takes_in_progress(self):
         """Takes still being analysed (a new take, plus older ones being re-analysed): the Takes badge."""
         count = 1 if self.analyzing else 0
-        if self.store and self._job_running("reanalysis"):
+        if self.store and self.runner.running("reanalysis"):     # by kind: the id isn't stored yet when "busy" fires
             count += len(self.outdated_takes())
         return count
+
+    def mic_check_summary(self):
+        """{"when": 'Fri 23 Oct', "issues": n, "ok": bool, "fixes": [advice lines]} of the last mic check, or
+        None before the first one: Settings shows 'Last checked Fri 23 Oct: 2 issues'."""
+        result = self.profile.mic_check
+        if not result:
+            return None
+        try:
+            when = datetime.fromisoformat(result["time"]).strftime("%a %d %b").replace(" 0", " ")
+        except (KeyError, ValueError, TypeError):
+            when = "earlier"
+        advice = [a for a in result.get("advice") or [] if a != mic_check.GOOD_ADVICE]
+        return {"when": when, "issues": len(advice), "ok": bool(result.get("ok")), "fixes": advice}
 
     def mic_check_text(self):
         """The last mic check in plain words: [lines], first what it found, then the measured numbers; []
@@ -700,6 +826,10 @@ class VoiceLabCore:
             return f" {self.store.folder.name}", f"Takes are saved in {self.store.folder}. Click to change."
         return (" Choose takes folder…", "Pick a folder to save takes in and load them from, "
                 "so they're kept between sessions.")
+
+    def default_takes_folder(self):
+        """The folder the first-run welcome suggests: Documents/VoiceLab."""
+        return Path.home() / "Documents" / "VoiceLab"
 
     def should_ask_takes_folder(self):
         """True on the first launch without a takes folder (offer one, once)."""
@@ -758,7 +888,7 @@ class VoiceLabCore:
         self._status(message, "warning" if problems else "info")
         self.events.emit("progress_changed")
         self.update_register()
-        self.update_reanalysis()
+        self.offer_reanalysis()
 
     def rename(self, uid, title):
         """Retitle a take (renaming its files). Returns True when it worked; "take_updated" either way."""
@@ -837,7 +967,7 @@ class VoiceLabCore:
             labelled = [d for d in self._takes if d.get("register_label") and d.get("uid")]
             if labelled:
                 self.jobs["register"] = self.runner.submit(
-                    "register", "Calibrating the register to your labels", refit_register, labelled, self.store,
+                    "register", "Calibrating register", refit_register, labelled, self.store,
                     self.label_features, on_done=self._register_job_done)
                 return
         version = self.profile.register_version
@@ -845,7 +975,7 @@ class VoiceLabCore:
                  and is_stale(d, version)]
         if stale:
             self.jobs["register"] = self.runner.submit(
-                "register", f"Estimating the register of {len(stale)} take{'s' if len(stale) != 1 else ''}",
+                "register", "Estimating register",
                 rescore_register, stale, self.store, self.profile.register_model, version,
                 on_done=self._register_job_done)
 
@@ -898,7 +1028,38 @@ class VoiceLabCore:
         return sorted(stale, key=lambda d: d["time"], reverse=True)
 
     def reanalysis_active(self):
-        return self._job_running("reanalysis") or bool(self.outdated_takes() and self.store)
+        return self._job_running("reanalysis") or bool(self.outdated_takes() and self.store
+                                                       and not self.reanalysis_deferred)
+
+    def offer_reanalysis(self):
+        """After takes load: with takes made by an older analysis, ask first ("update_offered"(count, seconds));
+        nothing re-analyses until accept_reanalysis(). Once accepted this session it just continues."""
+        stale = self.outdated_takes() if self.store else []
+        if not stale or self._job_running("reanalysis"):
+            self.update_reanalysis()
+            return
+        if self.reanalysis_accepted:
+            self.update_reanalysis()
+            return
+        self.reanalysis_deferred = True
+        self.events.emit("update_offered", len(stale), self.update_offer_seconds(len(stale)))
+
+    def update_offer_seconds(self, count):
+        return max(10, round(count * REANALYSIS_SECONDS_PER_TAKE / 5) * 5)
+
+    def update_offer_text(self, count=None):
+        n = len(self.outdated_takes()) if count is None else count
+        return UPDATE_OFFER_TEXT.format(n=n, s="" if n == 1 else "s", sec=self.update_offer_seconds(n))
+
+    def accept_reanalysis(self):
+        """The user said yes: re-analyse the older takes now."""
+        self.reanalysis_accepted, self.reanalysis_deferred = True, False
+        self.update_reanalysis()
+
+    def defer_reanalysis(self):
+        """The user said later: nothing re-analyses this session (the offer returns next launch)."""
+        self.reanalysis_deferred = True
+        self.update_register()
 
     def update_reanalysis(self):
         """Re-analyse the next take made by an older analysis, in the background, one at a time. The WAV is
@@ -908,16 +1069,16 @@ class VoiceLabCore:
         stale = self.outdated_takes()
         if not stale:
             if self.reanalysis_total:
-                self._status(f"Re-analysed {self.reanalysis_done} of your takes with the improved analysis. "
-                             "Use “Rebuild from takes” under Practice › Voice Map to clear old noise readings from it.",
+                self._status(f"Re-analysed {self.reanalysis_done} of your takes with the improved analysis.",
                              "success")
+                self.events.emit("reanalysis_done", self.reanalysis_done)
                 self.reanalysis_total = self.reanalysis_done = 0
             self.update_register()
             return
         self.reanalysis_total = max(self.reanalysis_total, self.reanalysis_done + len(stale))
-        text = (f"Re-analysing your takes with the improved analysis: {self.reanalysis_done + 1} "
-                f"of {self.reanalysis_total}…")
-        self._status(text, "busy")
+        text = f"Updating takes {self.reanalysis_done + 1}/{self.reanalysis_total}"
+        self._status(f"Updating your takes to the new analysis: {self.reanalysis_done + 1} of "
+                     f"{self.reanalysis_total}", "busy")
         self.jobs["reanalysis"] = self.runner.submit(
             "reanalysis", text, reanalyze_take, stale[0], self.store, self.profile.register_model,
             self.profile.register_version, self.profile.formant_ceiling, on_done=self._reanalysis_done)
@@ -963,7 +1124,7 @@ class VoiceLabCore:
         if confirm is not None and not confirm(REBUILD_QUESTION):
             return False
         self._status("Rebuilding the Voice Map…", "busy")
-        self.jobs["voicemap"] = self.runner.submit("voicemap", "Rebuilding the Voice Map", rebuild_voice_map,
+        self.jobs["voicemap"] = self.runner.submit("voicemap", "Rebuilding Voice Map", rebuild_voice_map,
                                                    list(self._takes), self.store, on_done=self._voice_map_rebuilt)
         return True
 
@@ -984,7 +1145,7 @@ class VoiceLabCore:
 
     def input_devices(self):
         """[(label, name)] of the mics to choose from; name None is the system default."""
-        return [(DEFAULT_MIC, None)] + [(name, name) for _, name in input_devices()]
+        return [(DEFAULT_MIC, None)] + [(shell_state.short_device_name(name), name) for _, name in input_devices()]
 
     def egg_possible(self, name):
         """True if the mic called `name` (None: the default) has two or more inputs, so one can be an EGG."""
@@ -1009,7 +1170,7 @@ class VoiceLabCore:
                 self.engine.open_stream(device_index(name), egg_channel, **self.stream_options())
         except (sd.PortAudioError, ValueError) as e:
             if egg_channel is None:
-                message = f"Couldn't open {name or 'the default mic'}: {e}"
+                message = f"Couldn't open {shell_state.short_device_name(name) or 'the default mic'}. "                           f"{shell_state.plain_mic_error(str(e))[0]}"
                 self._status(message, "error")
                 return message
             return self._revert_egg(name, f"Couldn't open the EGG on channel {egg_channel + 1} of "
@@ -1017,6 +1178,7 @@ class VoiceLabCore:
         self.profile.set_input_device(name)
         self.profile.set_egg_channel(egg_channel)
         self.live.set_egg(egg_channel is not None)
+        self.mic_available, self.mic_problem, self.mic_lost = True, None, False     # it opened: the mic is back
         message = f"Listening on {name or 'the system default mic'}" + \
                   ("" if egg_channel is None else f", EGG on channel {egg_channel + 1}")
         self._status(message)

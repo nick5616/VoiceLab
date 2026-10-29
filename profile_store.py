@@ -44,7 +44,8 @@ NONNEGATIVE_KEYS = {"pitch_range", "contour"}
 VOICE_GOALS = ("feminine", "androgynous", "masculine", None)
 # UI preferences (profile.ui) and their defaults: the window's theme ("dark" | "light" | "system"),
 # motion, whether the first-run welcome was seen, and your own read-aloud passage (text or None).
-UI_DEFAULTS = {"theme": "dark", "reduce_motion": False, "onboarded": False, "custom_passage": None}
+UI_DEFAULTS = {"theme": "dark", "reduce_motion": False, "onboarded": False, "custom_passage": None,
+               "baseline_prompted": False}     # phase 11 / 05: the first-good-take baseline question was asked
 
 
 def data_dir():
