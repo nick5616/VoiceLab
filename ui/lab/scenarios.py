@@ -228,6 +228,35 @@ def practice_each():
             "profile": USER, "takes": "real", "beats": beats}
 
 
+# phase 11 / 06-practice
+def guided_session():
+    speech = synth.speech_track(170, 3.0, seed=12)
+    say = voice(speech, synth.NEUTRAL_FORMANTS, seed=12)
+    beats = [go("practice"),
+             beat("warmup-open", "open_practice", key="vowels"),
+             beat("warmup-start", "call", target="practice.vowel_check.session.start"),
+             feed("warmup-mid", lambda: _vowel_words()[:int(6.0 * SAMPLE_RATE)]),
+             feed("warmup-rest", lambda: _vowel_words()[int(6.0 * SAMPLE_RATE):], capture=False),
+             beat("warmup-done", "wait_jobs"),
+             beat("back-after-warmup", "close_practice"),
+             beat("phrases-open", "open_practice", key="phrases")]
+    for i in (1, 2, 3):
+        beats += [beat(f"phrase-{i}-start", "call", target="practice.phrases.toggle"),
+                  feed(f"phrase-{i}-mid", say, truth=track_truth(speech, "speech")),
+                  beat(f"phrase-{i}-stop", "call", target="practice.phrases.toggle", instant=True),
+                  beat(f"phrase-{i}-result", "wait_jobs"),
+                  beat(f"phrase-{i}-next", "call", target="core.next_phrase", capture=False)]
+    beats += [beat("back-after-phrases", "close_practice"),
+              beat("read-open", "open_practice", key="read"),
+              beat("read-start", "call", target="practice.read.toggle"),
+              feed("read-mid", say, truth=track_truth(speech, "speech")),
+              beat("read-stop", "call", target="practice.read.toggle", instant=True),
+              beat("read-result", "wait_jobs"),
+              beat("summary", "close_practice")]
+    return {"id": "guided_session", "title": "Today's practice: warm-up, three phrases, the passage, the summary",
+            "profile": USER, "takes": "real", "beats": beats}
+
+
 def takes_report():
     beats = [go("takes")]
     for i in range(len(list(driver.REAL_TAKES.glob("*.wav")))):
@@ -270,14 +299,14 @@ def reach():
 
 SCENARIOS = {f.__name__: f for f in (first_run, empty, listening_silence, speak_truth_steady, speak_truth_glide,
                                       speak_real_replay, record_take, noisy_input, no_mic, reanalysis_running,
-                                      sing_truth_scale, practice_each, takes_report, progress, settings,
+                                      sing_truth_scale, practice_each, guided_session, takes_report, progress, settings,
                                       error_status, reach)}
 GROUPS = {
     "live": ["empty", "listening_silence", "speak_truth_steady", "speak_truth_glide", "speak_real_replay",
              "record_take", "noisy_input", "sing_truth_scale"],
     "takes": ["empty", "record_take", "takes_report", "progress", "reanalysis_running"],
     "shell": ["first_run", "no_mic", "error_status", "settings", "reanalysis_running", "noisy_input", "reach"],
-    "practice": ["practice_each", "sing_truth_scale"],
+    "practice": ["practice_each", "guided_session", "sing_truth_scale"],
 }
 SMOKE = ["empty", "speak_truth_steady", "record_take", "no_mic", "error_status"]
 SMOKE_SIZE, SMOKE_THEME = (1280, 720), "dark"

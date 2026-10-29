@@ -5,7 +5,8 @@ data; a UI draws its grid(). No UI toolkit."""
 import numpy as np
 
 from analysis import SAMPLE_RATE, frame_levels, hz_to_midi
-from display import midi_name
+from display import NAMES, midi_name
+from engine import UPDATE_INTERVAL
 
 MIDI_LO, MIDI_HI = 36, 96            # C2-C7
 LEVEL_LO, LEVEL_HI, LEVEL_STEP = -60, 0, 2   # dBFS
@@ -15,16 +16,18 @@ MIN_FRAMES = 12                      # frames before a cell is shown: 0.3 s of l
 # judgment calls (unverified); mode None uses the wider range.
 MODE_F0 = {"speak": (70.0, 500.0), "sing": (70.0, 1100.0)}
 REDRAW_EVERY = 10                    # live frames between redraws
-# key: (label, colour range, unit)
+# key: (label, colour range, unit); the labels are the vocabulary sheet's names (display.NAMES)
 MAP_METRICS = {
-    "cpp": ("Clarity (CPP)", (8, 30), " dB"),
-    "ring": ("Ring (2–4 kHz)", (-30, 0), " dB"),
-    "h1h2": ("Fold Contact (H1*–H2*)", (-5, 15), " dB"),
-    "cq": ("Contact quotient (EGG)", (0.2, 0.7), ""),
+    "cpp": (NAMES["cpp"]["name"], (8, 30), " dB"),
+    "ring": (NAMES["ring"]["name"], (-30, 0), " dB"),
+    "h1h2": (NAMES["h1h2"]["name"], (-5, 15), " dB"),
+    "cq": (NAMES["cq"]["name"], (0.2, 0.7), ""),
 }
+THIN_SECONDS = 3.0                   # s of data under which an end of the range is flagged as thin
 EGG_METRICS = {"cq"}                 # only offered once an EGG has filled some cells
 HINT = ("Builds up as you sing or speak, across sessions. Level is uncalibrated: "
         "keep mic gain and distance the same.")
+EMPTY_RANGE = "Nothing mapped yet. Sing or speak and it fills in."
 REBUILD_TOOLTIP = ("Replace the map with one built from your saved takes, without the noise "
                    "older versions counted as voice.")
 
@@ -73,6 +76,17 @@ class VoiceMapData:
         cols = np.flatnonzero((self.counts >= MIN_FRAMES).any(axis=1))
         return (cols[0] + MIDI_LO, cols[-1] + MIDI_LO) if len(cols) else None
 
+    def seconds_at(self, midi):
+        """Seconds of voice mapped at one note (all levels)."""
+        col = int(midi) - MIDI_LO
+        if not 0 <= col < self.counts.shape[0]:
+            return 0.0
+        return float(self.counts[col].sum()) * UPDATE_INTERVAL
+
+    def total_seconds(self):
+        """Seconds of voice in the whole map."""
+        return float(self.counts.sum()) * UPDATE_INTERVAL
+
     def save(self, path):
         np.savez(path, counts=self.counts,
                  **{f"sum_{k}": v for k, v in self.sums.items()},
@@ -92,6 +106,53 @@ class VoiceMapData:
         except (OSError, KeyError, ValueError):
             pass
         return data
+
+
+# --- phase 11 / 06-practice: plain words for the range, the colours and what a rebuild changed ---
+def octaves_text(semitones):
+    """'about 1.5 octaves' (a span in semitones, said in octaves)."""
+    if semitones < 12:
+        return "less than an octave"
+    return f"about {semitones / 12:.1f} octaves"
+
+
+def range_text(data):
+    """'Your range so far: C3–A4 (about 1.8 octaves)', then a line saying how many seconds of voice back the
+    lowest and the highest note ('thin' under THIN_SECONDS), or EMPTY_RANGE."""
+    rng = data.range_midi()
+    if not rng:
+        return EMPTY_RANGE
+    lo, hi = rng
+    ends = []
+    for word, midi in (("lowest", lo), ("highest", hi)):
+        seconds = data.seconds_at(midi)
+        thin = " (thin)" if seconds < THIN_SECONDS else ""
+        ends.append(f"{word} note {midi_name(midi)}: {seconds:.0f} s of data{thin}")
+    return (f"Your range so far: {midi_name(lo)}–{midi_name(hi)} ({octaves_text(hi - lo)})"
+            f"\n{ends[0][0].upper() + ends[0][1:]}\n{ends[1][0].upper() + ends[1][1:]}")
+
+
+def range_change_text(before, after):
+    """What a rebuild (or clear) did to the range; `before` and `after` are (low, high) MIDI or None."""
+    if after is None:
+        return "The map is empty now." if before else "Nothing mapped yet."
+    now = f"{midi_name(after[0])}–{midi_name(after[1])}"
+    if before is None:
+        return f"Your range is now {now}."
+    if tuple(before) == tuple(after):
+        return f"Your range stays {now}."
+    was = f"{midi_name(before[0])}–{midi_name(before[1])}"
+    return f"Your range changed from {was} to {now}."
+
+
+def legend_text(key):
+    """'Yellow = clearer, purple = breathier' for a metric's colours (the unit range follows in brackets)."""
+    names = NAMES.get(key, {})
+    lo, hi = MAP_METRICS[key][1]
+    unit = MAP_METRICS[key][2]
+    if not names.get("high"):
+        return f"Yellow = more, purple = less ({lo:g} to {hi:g}{unit})"
+    return f"Yellow = {names['high'].lower()}, purple = {names['low'].lower()} ({lo:g} to {hi:g}{unit})"
 
 
 def rebuild(takes, mode=None):
@@ -154,15 +215,14 @@ class MapSession:
         rng = self.data.range_midi()
         if rng:
             lo_m, hi_m = rng
-            range_text = f"Range: {midi_name(lo_m)}–{midi_name(hi_m)} ({hi_m - lo_m} semitones)"
             x_range = (max(MIDI_LO, lo_m - 4), min(MIDI_HI + 1, hi_m + 5))
         else:
-            range_text, x_range = "Nothing mapped yet.", (MIDI_LO + 6, MIDI_LO + 42)
+            x_range = (MIDI_LO + 6, MIDI_LO + 42)
         return {"values": np.where(np.isnan(values), lo - 10 * step, values), "levels": (lo - step, hi),
                 "rect": (MIDI_LO, LEVEL_LO, MIDI_HI - MIDI_LO + 1, LEVEL_HI - LEVEL_LO),
                 "x_range": x_range, "y_range": (LEVEL_LO, LEVEL_HI),
-                "scale_text": f"Colour: purple {lo:g} → yellow {hi:g}{MAP_METRICS[key][2]}",
-                "range_text": range_text,
+                "scale_text": legend_text(key),
+                "range_text": range_text(self.data),
                 "ticks": [(m + 0.5, midi_name(m)) for m in range(MIDI_LO, MIDI_HI + 1, 12)]}
 
     def clear(self):
