@@ -7,6 +7,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import progress  # noqa: E402
 from progress import change_text, collect_entries, select, week_start, weekly_medians  # noqa: E402
 
 MONDAY = datetime(2026, 9, 7, 12)
@@ -60,7 +61,7 @@ def test_change_text():
                *[entry(d, pitch=150.0) for d in (0, 1, 2)], *[entry(d, pitch=300.0) for d in (8, 9)],
                *[entry(d, cpp=20.0) for d in (0, 1, 2)], *[entry(d, cpp=21.5) for d in (8, 9)]]
     assert "+45 Hz since week of Sep 7" in change_text("delta_f", *select(entries, "delta_f"))
-    assert "+12.0 st" in change_text("pitch", *select(entries, "pitch"))
+    assert "+12.0 semitones" in change_text("pitch", *select(entries, "pitch"))
     assert "+1.5 dB" in change_text("cpp", *select(entries, "cpp"))
     one_week = select([entry(0, cpp=20.0)], "cpp")
     assert change_text("cpp", *one_week).endswith("20.0 dB · 1 take")
@@ -134,4 +135,116 @@ def test_mini_gives_weekly_medians_for_the_last_weeks():
     pitch = out["series"][0]
     assert pitch["key"] == "pitch" and len(pitch["values"]) == 4
     assert pitch["values"] == [None, 150.5, None, 165.5] and pitch["latest"] == "166 Hz"
-    assert out["series"][2]["latest"] in ("overlap / androgynous", "typically masculine")
+    assert out["series"][2]["latest"] in ("overlap", "typically masculine")
+
+
+# --- PHASE 11 / 04: AM I GETTING BETTER? ---
+
+NOW = MONDAY + timedelta(days=29, hours=4)
+
+
+def month(pitch_by_day, **extra):
+    """One good speak take per (day, pitch) pair; resonance rises with pitch so both lines move."""
+    return [entry(d, pitch=p, delta_f=900 + p / 2, tier="good", **extra) for d, p in pitch_by_day]
+
+
+def test_a_steady_voice_says_so_and_names_no_goal_direction():
+    entries = month([(d, 150.0 + (d % 3)) for d in range(0, 30)])
+    for goal in (None, "feminine", "masculine", "androgynous"):
+        text = progress.summary_text(entries, goal=goal, now=NOW)
+        assert "no clear change" in text and "30 days" in text and "30 takes" in text
+        assert "toward" not in text and "away" not in text
+
+
+def test_the_goal_decides_toward_and_away_and_exploring_never_says_either():
+    rising = month([(d, 140.0) for d in range(0, 15)] + [(d, 165.0) for d in range(15, 30)])
+    fem = progress.summary_text(rising, goal="feminine", now=NOW)
+    masc = progress.summary_text(rising, goal="masculine", now=NOW)
+    free = progress.summary_text(rising, goal=None, now=NOW)
+    assert "moving toward your goal" in fem and "higher" in fem
+    assert "further from your goal" in masc and "higher" in masc
+    assert "toward" not in free and "goal" not in free and "higher" in free
+    assert progress.summary_text(rising, goal="exploring", now=NOW) == free     # an unknown goal reads as none
+    falling = month([(d, 165.0) for d in range(0, 15)] + [(d, 140.0) for d in range(15, 30)])
+    assert "moving toward your goal" in progress.summary_text(falling, goal="masculine", now=NOW)
+    assert "lower" in progress.summary_text(falling, goal="masculine", now=NOW)
+
+
+def test_androgynous_goal_is_toward_the_middle_of_the_overlap_zone():
+    far = month([(d, 120.0) for d in range(0, 15)] + [(d, 150.0) for d in range(15, 30)])
+    assert "moving toward your goal" in progress.summary_text(far, goal="androgynous", now=NOW)
+    passed = month([(d, 150.0) for d in range(0, 15)] + [(d, 210.0) for d in range(15, 30)])
+    assert "further from your goal" in progress.summary_text(passed, goal="androgynous", now=NOW)
+
+
+def test_summary_counts_takes_and_admits_too_few():
+    few = month([(28, 150.0), (29, 151.0)])
+    assert "Not enough takes" in progress.summary_text(few, now=NOW) and "2 so far" in progress.summary_text(few, now=NOW)
+    out = progress.summary(month([(d, 150.0) for d in range(0, 30)]), now=NOW)
+    assert out["takes"] == 30 and {ln["days"] for ln in out["lines"]} == {7, 30}
+    assert all(ln["n"] >= 1 and ln["text"] for ln in out["lines"])
+    only_week = progress.summary_text(month([(d, 150.0) for d in range(0, 30)]), days=7, now=NOW)
+    assert "last 7 days" in only_week
+
+
+def test_sure_needs_enough_takes_on_both_sides():
+    rough = progress.summary(month([(d, 140.0) for d in range(22, 25)] + [(d, 170.0) for d in range(26, 30)]),
+                             goal="feminine", now=NOW)
+    assert all(not ln["sure"] for ln in rough["lines"])
+    sure = progress.summary(month([(d, 140.0) for d in range(0, 15)] + [(d, 165.0) for d in range(15, 30)]),
+                            goal="feminine", now=NOW)
+    assert any(ln["sure"] for ln in sure["lines"] if ln["days"] == 30)
+
+
+def test_variation_notes_name_a_real_difference_and_stay_quiet_otherwise():
+    morning = [dict(entry(d, pitch=170.0 + d % 2, delta_f=1000.0, tier="good"), time=(MONDAY + timedelta(days=d, hours=-3)).isoformat())
+               for d in range(0, 6)]
+    evening = [dict(entry(d, pitch=150.0 + d % 2, delta_f=1000.0, tier="good"), time=(MONDAY + timedelta(days=d, hours=8)).isoformat())
+               for d in range(6, 12)]
+    notes = progress.variation_notes(morning + evening, now=NOW)
+    assert any(n["factor"] == "time of day" and "mornings" in n["text"] and "higher" in n["text"] for n in notes)
+    assert all("semitones" in n["text"] for n in notes if n["key"] == "pitch")
+    flat = [entry(d, pitch=150.0 + d % 2, delta_f=1000.0, tier="good") for d in range(12)]
+    assert progress.variation_notes(flat, now=NOW) == []
+    assert progress.variation_notes(morning[:2], now=NOW) == []
+
+
+def test_variation_notes_compare_take_length_and_recording_quality():
+    short = [entry(d, pitch=150.0 + d % 2, delta_f=1000.0, tier="good", duration=6.0) for d in range(0, 6)]
+    long_ = [entry(d, pitch=135.0 + d % 2, delta_f=1000.0, tier="fair", duration=25.0) for d in range(6, 12)]
+    factors = {n["factor"] for n in progress.variation_notes(short + long_, now=NOW)}
+    assert {"take length", "recording quality"} <= factors
+
+
+def test_practice_days_counts_days_and_stays_quiet_with_none():
+    entries = [entry(d, pitch=150.0) for d in (26, 26, 27, 29)] + [entry(10, pitch=150.0), entry(28, pitch=150.0, source="x.wav")]
+    out = progress.practice_days(entries, now=NOW)
+    assert out["days"] == 3 and out["window"] == 7 and out["text"] == "Practised 3 of the last 7 days"
+    none = progress.practice_days([entry(1, pitch=150.0)], now=NOW)
+    assert none["days"] == 0 and none["text"] == ""
+    assert progress.practice_days([], now=NOW)["text"] == ""
+
+
+def test_task_counts_match_what_the_charts_draw():
+    entries = [entry(d, pitch=150.0, delta_f=1000.0, tier="good", task="free speech") for d in range(5)] +               [entry(6, pitch=150.0, delta_f=1000.0, tier="good", task="free speech", source="friend.wav"),
+               entry(7, pitch=150.0, delta_f=1000.0, tier="poor", task="free speech")]
+    assert progress.task_counts(entries) == [("free speech", 5)]
+    assert progress.task_counts(entries, include_poor=True) == [("free speech", 6)]
+    view = progress.report_view(entries, __import__("profile_store").Profile(__import__("tempfile").mkdtemp()))
+    assert len(dict(view["charts"])["pitch"]["values"]) == 5 == view["tasks"][0][1]
+
+
+def test_charts_say_when_there_are_too_few_weeks_for_a_line():
+    two_weeks = [entry(d, pitch=150.0 + d) for d in (0, 1, 8)]
+    times, values = select(two_weeks, "pitch")
+    chart = progress.chart("pitch", times, values)
+    assert chart["line"] is False and "Line = weekly median" in chart["legend"]
+    three = [entry(d, pitch=150.0 + d) for d in (0, 8, 15)]
+    assert progress.chart("pitch", *select(three, "pitch"))["line"] is True
+
+
+def test_steady_charts_say_steady_in_one_short_line():
+    entries = [entry(d, pitch=150.0 + (d % 2)) for d in (0, 1, 2, 3, 8, 9, 10, 11)]
+    chart = progress.chart("pitch", *select(entries, "pitch"))
+    assert chart["steady"] and "steady" in chart["change"] and "variation" not in chart["change"]
+    assert len(chart["change"]) < 70

@@ -259,7 +259,10 @@ class NoteScoreChart(pg.PlotWidget):
         self.hideButtons()
         self.setMenuEnabled(False)
         self.setFixedHeight(150)
-        theme.changed.connect(lambda *_: self.draw())
+        theme.changed.connect(self._theme_changed)
+        self.draw()
+
+    def _theme_changed(self, *_):
         self.draw()
 
     def draw(self):

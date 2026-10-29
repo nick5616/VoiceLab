@@ -210,7 +210,7 @@ def test_takes_folder_save_rename_reload_delete(make_core, tmp_path):
     assert not again.delete(loaded["uid"], confirm=lambda text: False)
     assert again.delete(loaded["uid"], confirm=lambda text: True)
     assert again.heard["take_removed"] == [(loaded["uid"],)] and again.takes() == []
-    assert list(folder.iterdir()) == [] and again.progress_entries() == []
+    assert [p.name for p in folder.iterdir()] == [".trash"] and again.progress_entries() == []   # a deleted take waits in .trash
 
 
 def test_session_takes_are_saved_when_a_folder_is_chosen(make_core, tmp_path):

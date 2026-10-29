@@ -90,7 +90,8 @@ SCREEN_GROUPS = {"dashboard": "live", "live": "live", "takes": "takes", "progres
                  "settings": "shell", "onboarding": "shell", "mic_check": "shell"}
 DIALOG_SCREENS = {"Welcome": "onboarding", "Mic check": "mic_check"}
 CODE_GROUPS = {"take_card.py": "takes", "take_graph.py": "takes", "takes_screen.py": "takes", "latest_take.py": "takes",
-               "recent_list.py": "takes", "progress_screen.py": "takes", "live.py": "live", "dashboard.py": "live",
+               "recent_list.py": "takes", "progress_screen.py": "takes", "player_strip.py": "takes",
+               "trust_line.py": "takes", "compare_view.py": "takes", "live.py": "live", "dashboard.py": "live",
                "live_graph.py": "live", "live_cards.py": "live", "live_views.py": "live", "practice.py": "practice",
                "exercise_view.py": "practice", "vowel_check.py": "practice", "voice_map_view.py": "practice"}
 

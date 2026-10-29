@@ -119,10 +119,12 @@ def test_matching_pitch_and_resonance_place_feminine_and_masculine():
     assert fem["overall"]["position"] > 0.75 > 0.25 > masc["overall"]["position"]
 
 
-def test_overlap_resonance_named_as_pulling_toward_androgynous():
+def test_overlap_resonance_keeps_the_overall_in_the_overlap_in_one_sentence():
     rep = report.build_report(make_take(f0=215, df=1030))
     assert rep["overall"]["zone"] == "overlap"
-    assert "pulls the overall impression toward androgynous" in rep["overall"]["text"]
+    text = rep["overall"]["text"]
+    assert "overall impression stays in the overlap" in text and text.count(".") == 1
+    assert "androgynous" not in text                       # a goal word, never a zone
 
 
 # --- UNTRUSTED ---
@@ -142,7 +144,7 @@ def test_high_pitch_makes_resonance_unjudgeable_and_overall_none():
     rep = report.build_report(make_take(f0=300, df=1150))
     res = dim(rep, "delta_f")
     assert res["confidence"] == "none" and res["reason"] and res["position"] is None
-    assert res["headline"] == res["reason"][0].upper() + res["reason"][1:]
+    assert res["headline"].startswith(res["reason"][0].upper() + res["reason"][1:] + ". Try")   # the reason, then the fix
     assert rep["overall"]["position"] is None
     assert "brightness" in rep["overall"]["reason"]
 
@@ -178,7 +180,8 @@ def test_sentence_final_dips_give_a_floor_tip_covering_them():
     rep = report.build_report(take, goal="feminine")
     floor = tip(rep, "pitch_floor_dips")
     assert floor is not None and floor["dimension"] == "pitch_floor"
-    assert "ends of sentences" in floor["text"] and "120 Hz" in floor["text"]
+    assert "ends of sentences" in floor["why"] and "120 Hz" in floor["why"]
+    assert floor["text"].startswith("Try keeping the last word up")
     period = PHRASE_S + GAP_S
     for k in range(3):
         dip = (0.02 + k * period + PHRASE_S - 0.3, 0.02 + k * period + PHRASE_S)
@@ -194,14 +197,15 @@ def test_goal_flips_tip_direction():
     fem = report.build_report(take, goal="feminine")
     masc = report.build_report(take, goal="masculine")
     pf, pm = tip(fem, "pitch_toward_goal"), tip(masc, "pitch_toward_goal")
-    assert "reached" in pf["text"] and "starting your sentences near that height" in pf["text"]
-    assert "settled" in pm["text"] and "without pushing down" in pm["text"]
+    assert "starting your sentences near the height you reached" in pf["text"] and "reached" in pf["why"]
+    assert "settled" in pm["why"] and "without pushing down" in pm["text"]
     mid = lambda t: np.mean(t["moments"][0])                         # noqa: E731
     times, f0 = take["tracks"]["times"], take["tracks"]["f0"]
     at = lambda s: np.nanmedian(f0[(times >= s - 0.3) & (times <= s + 0.3)])   # noqa: E731
     assert at(mid(pf)) > 160 > at(mid(pm))
     rf, rm = tip(fem, "resonance_stretches"), tip(masc, "resonance_stretches")
-    assert rf["text"].startswith("Your brightest stretch") and rm["text"].startswith("Your darkest")
+    assert "carrying the feeling of your brightest stretch" in rf["text"].replace("Try c", "c")
+    assert "relaxed, open space" in rm["text"]
     assert "masculine goal" in tip(masc, "best_moment")["text"]
 
 
@@ -279,7 +283,7 @@ def test_report_is_json_serialisable(tmp_path):
             text = json.dumps(rep, allow_nan=False)
             assert json.loads(text)["mode"] == "speak"
             assert set(rep) == {"mode", "headline", "overall", "dimensions", "tips", "issues",
-                                "caveat", "goal"}
+                                "caveat", "goal", "last_tip"}
             assert report.render_text(rep)
 
 
@@ -294,3 +298,100 @@ def test_dimensions_carry_the_middle_half_of_their_frames():
     poor = report.build_report(make_take(snr=6.0, level=-52.0))
     assert all(d["range"] is None for d in poor["dimensions"])
     json.dumps(rep, default=float)
+
+
+# --- PHASE 11 / 04: LAST TIME'S TIP, WORDS FOR CHANGE, ZONE WORDS ---
+
+def test_the_zone_is_never_called_androgynous():
+    assert report.ZONE_LABELS == {"masculine": "typically masculine", "overlap": "overlap",
+                                  "feminine": "typically feminine"}
+    assert report.ZONE_SHORT == {"masculine": "Masculine", "overlap": "Overlap", "feminine": "Feminine"}
+    for goal in (None, "feminine", "androgynous", "masculine"):
+        for take in (make_take(f0=215, df=1030), make_take(f0=160, df=1030, wobble=3), make_take(f0=115, df=950)):
+            text = report.render_text(report.build_report(take, goal=goal))
+            assert "overlap / androgynous" not in text
+            assert "toward androgynous" not in text
+
+
+def test_tip_check_says_whether_this_take_did_what_the_last_tip_asked():
+    prev = make_take(f0=150, df=1030, wobble=3)
+    assert report.build_report(prev, goal="feminine")["last_tip"] is None          # no earlier take
+    verdicts = {}
+    for f0 in (150, 156, 170):
+        rep = report.build_report(make_take(f0=f0, df=1030, wobble=3), previous=prev, goal="feminine")
+        verdicts[f0] = rep["last_tip"]
+    assert verdicts[150]["verdict"] == "not yet" and verdicts[156]["verdict"] == "partly"
+    yes = verdicts[170]
+    assert yes["verdict"] == "yes" and yes["text"].startswith("Last time: start your sentences higher.")
+    assert "This take: you did." in yes["text"] and "Hz higher" in yes["detail"]
+    assert json.dumps(yes)
+
+
+def test_tip_check_follows_the_goal_direction_and_stays_symmetrical():
+    prev = make_take(f0=170, df=1030, wobble=3)
+    lower = make_take(f0=150, df=1030, wobble=3)
+    masc = report.build_report(lower, previous=prev, goal="masculine")["last_tip"]
+    fem = report.build_report(lower, previous=prev, goal="feminine")
+    assert masc["verdict"] == "yes" and "lower" in masc["detail"] and "rest lower" in masc["tip"]
+    assert fem["last_tip"] is None or fem["last_tip"]["verdict"] == "not yet"        # fem already met: no pitch tip to check
+    prev_low = make_take(f0=115, df=1030, wobble=3)
+    ando = report.build_report(make_take(f0=145, df=1030, wobble=3), previous=prev_low, goal="androgynous")["last_tip"]
+    assert ando is None or ando["verdict"] in report.TIP_VERDICTS
+
+
+def test_tip_check_reads_resonance_tips_and_ignores_best_moments():
+    prev = make_take(f0=215, df=960, wobble=3)
+    tip_prev = tip(report.build_report(prev, goal="feminine"), "resonance_stretches")
+    assert tip_prev["aim"]["key"] == "delta_f" and tip_prev["aim"]["direction"] == 1
+    brighter = make_take(f0=215, df=1010, wobble=3)
+    check = report.tip_check({"tips": [tip_prev]}, brighter, prev)
+    assert check["verdict"] == "yes" and "brighter" in check["detail"] and "Hz" in check["detail"]
+    best = [t for t in report.build_report(prev, goal="feminine")["tips"] if t["key"] == "best_moment"]
+    assert best and report.tip_check({"tips": best}, brighter, prev) is None
+    assert report.tip_check({"tips": []}, brighter, prev) is None and report.tip_check(None, brighter, prev) is None
+
+
+def test_change_text_has_a_word_for_the_direction_and_no_signed_number():
+    prev = make_take(f0=150, df=1000, h1h2=8.0, cpp=22.0)
+    now = make_take(f0=160, df=1080, h1h2=3.8, cpp=20.0)
+    dims = report.build_report(now, previous=prev)["dimensions"]
+    texts = [d["change"]["text"] for d in dims if d["change"]]
+    assert texts and all("+" not in t and "-" not in t.replace(" - ", " ") and "(" not in t for t in texts)
+    weight = next(d for d in dims if d["key"] == "h1h2")["change"]
+    assert weight["text"] == "Heavier than your last take, by 4.2 dB" and weight["word"] == "heavier"
+    pitch = next(d for d in dims if d["key"] == "pitch")["change"]
+    assert pitch["text"].startswith("Higher than your last take, by ") and "semitones" in pitch["text"]
+    assert "(" not in report.build_report(now, previous=prev)["headline"].split(",", 1)[-1]
+
+
+def test_compare_change_reads_from_the_first_takes_side():
+    assert report.compare_change("pitch", 165, 150)["text"].startswith("Higher by 1.") 
+    assert report.compare_change("delta_f", 1000, 1045) == {"text": "Darker by 45 Hz", "same": False}
+    assert report.compare_change("cpp", 20.0, 20.5) == {"text": "About the same", "same": True}
+
+
+def test_every_cant_judge_headline_says_why_and_what_to_try():
+    for kwargs in ({"snr": 15.0}, {"f0": 300}, {"snr": 5.0}):
+        rep = report.build_report(make_take(**kwargs))
+        for d in rep["dimensions"]:
+            if d["confidence"] == "none":
+                assert "Try" in d["headline"], (kwargs, d["key"], d["headline"])
+
+
+def test_lowest_notes_explains_its_own_scale():
+    rep = report.build_report(make_take())
+    floor = dim(rep, "pitch_floor")
+    assert floor["name"] == "Lowest notes" and "its own scale" in floor["explanation"]
+    assert "140 Hz and up" in floor["explanation"] and report.ZONES["pitch_floor"]["name"] == "Lowest notes"
+    assert dim(rep, "h1h2")["name"] == "Weight" and report.ZONES["h1h2"]["name"] == "Weight"
+    assert dim(rep, "pitch_range")["display"].endswith(" st")
+
+
+def test_tips_are_short_and_do_not_repeat_the_cards_numbers():
+    take = make_take(f0=160, df=1030, dip_hz=110, wobble=3)
+    for goal in (None, "feminine", "androgynous", "masculine"):
+        rep = report.build_report(take, goal=goal)
+        median = f"{rep['dimensions'][0]['value']:.0f} Hz"
+        for t in rep["tips"]:
+            assert len(t["text"].split()) <= 32, t["text"]
+            assert median not in t["text"] and "semitones" not in t["text"], t["text"]

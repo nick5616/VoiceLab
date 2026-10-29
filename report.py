@@ -24,11 +24,14 @@ import numpy as np
 
 import coach
 import profile_store
+from display import ZONE_WORDS, quantity_name
 
 # --- ZONES ---
 
-ZONE_LABELS = {"masculine": "typically masculine", "overlap": "overlap / androgynous",
-               "feminine": "typically feminine"}
+# The zone wording is display.ZONE_WORDS' long form (the vocabulary sheet, phase 11): "androgynous" is a
+# goal word, never a zone.
+ZONE_LABELS = {zone: words[0] for zone, words in ZONE_WORDS.items()}
+ZONE_SHORT = {zone: words[1] for zone, words in ZONE_WORDS.items()}
 SPEAK_PITCH_SCALE = (80, 400)   # Hz; the speech bar of ui_common.MODE_SCALES
 
 
@@ -81,7 +84,7 @@ ZONES = {
     # Hz, is narrower): men 92/5/2%, women 0/5/95%; the old 125 / 155 Hz edges (7 ARCTIC speakers)
     # left 38% of the women in the overlap. Low dips and creak are heard as a lower voice
     # (Holmberg et al. 2010 advise avoiding vocal fry).
-    "pitch_floor": {"name": "Pitch floor", "unit": "Hz", "scale": SPEAK_PITCH_SCALE, "log": True,
+    "pitch_floor": {"name": "Lowest notes", "unit": "Hz", "scale": SPEAK_PITCH_SCALE, "log": True,
                     "zones": _zones(SPEAK_PITCH_SCALE, (115, 140)),
                     "source": "Own measurement with VoiceLab on LibriSpeech read speech, 40 men and "
                               "40 women (medians 96 and 164 Hz; edges = men's 90th and women's "
@@ -152,7 +155,7 @@ ZONES = {
     # groups: the user's takes read 4-21 dB, while the simulated mic noise moved LibriSpeech only
     # -0.4 dB, so the cause is the mic's or room's low end (desk rumble under H1, spec 01;
     # unverified). So the wide 0 / 9 dB overlap stays (own judgement): it holds 72% of both groups.
-    "h1h2": {"name": "Vocal weight", "unit": "dB", "scale": (-10, 15), "log": False,
+    "h1h2": {"name": "Weight", "unit": "dB", "scale": (-10, 15), "log": False,
              "zones": _zones((-10, 15), (0, 9)),
              "source": "Direction: Klatt & Klatt 1990; Hanson & Chuang 1999; no sex difference at "
                        "high pitch: Iseli, Shue & Alwan 2007. Own measurement with VoiceLab on "
@@ -259,7 +262,8 @@ EXPLANATIONS = {
     "pitch": "How high or low your voice sits most of the time; one of the two biggest cues "
              "listeners use, together with resonance.",
     "pitch_floor": "The low points of your pitch, often at the ends of sentences; deep dips are "
-                   "heard as a lower voice even when the average is higher.",
+                   "heard as a lower voice even when the average is higher. It has its own scale: "
+                   "{floor_scale}",
     "pitch_range": "How much your pitch moves while you talk; more melody tends to be heard as "
                    "more feminine and more expressive.",
     "delta_f": "How bright or dark your voice sounds, set by the size and shape of your throat and "
@@ -273,12 +277,13 @@ EXPLANATIONS = {
     "steadiness": "How steady your held notes stayed.",
     "register": "How much you sang in a lighter head voice versus chest voice.",
 }
-NAMES = {"pitch": "Pitch", "pitch_floor": "Pitch floor", "pitch_range": "Intonation",
-         "delta_f": "Resonance", "h1h2": "Vocal weight", "cpp": "Clarity", "range": "Range",
-         "tuning": "Tuning", "steadiness": "Steadiness", "register": "Register"}
+NAMES = {"pitch": quantity_name("pitch"), "pitch_floor": quantity_name("pitch_floor"),
+         "pitch_range": quantity_name("pitch_range"), "delta_f": quantity_name("delta_f"),
+         "h1h2": quantity_name("h1h2"), "cpp": quantity_name("cpp"), "range": "Range",
+         "tuning": quantity_name("tuning"), "steadiness": "Steadiness", "register": quantity_name("register")}
 # Plain names for "couldn't judge your ..." sentences.
-PLAIN = {"pitch": "pitch", "pitch_floor": "low points", "pitch_range": "intonation",
-         "delta_f": "brightness", "h1h2": "weight", "cpp": "clarity", "range": "range",
+PLAIN = {"pitch": "pitch", "pitch_floor": "lowest notes", "pitch_range": "intonation",
+         "delta_f": "resonance", "h1h2": "weight", "cpp": "clarity", "range": "range",
          "tuning": "tuning", "steadiness": "steadiness", "register": "register"}
 
 CAVEAT = ("These zones describe tendencies across many speakers' voices, and they overlap a lot. "
@@ -288,7 +293,21 @@ SING_CAVEAT = ("Singing readings from a home mic are approximate, and the regist
                "guess until the model has learned your voice. Use them as a guide for practice, "
                "not as a grade.")
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-GOAL_WORDS = {"feminine": "feminine", "androgynous": "androgynous", "masculine": "masculine"}
+GOAL_WORDS = {"feminine": "feminine", "androgynous": "androgynous", "masculine": "masculine"}   # goal ids
+# What a reading that can't be judged is down to, and what to try, by the words in coach's reason (first
+# match wins): (words, the cause as a noun phrase, one sentence on what to try).
+PROBLEMS = [(("rumble", "desk"), "desk rumble", "Try setting the mic on something soft, or off the desk."),
+            (("whine", "electrical"), "an electrical whine", "Try moving the mic away from chargers and screens."),
+            (("clip", "loud peaks"), "clipping", "Try moving back a little, or turning the input level down."),
+            (("ceiling", "vowel check found"), "a setting that differs from your vowel check",
+             "Try running the vowel check again in Practice."),
+            (("noise", "noisy", "snr"), "background noise", "Try a quieter room, or run Mic check."),
+            (("quiet", "closer"), "a quiet recording", "Try moving closer to the mic."),
+            (("above about", "reliably"), "a pitch too high for resonance to be measured",
+             "Try the vowel check in Practice, which reads resonance at any pitch."),
+            (("too few", "not enough", "very little", "formant", "voiced"), "too few clear voiced moments",
+             "Try speaking a little longer, in your everyday voice.")]
+DEFAULT_FIX = "Try recording again, a little longer, or run Mic check."
 
 # Sing-mode bars (min, max): semitone span, cents off, drift in cents, head share in %.
 SING_SCALES = {"range": (0, 36), "tuning": (0, 50), "steadiness": (0, 50), "register": (0, 100)}
@@ -299,6 +318,34 @@ SING_SCALES = {"range": (0, 36), "tuning": (0, 50), "steadiness": (0, 50), "regi
 def zones(key):
     """ZONES[key], or None for a dimension without zones."""
     return ZONES.get(key)
+
+
+def floor_scale_text():
+    """The lowest-notes scale in a sentence: its own edges, not the pitch scale's."""
+    edges = {z["id"]: z for z in ZONES["pitch_floor"]["zones"]}
+    return (f"{edges['feminine']['lo']:g} Hz and up counts as {ZONE_LABELS['feminine']} for the lowest notes, "
+            f"{edges['masculine']['hi']:g} Hz and below as {ZONE_LABELS['masculine']}.")
+
+
+EXPLANATIONS["pitch_floor"] = EXPLANATIONS["pitch_floor"].format(floor_scale=floor_scale_text())
+
+
+def _problem(reason):
+    low = (reason or "").lower()
+    return next((p for p in PROBLEMS if any(w in low for w in p[0])), None)
+
+
+def fix_for(reason):
+    """One sentence on what to try about a reading that can't be judged, from the reason given."""
+    problem = _problem(reason)
+    return problem[2] if problem else DEFAULT_FIX
+
+
+def cause_of(reason):
+    """What a reading's reason comes down to, as a short noun phrase ("background noise"); the reason
+    itself when it isn't a known cause."""
+    problem = _problem(reason)
+    return problem[1] if problem else (reason or "a problem with the recording")
 
 
 def _num(value):
@@ -433,13 +480,13 @@ def _fmt(key, value):
     if key in ("pitch", "pitch_floor", "delta_f"):
         return f"{value:.0f} Hz"
     if key == "pitch_range":
-        return f"{value:.1f} semitones"
+        return f"{value:.1f} st"
     if key == "h1h2":
         return f"{value:+.1f} dB"
     if key == "cpp":
         return f"{value:.1f} dB"
     if key == "range":
-        return f"{value:.0f} semitones"
+        return f"{value:.0f} st"
     if key in ("tuning", "steadiness"):
         return f"±{value:.0f} cents"
     if key == "register":
@@ -484,7 +531,7 @@ def _details(key, value, take, profile):
     elif key == "pitch_floor":
         head = f"10th percentile of voiced f0: {value:.1f} Hz"
     elif key == "pitch_range":
-        head = f"10th–90th percentile f0 spread: {value:.1f} st"
+        head = f"10th–90th percentile f0 spread: {value:.1f} semitones"
     elif key == "delta_f":
         vtl = 35000 / (2 * value)
         head = f"ΔF (formant dispersion, F1–F4) {value:.0f} Hz ≈ apparent vocal tract length {vtl:.1f} cm"
@@ -648,17 +695,30 @@ def _difference(key, value, other):
     return value - other
 
 
+CHANGE_UNITS = {"pitch": "semitones", "pitch_floor": "semitones", "pitch_range": "semitones",
+                "delta_f": "Hz", "h1h2": "dB", "cpp": "dB"}
+
+
+def change_amount(key, diff):
+    """The size of a change in words and its unit: "1.3 semitones", "45 Hz", "4.2 dB". No sign: the
+    direction word beside it says which way."""
+    unit = CHANGE_UNITS[key]
+    return f"{abs(diff):.0f} {unit}" if unit == "Hz" else f"{abs(diff):.1f} {unit}"
+
+
 def _change_text(key, value, other, vs):
-    """{"vs", "text"} naming a change against the previous take or the baseline."""
+    """{"vs", "text", "short", "word", "amount"} naming a change against the previous take or the
+    baseline. The text says the direction in a word and the size without a sign ("Higher than your
+    last take, by 1.3 semitones"), so the number can't point the other way from the word."""
     diff = _difference(key, value, other)
     against = "your last take" if vs == "previous" else "your baseline"
-    unit = " st" if key in ("pitch", "pitch_floor", "pitch_range") else (
-        " Hz" if key == "delta_f" else " dB")
     if abs(diff) < CHANGE_MIN[key]:
-        return {"vs": vs, "text": f"About the same as {against}"}
+        text = f"About the same as {against}"
+        return {"vs": vs, "text": text, "short": text, "word": None, "amount": None}
     word = CHANGE_WORDS[key][0 if diff > 0 else 1]
-    number = f"{diff:+.1f}{unit}" if unit != " Hz" else f"{diff:+.0f}{unit}"
-    return {"vs": vs, "text": f"{_cap_first(word)} than {against} ({number})"}
+    amount = change_amount(key, diff)
+    return {"vs": vs, "text": f"{_cap_first(word)} than {against}, by {amount}",
+            "short": f"{_cap_first(word)} than {against}", "word": word, "amount": amount}
 
 
 # --- SPEAK DIMENSIONS ---
@@ -701,9 +761,9 @@ def _speak_dimension(key, take, quality, profile, previous, prev_quality):
         verb = "sits" if key in ("pitch", "pitch_floor") else "is"
         headline = f"{spec['name']} {verb} {_zone_phrase(zone)}"
         if change and not change["text"].startswith("About"):
-            headline += f", {change['text'][0].lower() + change['text'][1:].split(' (')[0]}"
+            headline += f", {change['short'][0].lower() + change['short'][1:]}"
     else:
-        headline = _cap_first(reason)
+        headline = f"{_cap_first(reason)}. {fix_for(reason)}"
     return {"key": key, "name": spec["name"], "value": value if trusted else None,
             "display": _fmt(key, value) if trusted else "—", "unit": spec["unit"],
             "position": position(key, value) if trusted else None, "zone": zone,
@@ -756,7 +816,7 @@ def _overall(dimensions):
     couldn't be judged widen it to their full span), the pulls, and a plain sentence."""
     by_key = {d["key"]: d for d in dimensions}
     trusted = {k: d for k, d in by_key.items() if d["confidence"] != "none" and WEIGHTS.get(k)}
-    empty = {"position": None, "range": None, "zone": None, "confidence": "none", "pulls": []}
+    empty = {"position": None, "range": None, "zone": None, "confidence": "none", "pulls": [], "cues": ""}
     missing = [k for k in MAJOR if k not in trusted]
     if len(trusted) < MIN_TRUSTED or missing:
         if not trusted:
@@ -796,14 +856,14 @@ def _overall(dimensions):
     return {"position": round(float(pos), 3), "range": (round(float((lo + 1) / 2), 3),
                                                          round(float((hi + 1) / 2), 3)),
             "zone": zone, "confidence": confidence, "pulls": pulls,
-            "text": _overall_text(trusted, scores, zone), "reason": None}
+            "text": _overall_text(trusted, scores, zone), "cues": _smaller_cues(trusted, scores, zone),
+            "reason": None}
 
 
 def _overall_text(trusted, scores, zone):
-    """e.g. "Pitch is in the typically feminine range; resonance is still in the overlap zone, and
-    it pulls the overall impression toward androgynous." """
+    """One sentence, e.g. "Pitch is in the typically feminine range; resonance is in the overlap zone,
+    so the overall impression stays in the overlap." """
     zp, zr = trusted["pitch"]["zone"], trusted["delta_f"]["zone"]
-    toward = {"overlap": "androgynous", "feminine": "feminine", "masculine": "masculine"}
     if zp == zr:
         text = (f"Pitch and resonance are both {_zone_phrase(zp)}, so the overall impression is "
                 f"{ZONE_LABELS[zone]}.")
@@ -812,8 +872,7 @@ def _overall_text(trusted, scores, zone):
         names = {"pitch": "pitch", "delta_f": "resonance"}
         if zone == "overlap":
             text = (f"{_cap_first(names[other])} is {_zone_phrase(trusted[other]['zone'])}; "
-                    f"{names[mover]} is still in the overlap zone, and it pulls the overall "
-                    f"impression toward {toward['overlap']}.")
+                    f"{names[mover]} is in the overlap zone, so the overall impression stays in the overlap.")
         else:
             text = (f"{_cap_first(names[other])} is {_zone_phrase(trusted[other]['zone'])} and "
                     f"carries the overall impression; {names[mover]} is in the overlap zone and "
@@ -822,13 +881,19 @@ def _overall_text(trusted, scores, zone):
         lands = ("in the overlap zone" if zone == "overlap" else f"nearer {ZONE_LABELS[zone]}")
         text = (f"Pitch is {_zone_phrase(zp)}; resonance is {_zone_phrase(zr)}. They pull in "
                 f"opposite directions, so the overall impression lands {lands}.")
+    return text
+
+
+def _smaller_cues(trusted, scores, zone):
+    """"Smaller cues: lowest notes leans masculine." for the minor readings that pull against the
+    overall zone; "" when none do. Kept apart from the overall sentence, which stays one sentence."""
     against = "neutral" if zone == "overlap" else zone
     minor = [k for k in trusted if k not in MAJOR and trusted[k]["confidence"] != "low"
              and _direction(scores[k]) not in ("neutral", against)]
-    if minor:
-        text += " Smaller cues: " + _join(
-            f"{NAMES[k].lower()} leans {_direction(scores[k])}" for k in minor) + "."
-    return text
+    if not minor:
+        return ""
+    return "Smaller cues: " + _join(f"{NAMES[k].lower()} leans {ZONE_LABELS[_direction(scores[k])]}"
+                                     for k in minor) + "."
 
 
 # --- SPEAK TIPS ---
@@ -860,13 +925,15 @@ def _floor_tip(times, f0, goal, profile):
     final = sum(d["final"] for d in shown) >= max(1, len(shown) / 2)
     where = ("" if not final else ", the end of a sentence" if len(shown) == 1 else
              ", the ends of sentences")
-    text = f"Your pitch dropped to about {lowest:.0f} Hz at {at}{where}."
+    why = f"Your pitch dropped to about {lowest:.0f} Hz at {at}{where}."
     if goal in ("feminine", "androgynous"):
-        text += (" Next take, keep the last word up: finish at the same height or with a small "
-                 "lift, and keep the breath going to the end.")
+        text = "Try keeping the last word up: finish at the same height, or with a small lift, and keep the breath going."
+    else:
+        text = "Replay these moments to hear where your pitch dips."
     moments = _merge(_moment(times, d["start"], d["end"], step) for d in shown)
-    return {"key": "pitch_floor_dips", "text": text, "moments": moments,
-            "kind": "tip" if goal else "info", "dimension": "pitch_floor"}
+    return {"key": "pitch_floor_dips", "text": text, "why": why, "moments": moments,
+            "kind": "tip" if goal else "info", "dimension": "pitch_floor",
+            "aim": {"key": "pitch_floor", "direction": 1, "try": "keep the last word up"} if goal else None}
 
 
 def _pitch_reference(goal, profile):
@@ -897,24 +964,26 @@ def _pitch_tip(times, f0, dims, goal, profile=None):
     i = int(np.nanargmin(cents))
     start, end = _window(times, i, STRETCH_S, step)
     value = float(rolled[i])
-    lead = f"Your pitch sat around {d['value']:.0f} Hz, {_zone_phrase(d['zone'])}."
+    span = _secs(start, end)
     if goal == "androgynous":
         move = "lift it a little" if up else "let it settle a little"
-        text = (f"{lead} It came closest to the middle of the overlap zone, about {value:.0f} Hz, "
-                f"at {_secs(start, end)}. Next take, {move} toward that, a small step at a time.")
+        text = f"Try to {move} toward the height you reached at {span}, a small step at a time."
+        phrase = "lift your pitch a little" if up else "let your pitch settle a little"
+        why = f"It came closest to the middle of the overlap zone there, at about {value:.0f} Hz."
     elif up:
-        where = ("inside the typically feminine range" if value >= reference
-                 else "the closest you came to the typically feminine range")
-        text = (f"{lead} It reached about {value:.0f} Hz at {_secs(start, end)}, {where}. Next "
-                "take, try starting your sentences near that height, a small step at a time, "
-                "keeping it easy.")
+        text = (f"Try starting your sentences near the height you reached at {span}, a small step at a "
+                "time, keeping it easy.")
+        phrase = "start your sentences higher"
+        where = "inside the typically feminine range" if value >= reference else "closest to it"
+        why = f"Your pitch reached about {value:.0f} Hz there, {where}."
     else:
-        where = ("inside the typically masculine range" if value <= reference
-                 else "the closest you came to the typically masculine range")
-        text = (f"{lead} It settled to about {value:.0f} Hz at {_secs(start, end)}, {where}. Next "
-                "take, let more of your speech rest near there, without pushing down.")
-    return {"key": "pitch_toward_goal", "text": text, "moments": [(start, end)], "kind": "tip",
-            "dimension": "pitch"}
+        text = f"Try letting more of your speech rest near the pitch you reached at {span}, without pushing down."
+        phrase = "let your speech rest lower"
+        where = "inside the typically masculine range" if value <= reference else "closest to it"
+        why = f"Your pitch settled to about {value:.0f} Hz there, {where}."
+    return {"key": "pitch_toward_goal", "text": text, "why": why, "moments": [(start, end)], "kind": "tip",
+            "dimension": "pitch",
+            "aim": {"key": "pitch", "direction": 1 if up else -1, "reference": float(reference), "try": phrase}}
 
 
 def _goal_zone(goal):
@@ -944,26 +1013,30 @@ def _resonance_tip(times, tracks, dims, goal):
             rounded = ", on rounded vowels like 'oo' and 'oh'"
     b_span, d_span = _secs(bright[0], bright[1]), _secs(dark[0], dark[1])
     brighter = goal == "feminine" or (goal == "androgynous" and d["zone"] == "masculine")
+    aim = None
     if goal and not brighter:
-        text = (f"Your darkest, fullest stretch was {d_span}; replay it and notice the space in "
-                f"your throat and mouth. Brightness rose most at {b_span}: next take, try keeping "
-                "that same relaxed, open space through those words.")
+        text = f"Try keeping the relaxed, open space of {d_span} through the brighter words at {b_span}."
+        why = "Your darkest, fullest stretch was the first moment; notice the space in your throat and mouth."
+        phrase = "keep the open space through brighter words"
+        aim = {"key": "delta_f", "direction": -1, "try": phrase}
         moments = [(dark[0], dark[1]), (bright[0], bright[1])]
     elif goal:
-        text = (f"Your brightest stretch was {b_span}; replay it and notice how it felt, perhaps a "
-                f"smile in the voice and the tongue a little forward. Resonance darkened most at "
-                f"{d_span}{rounded}")
-        text += (": try keeping the lips a little less rounded there." if rounded else
-                 ": next take, carry the brighter feeling into those words.")
+        text = (f"Try carrying the feeling of your brightest stretch ({b_span}) into the darker words at {d_span}"
+                + (", with the lips a little less rounded." if rounded else "."))
+        why = "Replay the bright stretch and notice how it felt, perhaps a smile in the voice and the tongue a little forward."
+        if rounded:
+            why += " The dark stretch has rounded vowels like 'oo' and 'oh'."
+        phrase = "carry the brighter feeling into darker words"
+        aim = {"key": "delta_f", "direction": 1, "try": phrase}
         moments = [(bright[0], bright[1]), (dark[0], dark[1])]
     else:
-        text = (f"Your brightest stretch was {b_span}, and resonance was darkest at {d_span}"
-                f"{rounded}. Replay both to hear the difference.")
+        text = f"Replay your brightest ({b_span}) and darkest ({d_span}) stretches to hear the difference."
+        why = f"Resonance moved most between these two{rounded}."
         moments = [(bright[0], bright[1]), (dark[0], dark[1])]
     moments = [(round(max(float(times[0]), a), 2), round(min(float(times[-1]) + step, b), 2))
                for a, b in moments]
-    return {"key": "resonance_stretches", "text": text, "moments": moments,
-            "kind": "tip" if goal else "info", "dimension": "delta_f"}
+    return {"key": "resonance_stretches", "text": text, "why": why, "moments": moments,
+            "kind": "tip" if goal else "info", "dimension": "delta_f", "aim": aim}
 
 
 def _intonation_tip(times, f0, dims, goal):
@@ -984,9 +1057,10 @@ def _intonation_tip(times, f0, dims, goal):
         return None
     start, end = _moment(times, best[1], best[2], step)
     return {"key": "intonation", "kind": "tip", "dimension": "pitch_range", "moments": [(start, end)],
-            "text": (f"Your pitch stayed fairly even ({d['value']:.1f} semitones of movement). Your "
-                     f"liveliest phrase was at {_secs(start, end)}; next take, let the important "
-                     "words rise and fall like that, as if sharing good news.")}
+            "text": (f"Try letting the important words rise and fall like your liveliest phrase ({_secs(start, end)}), "
+                     "as if sharing good news."),
+            "why": "Your pitch stayed fairly even through the rest of the take.",
+            "aim": {"key": "pitch_range", "direction": 1, "try": "let the important words rise and fall"}}
 
 
 def _frame_scores(tracks, dims):
@@ -1050,7 +1124,7 @@ def _best_moment(times, tracks, dims, goal, profile):
     start, end = _window(times, i, BEST_WINDOW_S, step)
     return {"key": "best_moment", "kind": "best", "dimension": None, "moments": [(start, end)],
             "text": f"Best moment: {_secs(start, end)}, where {what}. Replay it and notice how it "
-                    "felt, so you can find it again."}
+                    "felt, so you can find it again.", "aim": None}
 
 
 def _safety_tips(take, quality, profile, mode):
@@ -1094,6 +1168,87 @@ def _speak_tips(take, dims, goal, profile, quality):
     return tips + ([best] if best else [])
 
 
+# --- LAST TIME'S TIP ---
+
+PHRASE_START_S = 0.4        # the first words of a phrase: this many seconds from its start
+MIN_PHRASE_STARTS = 2       # phrases needed to compare how sentences start
+TIP_YES = {"pitch": 1.0, "pitch_floor": 1.0, "pitch_range": 1.5, "delta_f": 40.0}     # moved this far toward the aim:
+#                             "yes" (semitones, semitones, semitones, Hz; as CHANGE_MIN, about the take-to-take spread)
+TIP_PARTLY = 0.4            # share of that distance that counts as "partly"
+TIP_VERDICTS = ("yes", "partly", "not yet")
+
+
+def phrase_start_pitch(take):
+    """Median pitch (Hz) of the first words of the take's phrases, or None with fewer than
+    MIN_PHRASE_STARTS phrases: where sentences start."""
+    times, tracks = _tracks(take)
+    if times is None or "f0" not in tracks:
+        return None
+    f0, step = tracks["f0"], float(np.median(np.diff(times)))
+    n = max(1, round(PHRASE_START_S / step))
+    starts = []
+    for a, b in _phrases(f0, step):
+        values = f0[a:min(b, a + n)]
+        values = values[~np.isnan(values)]
+        if len(values) >= max(1, n // 4):
+            starts.append(float(np.median(values)))
+    return float(np.median(starts)) if len(starts) >= MIN_PHRASE_STARTS else None
+
+
+def _measure(take, key):
+    """The value a tip aims at, in the take: the pitch of its sentence starts (else its pitch), or the
+    summary value of the dimension. None when missing."""
+    if key == "pitch":
+        return phrase_start_pitch(take) or _num(take.get("pitch"))
+    return _num(take.get(key))
+
+
+def _moved(key, now, before):
+    """How far `now` is from `before`: semitones for the pitch dimensions, else the dimension's unit."""
+    return 12 * np.log2(now / before) if key in ("pitch", "pitch_floor") else now - before
+
+
+def _detail(key, now, before):
+    """"Your first words were 12 Hz higher." for a measured change."""
+    diff = _moved(key, now, before)
+    if abs(diff) < TIP_YES[key] * TIP_PARTLY / 2:
+        same = {"pitch": "Your first words were at about the same pitch.",
+                "pitch_floor": "Your lowest notes were about the same.",
+                "pitch_range": "Your intonation was about the same.",
+                "delta_f": "Your resonance was about the same."}
+        return same[key]
+    if key == "pitch":
+        hz = abs(now - before)
+        return f"Your first words were {hz:.0f} Hz {'higher' if diff > 0 else 'lower'}."
+    word = CHANGE_WORDS[key][0 if diff > 0 else 1]
+    return f"Your {NAMES[key].lower()} was {word}, by {change_amount(key, diff)}."
+
+
+def tip_check(prev_report, take, previous=None):
+    """Did this take move the way the last take's tip asked? {"tip": what to try, "verdict": "yes" |
+    "partly" | "not yet", "text": "Last time: ... This take: ...", "detail", "key"}, or None when the
+    previous report had no tip with a measurable aim, or the readings are missing. Compares the
+    sentence starts for a pitch tip, else the dimension's own value, with `previous` (the take the
+    report belongs to)."""
+    tip = next((t for t in (prev_report or {}).get("tips") or [] if t.get("aim")), None)
+    if tip is None or previous is None:
+        return None
+    aim = tip["aim"]
+    key = aim["key"]
+    now, before = _measure(take, key), _measure(previous, key)
+    if now is None or before is None or (key in ("pitch", "pitch_floor") and (now <= 0 or before <= 0)):
+        return None
+    toward = aim["direction"] * _moved(key, now, before)
+    need = TIP_YES[key]
+    ref = aim.get("reference")
+    reached = ref is not None and (now - ref) * aim["direction"] >= 0 > (before - ref) * aim["direction"]
+    verdict = "yes" if toward >= need or reached else "partly" if toward >= need * TIP_PARTLY else "not yet"
+    lead = {"yes": "you did.", "partly": "partly.", "not yet": "not yet."}[verdict]
+    detail = _detail(key, now, before)
+    return {"key": tip["key"], "tip": aim["try"], "verdict": verdict, "detail": detail,
+            "text": f"Last time: {aim['try']}. This take: {lead} {detail}"}
+
+
 # --- SING ---
 
 def _sing_dimensions(take, quality):
@@ -1122,7 +1277,7 @@ def _sing_dimensions(take, quality):
         lo, hi = np.percentile(voiced, [5, 95])
         span = float(12 * np.log2(hi / lo))
         add("range", span, None, f"You sang from about {_note(lo)} to {_note(hi)}",
-            f"5th–95th percentile of sung f0: {lo:.0f}–{hi:.0f} Hz ({span:.1f} st).")
+            f"5th–95th percentile of sung f0: {lo:.0f}–{hi:.0f} Hz ({span:.1f} semitones).")
     else:
         add("range", None, why or "not enough sung notes to judge", "", "")
 
@@ -1211,9 +1366,12 @@ def build_report(take, profile=None, previous=None, goal=None):
     overall = _overall(dimensions)
     issues = _issues(dimensions, quality)
     tips = _speak_tips(take, dims, goal, profile, quality)
+    last_tip = None
+    if previous and quality["tier"] != "poor":
+        last_tip = tip_check(build_report(previous, profile, None, goal), take, previous)
     return {"mode": "speak", "headline": _headline(overall, dims, quality), "overall": overall,
             "dimensions": dimensions, "tips": tips, "issues": issues, "caveat": CAVEAT,
-            "goal": goal}
+            "goal": goal, "last_tip": last_tip}
 
 
 def _headline(overall, dims, quality):
@@ -1227,7 +1385,7 @@ def _headline(overall, dims, quality):
                if d and d["change"] and d["change"]["vs"] == "previous"
                and not d["change"]["text"].startswith("About")]
     if changed:
-        text += ", " + changed[0]["change"]["text"].split(" (")[0].lower()
+        text += ", " + changed[0]["change"]["short"].lower()
     if overall["confidence"] == "low":
         text += " (low confidence)"
     return text + "."
@@ -1241,7 +1399,7 @@ def _sing_report(take, quality, profile, goal):
     tips = (tips[:MAX_TIPS - 1] + [best]) if best else tips[:MAX_TIPS]
     reason = "sing mode: singing is described by range, tuning and steadiness, not by gender"
     overall = {"position": None, "range": None, "zone": None, "confidence": "none", "pulls": [],
-               "text": "No gender placement in sing mode.", "reason": reason}
+               "text": "No gender placement in sing mode.", "cues": "", "reason": reason}
     if quality["tier"] == "poor":
         cause = quality["reasons"][0] if quality["reasons"] else "the recording is too noisy"
         headline = f"This take is hard to judge: {cause}."
@@ -1252,7 +1410,7 @@ def _sing_report(take, quality, profile, goal):
         headline = (trusted[0]["headline"] + "." if trusted else
                     "Not enough clear singing to describe this take.")
     return {"mode": "sing", "headline": headline, "overall": overall, "dimensions": dimensions,
-            "tips": tips, "issues": issues, "caveat": SING_CAVEAT, "goal": goal}
+            "tips": tips, "issues": issues, "caveat": SING_CAVEAT, "goal": goal, "last_tip": None}
 
 
 def render_text(report):
@@ -1280,3 +1438,13 @@ def render_text(report):
         lines.append(f"- {tip['text']}" + (f"  [{spans}]" if spans else ""))
     lines += ["", report["caveat"]]
     return "\n".join(lines)
+
+
+def compare_change(key, value, other):
+    """Two takes' values in words from the first's side, {"text", "same"}: "Higher by 1.3 semitones",
+    "Brighter by 45 Hz", or "About the same". No signed numbers: the word says which way."""
+    diff = _difference(key, value, other)
+    if abs(diff) < CHANGE_MIN[key]:
+        return {"text": "About the same", "same": True}
+    word = CHANGE_WORDS[key][0 if diff > 0 else 1]
+    return {"text": f"{_cap_first(word)} by {change_amount(key, diff)}", "same": False}

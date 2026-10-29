@@ -155,20 +155,23 @@ def test_card_leads_with_headline_overall_and_tips_with_moments(make_core):
     assert any(label.text() == rep["caveat"] for label in card.findChildren(Label))
 
 
-def test_poor_take_has_one_banner_and_no_bars(make_core):
+def test_poor_take_has_one_trust_line_and_no_bars(make_core):
+    from ui.components import Banner
+    from ui.takes.trust_line import TrustLine
     core = make_core()
     data = poor(core, record(core))
     card = TakeCard(core, data["uid"])
     assert card.head["tier"] == "poor" and card.quality_dot.state == "error"
-    assert card.banner is not None and len(card.findChildren(type(card.banner))) == 1
+    assert card.trust is not None and len(card.findChildren(TrustLine)) == 1 and not card.findChildren(Banner)
+    assert card.trust.view["text"].startswith("Poor recording:") and "Try" in card.trust.view["text"]
     assert "closer" in card.headline.text() or "quiet" in card.headline.text()
     assert card.metric_cards == {}
     assert not card.findChildren(MetricCard)
     assert card.summary.overall is None and card.summary.tip_rows == []
-    assert card.banner.action is not None and card.banner.action.text() == "Mic check"
+    assert card.trust.action is not None and card.trust.action.text() == "Mic check"
     heard = []
     card.mic_check_requested.connect(lambda: heard.append(1))
-    card.banner.action.click()
+    card.trust.action.click()
     assert heard == [1]
 
 
@@ -182,7 +185,10 @@ def test_untrusted_dimension_shows_a_line_not_a_bar(make_core):
     assert resonance.unavailable and resonance.bar.isHidden() and resonance.value_label.isHidden()
     assert not pitch.unavailable and not pitch.bar.isHidden()
     info = take_view.banner(card.report)
-    assert info and "delta_f" in info["affects"] and card.banner is not None
+    assert info and "delta_f" in info["affects"] and card.trust is not None
+    assert "resonance can't be judged" in card.trust.view["text"] and "delta_f" in card.trust.view["cant"]
+    assert resonance.trust_chip is not None and resonance.trust_chip.text == "Can't judge"
+    assert pitch.confidence.isHidden() and (pitch.trust_chip is None or pitch.trust_chip.text == "Rough")
 
 
 def test_moment_chip_plays_that_stretch(make_core, speaker):
@@ -224,8 +230,8 @@ def test_more_menu_actions_reach_the_core(make_core, tmp_path, monkeypatch):
     card = TakeCard(core, take["uid"])
     card._fill_menu()
     actions = {a.text(): a for a in card.menu.actions()}
-    assert {"Set as baseline", "Use as target", "Compare with…", "Label register", "Open file location",
-            "Delete…"} <= set(actions)
+    assert {"Set as baseline", "Use as target", "Label register", "Copy summary", "Export report…",
+            "Open file location", "Delete…"} <= set(actions)
     actions["Set as baseline"].trigger()
     assert core.profile.baseline and core.profile.baseline["uid"] == take["uid"]
     actions["Use as target"].trigger()

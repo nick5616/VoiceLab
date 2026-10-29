@@ -135,7 +135,7 @@ def test_speak_axis_is_fixed_and_the_readout_is_always_on_it(make_window):
     window.go("live")
     graph = window.live.view.graph
     assert graph.y_range() == (70.0, 400.0)
-    assert graph.zone_labels() == ["typically masculine", "overlap / androgynous", "typically feminine"]
+    assert graph.zone_labels() == ["typically masculine", "overlap", "typically feminine"]
     sweep = synth_vowel(np.geomspace(60, 700, int(4 * SR)), MALE_FORMANTS)
     checked = []
     frames = [0]
