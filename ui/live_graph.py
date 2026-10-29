@@ -11,17 +11,24 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QGraphicsRectItem
 
 import report
-from display import note_name, note_ticks
+from display import note_name, note_ticks, zone_word
 from live_session import HISTORY_LEN, HISTORY_SECONDS, pitch_axis
 from ui import anim, theme
 
 HISTORY_TIMES = np.linspace(-HISTORY_SECONDS, 0, HISTORY_LEN)
 SPEAK_TICKS_HZ = (80, 100, 125, 150, 180, 220, 260, 300, 350)   # Hz; inside the 70-400 axis, so none is clipped
+SPEAK_TICKS_SHORT_HZ = (100, 150, 220, 300)     # Hz; on a graph too short for nine labels
+SHORT_GRAPH_PX = 220            # px: a graph shorter than this gets the short tick set
 ZONE_ALPHA = {"dark": 78, "light": 120}    # zone washes behind the line (0-255): the line stays on top
 AXIS_WIDTH = 92                 # px for "100 Hz  G2"
 LINE_WIDTH = 2.6                # px
 DOT_SIZE = 11                   # px: the readout's pitch at "now"
 GLIDE_MS = 420                  # the sing axis glides to a new range this long
+X_RANGE = (-HISTORY_SECONDS - 0.5, 0.6)  # s: a little room either side, so the "8" and "now" ticks and the dot are not cut
+TIME_TICKS = [(-8, "8"), (-6, "6"), (-4, "4"), (-2, "2"), (0, "now")]   # the time axis: seconds ago, then "now"
+TIME_AXIS_LABEL = "seconds ago"
+BAND_ALPHA = {False: 12, True: 56}      # the target band's wash (0-255): brighter while the voice is in range
+BAND_EDGE_WIDTH = {False: 1.5, True: 2.6}   # px
 
 
 def hz_ticks(values, lo_hz, hi_hz):
@@ -62,8 +69,11 @@ class LivePitchGraph(pg.PlotWidget):
         self.off_scale = None               # "above" / "below" when the readout's pitch is off the axis
         self.readout_hz = None
         self.zone_items = []
-        self.setXRange(-HISTORY_SECONDS, 0, padding=0)
-        self.plotItem.getAxis("bottom").setLabel("")
+        self.setXRange(*X_RANGE, padding=0)
+        self.plotItem.getAxis("bottom").setTicks([TIME_TICKS, []])
+        self.plotItem.getAxis("bottom").setLabel(TIME_AXIS_LABEL)
+        self.in_range = False               # the voice is inside its target right now (the band glows)
+        self.short_ticks = None             # the speak axis uses the short tick set (a short graph)
         self.plotItem.showGrid(x=False, y=False)
         self.target_band = pg.LinearRegionItem(orientation="horizontal", movable=False)
         self.target_band.setZValue(-5)
@@ -95,6 +105,11 @@ class LivePitchGraph(pg.PlotWidget):
 
     # --- axis ---
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "mode", None) == "speak" and self.shown_hz and (self.height() < SHORT_GRAPH_PX) != self.short_ticks:
+            self._set_axis(self.shown_hz)
+
     def y_range(self):
         """(low Hz, high Hz) as drawn now."""
         return self.shown_hz
@@ -115,7 +130,9 @@ class LivePitchGraph(pg.PlotWidget):
         self.setYRange(lo, hi, padding=0)
         left = self.getAxis("left")
         if self.mode == "speak":
-            left.setTicks(hz_ticks(SPEAK_TICKS_HZ, *hz))
+            short = self.height() < SHORT_GRAPH_PX
+            self.short_ticks = short
+            left.setTicks(hz_ticks(SPEAK_TICKS_SHORT_HZ if short else SPEAK_TICKS_HZ, *hz))
         else:
             left.setTicks(note_ticks(*hz))
         self._place_zone_labels()
@@ -147,12 +164,12 @@ class LivePitchGraph(pg.PlotWidget):
             hi = hi_hz if z is spec["zones"][-1] else min(hi_hz, z["hi"])
             if hi <= lo:
                 continue
-            rect = QGraphicsRectItem(QRectF(-HISTORY_SECONDS, np.log2(lo), HISTORY_SECONDS, np.log2(hi) - np.log2(lo)))
+            rect = QGraphicsRectItem(QRectF(X_RANGE[0], np.log2(lo), X_RANGE[1] - X_RANGE[0], np.log2(hi) - np.log2(lo)))
             rect.setPen(pg.mkPen(None))
             rect.setZValue(-20)
             rect.zone = z
             self.addItem(rect, ignoreBounds=True)
-            label = pg.TextItem(z["label"], anchor=(0, 0.5))
+            label = pg.TextItem(zone_word(z["id"], short=True) or z["label"], anchor=(0, 0.5))
             label.setZValue(-10)
             label.zone = z
             label.span = (lo, hi)
@@ -168,7 +185,7 @@ class LivePitchGraph(pg.PlotWidget):
     def _place_zone_labels(self):
         for _, label in self.zone_items:
             lo, hi = label.span
-            label.setPos(-HISTORY_SECONDS + 0.12, (np.log2(lo) + np.log2(hi)) / 2)
+            label.setPos(X_RANGE[0] + 0.12, (np.log2(lo) + np.log2(hi)) / 2)
 
     def _color_zones(self):
         t = theme.current()
@@ -194,7 +211,7 @@ class LivePitchGraph(pg.PlotWidget):
         self.target_label.setVisible(bool(target_hz))
         if target_hz:
             self.target_band.setRegion([np.log2(v) for v in target_hz])
-            self.target_label.setPos(-0.1, np.log2(max(target_hz)))
+            self.target_label.setPos(X_RANGE[1] - 0.05, np.log2(max(target_hz)))
 
     # --- drawing a snapshot ---
 
@@ -232,6 +249,13 @@ class LivePitchGraph(pg.PlotWidget):
         self.marker.setPos(-0.05, np.log2(hi if hz > hi else lo))
         self.marker.show()
 
+    def set_in_range(self, on):
+        """Make the target band glow while the voice is inside the target."""
+        on = bool(on)
+        if on != self.in_range:
+            self.in_range = on
+            self._style_band()
+
     def in_view(self, hz):
         """True if `hz` sits inside the axis as drawn."""
         return self.shown_hz[0] <= hz <= self.shown_hz[1]
@@ -254,22 +278,25 @@ class LivePitchGraph(pg.PlotWidget):
 
     # --- theme ---
 
+    def _style_band(self):
+        green = QColor(theme.current()["on_target"])
+        fill = QColor(green)
+        fill.setAlpha(BAND_ALPHA[self.in_range])
+        edge = QColor(green)
+        edge.setAlpha(255 if self.in_range else 200)
+        self.target_band.setBrush(pg.mkBrush(fill))
+        for line in self.target_band.lines:
+            line.setPen(pg.mkPen(edge, width=BAND_EDGE_WIDTH[self.in_range]))
+
     def restyle(self, *_):
         t = theme.current()
         self.setBackground(t["surface"])
         style_plot(self.plotItem)
-        self.getAxis("bottom").setStyle(showValues=not self.compact)
+        self.getAxis("bottom").setStyle(showValues=True)
         self.curve.setPen(pg.mkPen(t.series["pitch"], width=LINE_WIDTH))
         self.dot.setBrush(pg.mkBrush(t["accent"]))
         self.dot.setPen(pg.mkPen(t["surface"], width=2))
-        green = QColor(t["on_target"])
-        fill = QColor(green)
-        fill.setAlpha(12)
-        edge = QColor(green)
-        edge.setAlpha(200)
-        self.target_band.setBrush(pg.mkBrush(fill))
-        for line in self.target_band.lines:
-            line.setPen(pg.mkPen(edge, width=1.5))
+        self._style_band()
         self.baseline_line.setPen(pg.mkPen(t["text_secondary"], width=1.2, style=Qt.PenStyle.DashLine))
         self.baseline_line.label.setColor(QColor(t["text_secondary"]))
         self.baseline_line.label.setFont(theme.font("caption"))

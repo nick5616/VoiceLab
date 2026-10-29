@@ -152,7 +152,7 @@ def test_note_is_readable_and_held_through_short_gaps(tmp_path):
         text = live.update(frame(f0=f0))["note"]["text"]
         if not texts or texts[-1] != text:
             texts.append(text)
-    assert len(texts) <= 5 / 0.2 + 2                                # at most ~5 changes a second
+    assert len(texts) <= 80                 # a 19 st glide: a change per 0.25 st at most (spec 07), not one per frame
     assert "—" not in texts[1:]                                     # a 0.2 s gap holds the note
 
 
@@ -347,7 +347,8 @@ def test_live_cards_are_plain_and_follow_the_mode(session):
     cards = live_session.live_cards(snapshot, session.profile)
     assert [c["key"] for c in cards] == ["pitch", "delta_f", "h1h2", "cpp", "pitch_range", "register"]
     titles = {c["key"]: c["title"] for c in cards}
-    assert titles["delta_f"] == "Brightness (resonance)" and titles["h1h2"] == "Weight"
+    assert titles["delta_f"] == "Resonance" and titles["h1h2"] == "Weight"      # display.NAMES (audit A-052)
+    assert titles["pitch"] == "Pitch · now" and titles["pitch_range"] == "Intonation · last 6 s"
     assert all("H1" not in c["title"] and "CPP" not in c["title"] for c in cards)      # jargon in the help
     assert "H1*–H2*" in live_session.CARD_HELP["h1h2"] and "CPP" in live_session.CARD_HELP["cpp"]
     pitch = cards[0]
@@ -368,7 +369,7 @@ def test_card_text_is_throttled_like_the_titles(tmp_path):
         clock[0] += 0.025
         snapshot = live.update(frame(f0=150 + i))
         shown.append(snapshot["metrics"]["pitch"]["shown"])
-    assert len(set(shown)) <= 4                                    # at most every 0.2 s
+    assert len(set(shown)) <= 8      # every 0.2 s, or sooner when the voice has moved 0.25 st (spec 07: the readout tracks)
 
 
 def test_noisy_readings_go_to_one_banner(session):
@@ -411,3 +412,204 @@ def test_speak_axis_never_moves_and_sing_axis_has_hysteresis():
     assert wider[0] == axis[0] and wider[1] > 600 * 2 ** (1.9 / 12)
     default = live_session.pitch_axis("sing")
     assert abs(default[0] - 116.5) < 1 and abs(default[1] - 587.3) < 1     # C3-C5, padded
+
+
+# --- LISTENING STATE, STALE READINGS, IN-RANGE SESSION, ONE "NOW" (phase 11 / 03) ---
+
+import synth  # noqa: E402
+
+FRAMES_PER_SECOND = int(round(1 / UPDATE_INTERVAL))
+SILENT = dict(f0=np.nan, delta_f=np.nan, h1h2=np.nan, cpp=np.nan, ring=np.nan, level=-75.0)
+
+
+def voiced(seconds, **kwargs):
+    return [frame(**kwargs)] * int(seconds * FRAMES_PER_SECOND)
+
+
+def silent(seconds, **kwargs):
+    return [dict(frame(**dict(SILENT, **{k: v for k, v in kwargs.items() if k != "too_quiet"})),
+                 **({"too_quiet": True} if kwargs.get("too_quiet") else {}))] * int(seconds * FRAMES_PER_SECOND)
+
+
+def test_one_pitch_everywhere_on_every_frame(session):
+    """The readout, the Pitch card and the plane's dot are the same number (audit A-002, lab B1)."""
+    for f0 in np.geomspace(100, 260, 160):
+        snapshot = session.update(frame(f0=float(f0)))
+        hz = snapshot["note"]["hz"]
+        card = next(c for c in live_session.live_cards(snapshot, session.profile) if c["key"] == "pitch")
+        assert hz is not None and card["text"] == f"{hz:.0f} Hz"
+        assert snapshot["plane"]["f0"] == hz and snapshot["metrics"]["pitch"]["value"] == hz
+
+
+def test_state_follows_the_voice(session):
+    assert session.snapshot()["state"] == "silent"                        # open mic, nothing said yet
+    assert feed_frames(session, voiced(1.0))["state"] == "hearing"
+    assert feed_frames(session, silent(0.3))["state"] == "hearing"        # a short gap holds
+    assert feed_frames(session, silent(0.4))["state"] == "silent"
+    session.signal_age = lambda: 3.0                                      # the mic stopped delivering audio
+    assert session.update(frame())["state"] == "no_signal"
+    session.signal_age = lambda: None                                     # no heartbeat to ask: never "no signal"
+    assert session.update(frame())["state"] == "hearing"
+
+
+def test_a_quiet_voice_is_too_quiet_and_silence_is_not(session):
+    audio = np.concatenate([synth.room_noise(2.0, dbfs=-75), synth.mix(synth.at_level(synth.steady(150, 4.0), -52),
+                                                                         synth.room_noise(4.0, dbfs=-75))])
+    seen = []
+    for i in range(0, len(audio) - HOP + 1, HOP):
+        session.engine.feed(audio[i:i + HOP])
+        seen.append(session.update(session.engine.analyzer.analyze(session.engine.latest_window()))["state"])
+    onset = int(2.0 / UPDATE_INTERVAL)
+    assert set(seen[:onset]) == {"silent"}                                 # room noise alone stays silent
+    assert "too_quiet" in seen[onset:onset + int(2.0 / UPDATE_INTERVAL)]    # within 2 s of the voice
+    assert feed_frames(session, silent(2.0, level=-30.0))["state"] == "silent"   # loud unpitched noise is not a quiet voice
+    assert feed_frames(session, silent(2.0, too_quiet=True))["state"] == "too_quiet"   # the analyser's own flag counts
+
+
+def test_readings_age_then_empty_in_silence(session):
+    """Stale after 1.5 s (muted), empty after 5 s: no card keeps a voice's number forever (audit A-001)."""
+    snapshot = feed_frames(session, voiced(2.5))
+    assert not any(r["stale"] for r in snapshot["metrics"].values()) and snapshot["metrics"]["pitch"]["age"] == 0
+    snapshot = feed_frames(session, silent(1.6))
+    for key in ("pitch", "delta_f", "h1h2", "cpp"):
+        assert snapshot["metrics"][key]["stale"] and snapshot["metrics"][key]["value"] is not None
+    assert snapshot["metrics"]["level"]["stale"] is False                  # the input level is always current
+    card = next(c for c in live_session.live_cards(snapshot, session.profile) if c["key"] == "cpp")
+    assert card["stale"] and abs(card["age"] - 1.6) < 0.1 and live_session.age_text(card["age"]) == "last heard 2 s ago"
+    snapshot = feed_frames(session, silent(3.6))
+    assert all(snapshot["metrics"][k]["value"] is None for k in ("pitch", "delta_f", "h1h2", "cpp", "pitch_range"))
+    cards = live_session.live_cards(snapshot, session.profile)
+    assert all(c["text"] == "—" and c["unavailable"] == "listening…" for c in cards if c["key"] != "register")
+
+
+def test_held_time_in_range_and_the_session_share(tmp_path):
+    clock = [0.0]
+    ticking = lambda: clock.__setitem__(0, clock[0] + UPDATE_INTERVAL) or clock[0]     # one frame per call
+    live = LiveSession(Profile(tmp_path / "home"), "speak", clock=ticking)
+    live.text_interval = 0
+    live.set_targets({"pitch": [120.0, 160.0], "delta_f": [900.0, 1100.0]})
+    snapshot = feed_frames(live, voiced(3.0, f0=140.0, delta_f=1000.0))
+    assert snapshot["note"]["on_target"] and 1.5 < snapshot["held_seconds"] <= 3.0
+    longer = feed_frames(live, voiced(2.0, f0=140.0, delta_f=1000.0))
+    assert longer["held_seconds"] > snapshot["held_seconds"] + 1.9         # it keeps counting
+    snapshot = feed_frames(live, voiced(4.0, f0=300.0, delta_f=1000.0))    # out of range: the stretch ends
+    assert snapshot["held_seconds"] == 0 and not snapshot["note"]["on_target"]
+    share = snapshot["in_range_share"]
+    assert 0.3 < share < 0.7 and 0.3 < snapshot["session"]["last_minute_share"] < 0.7   # about 5 s of 9
+    assert "In range" in snapshot["session"]["line"] and "of the last minute" in snapshot["session"]["line"]
+    assert snapshot["session"]["trend"]["kind"] == "in_range" and snapshot["session"]["trend"]["values"]
+    live.reset_session()
+    assert live.snapshot()["in_range_share"] is None
+
+
+def test_without_a_target_the_session_says_so_and_trends_pitch(session):
+    snapshot = feed_frames(session, voiced(2.0, f0=150.0))
+    assert snapshot["held_seconds"] == 0 and snapshot["in_range_share"] is None
+    assert snapshot["session"]["has_target"] is False and snapshot["session"]["line"] == live_session.TARGET_PROMPT
+    trend = snapshot["session"]["trend"]
+    assert trend["kind"] == "pitch" and abs(trend["values"][-1] - 150) < 2
+
+
+def test_the_share_compares_the_first_minutes_with_now(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_session, "FIRST_FRAMES", 20 * FRAMES_PER_SECOND)      # "the first minutes" shortened to 20 s
+    live = LiveSession(Profile(tmp_path / "home"), "speak")
+    live.text_interval = 0
+    live.set_targets({"pitch": [120.0, 160.0]})
+    feed_frames(live, voiced(20.0, f0=300.0))
+    snapshot = feed_frames(live, voiced(30.0, f0=140.0))
+    assert snapshot["session"]["first_share"] == 0.0 and snapshot["session"]["last_minute_share"] > 0.3
+    assert "was 0% in your first 5 minutes" in snapshot["session"]["line"]
+
+
+def test_coach_respects_the_goal_and_shows_what_to_try(tmp_path):
+    def line_for(goal):
+        profile = Profile(tmp_path / f"home-{goal}")
+        profile.voice_goal = goal
+        live = LiveSession(profile, "speak")
+        live.text_interval = 0
+        feed_frames(live, voiced(8.0, f0=150.0, cpp=22.0))                # flat pitch, a good input
+        return live.coach_text()
+    line, full = line_for("feminine")
+    assert "livelier" in full and "Try" in line                           # what happened, then what to try
+    for goal in (None, "masculine"):                                      # exploring and masculine: no push to more melody
+        line, full = line_for(goal)
+        assert not any(w in full for w in ("livelier", "rise and fall", "good news"))
+    flat = {"pitch": 150.0, "pitch_range": 1.0}
+    assert coach.advice(flat, {}, goal="masculine") == [m for m in coach.advice(flat, {}) if m["key"] != "flat_intonation"]
+
+
+def test_coach_never_names_a_reading_the_mode_has_no_card_for():
+    pressed = {"key": "possible_pressing", "text": "Your pitch, weight and ring all went up together in this take. "
+                                                    "That can mean some squeezing. Try a loose sigh."}
+    speak = LiveSession._plain_tip(pressed, "speak")
+    assert "ring" not in speak.lower() and speak.startswith("Your pitch and voice weight") and "squeezing" in speak
+    assert LiveSession._plain_tip(dict(pressed, key="other"), "speak") == ""      # no rewrite: left out
+    resonance = {"key": "cant_judge", "text": "I can't judge your brightness (resonance) in this take."}
+    assert LiveSession._plain_tip(resonance, "sing") == ""
+    assert "resonance" in LiveSession._plain_tip(resonance, "speak")
+    assert live_session.coach_line("A happened. Then B. Try C. Try D.") == "A happened. Try C."
+    assert live_session.coach_line("Only one.") == "Only one."
+
+
+def test_cards_say_the_word_first_and_the_number_second(session):
+    snapshot = feed_frames(session, voiced(2.0, h1h2=-1.9, cpp=29.7, delta_f=1100))
+    cards = {c["key"]: c for c in live_session.live_cards(snapshot, session.profile)}
+    assert (cards["h1h2"]["text"], cards["h1h2"]["number"]) == ("Heavier", "-1.9 dB")
+    assert (cards["cpp"]["text"], cards["cpp"]["number"]) == ("Clear", "29.7 dB")
+    assert cards["pitch"]["text"] == "140 Hz" and cards["pitch"]["number"] == "Masculine"      # the zone, in the sheet's short word
+    assert cards["delta_f"]["title"] == "Resonance" and cards["register"]["text"] in ("Chest voice", "Mix", "Head voice")
+    assert live_session.card_words("pitch_range", dict(value=4.3, position=4.3 / 12)) == ("Moderate", "4.3 semitones")
+    assert live_session.card_words("pitch_range", dict(value=1.0, position=1 / 12))[0] == "Flat"
+    assert cards["h1h2"]["trust"] == "medium" and cards["h1h2"]["trust_word"] == "Rough"     # weight is a rough guide
+    assert cards["pitch"]["trust"] == "high" and cards["pitch"]["trust_word"] == "Reliable"
+    assert not any(c["text"].endswith((" dB", " st")) for c in cards.values())    # never a bare unit as the headline
+
+
+def test_an_input_problem_shows_on_the_cards_it_touches(session):
+    feed_frames(session, voiced(1.0))
+    session.update(dict(frame(), clipped=True))
+    snapshot = feed_frames(session, voiced(0.2))
+    cards = {c["key"]: c for c in live_session.live_cards(snapshot, session.profile)}
+    assert snapshot["banner"] and cards["cpp"]["trust"] == "medium" and "clipping" in cards["cpp"]["trust_reason"]
+    assert cards["pitch"]["trust"] == "high"                               # clipping doesn't touch the pitch
+
+
+def test_state_strip_text_differs_for_every_state():
+    texts = {live_session.state_strip(s)["text"] for s in ("no_signal", "silent", "too_quiet", "hearing")}
+    assert len(texts) == 4 and live_session.state_strip("hearing")["kind"] == "success"
+    assert live_session.state_strip("hearing", recording=True)["state"] == "recording"
+    assert live_session.state_strip("hearing", mic_state="error")["state"] == "no_signal"   # a lost mic wins
+    assert live_session.state_strip("silent", mic_state="lost", recording=True)["kind"] == "error"
+
+
+def test_note_in_words_and_the_sing_prompt():
+    assert live_session.note_words(220.0) == "A3, right on"
+    assert live_session.note_words(226.0) == "A3, 47 cents sharp"
+    assert live_session.note_words(214.0) == "A3, 48 cents flat"
+    assert live_session.sing_prompt(None) == "Sing any note" and live_session.sing_prompt(57) == "Sing A3"
+
+
+def test_the_legend_explains_the_green_outline_and_the_baseline(tmp_path):
+    profile = Profile(tmp_path / "home")
+    assert live_session.legend_text(profile) == ""
+    profile.targets = {"pitch": [120.0, 160.0]}
+    assert live_session.legend_text(profile) == "Green outline = your target range"
+    profile.baseline = {"pitch": 150.0, "recorded": "2026-10-23 09:20"}
+    assert live_session.legend_text(profile) == "Green outline = your target range · dashed line = your baseline (Fri 23 Oct)"
+
+
+def test_next_step_for_the_dashboard():
+    assert live_session.next_step(0)["action"] == "record" and live_session.next_step(3)["action"] == "practice"
+    assert live_session.next_step(3, recording=True)["action"] is None
+
+
+def test_readout_tracks_a_moving_voice_within_a_quarter_semitone(tmp_path):
+    clock = [0.0]
+    live = LiveSession(Profile(tmp_path / "home"), "speak", clock=lambda: clock.__setitem__(0, clock[0] + UPDATE_INTERVAL) or clock[0])
+    track, worst = [], 0.0
+    for n in range(160):
+        track.append(150 * 2 ** (np.sin(n / 12) * 3 / 12))              # +-3 st swings, like speech
+        hz = live.update(frame(f0=track[-1]))["note"]["hz"]
+        median = np.median(track[-int(live_session.NOTE_WINDOW_SECONDS / UPDATE_INTERVAL):])
+        worst = max(worst, abs(12 * np.log2(hz / median)))
+    assert worst < live_session.NOTE_JUMP_SEMITONES + 0.01              # sample-and-hold was up to ~1.1 st off

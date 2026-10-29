@@ -322,3 +322,173 @@ def test_closing_the_mic_check_midway_discards_the_recording(app):
     assert engine.capturing
     dialog.reject()
     assert not engine.capturing and dialog.result is None
+
+
+# --- ONE "NOW", THE LISTENING STATE, STALE CARDS, THE SHORT-WINDOW LAYOUT (phase 11 / 03) ---
+
+SILENT = dict(f0=np.nan, delta_f=np.nan, h1h2=np.nan, cpp=np.nan, ring=np.nan, level=-75.0)
+SECOND = int(round(1 / UPDATE_INTERVAL))
+
+
+def number_in(text):
+    import re
+    return float(re.search(r"(\d+(?:\.\d+)?)\s*Hz", text).group(1))
+
+
+def test_the_readout_the_card_the_dot_and_the_plane_show_one_pitch(panel):
+    """Lab B1 as a test: on every frame the same Hz everywhere, or none at all (audit A-002)."""
+    panel.show_view("plane")
+    for f0 in np.geomspace(100, 300, 120):
+        show(panel, frame(f0=float(f0)))
+        readout, card = number_in(panel.note_label.text()), number_in(panel.cards.cards["pitch"].value.text())
+        assert round(readout) == round(card)
+        x, y = panel.graph.dot.getData()
+        assert abs(2 ** y[0] - readout) < 1
+        ys = panel.plane.current.getData()[1]
+        if ys is not None and len(ys):                          # resonance isn't judged above about 230 Hz: no dot then
+            assert abs(2 ** ys[0] - readout) < 1
+
+
+def test_listening_states_look_different(panel):
+    seen = {}
+    seen["silent"] = (show(panel, frame(**SILENT))["state"], panel.readout.state_chip.text, panel.note_label.text())
+    show(panel, frame())
+    seen["hearing"] = (panel.core.live.state, panel.readout.state_chip.text, panel.note_label.text())
+    panel.core.live.signal_age = lambda: 5.0
+    show(panel, frame(**SILENT))
+    seen["no_signal"] = (panel.core.live.state, panel.readout.state_chip.text, panel.note_label.text())
+    panel.core.live.signal_age = lambda: None
+    panel.core.live.last_voiced_at -= 10          # the held pitch has long gone (the readout clock is real time)
+    feed_frames(panel, [frame(**SILENT)] * (4 * SECOND))
+    snapshot = feed_frames(panel, [frame(**dict(SILENT, level=-55.0))] * (3 * SECOND))     # sound that never became a pitch
+    seen["too_quiet"] = (snapshot["state"], panel.readout.state_chip.text, panel.note_label.text())
+    assert [v[0] for v in seen.values()] == ["silent", "hearing", "no_signal", "too_quiet"]
+    assert len({v[1] for v in seen.values()}) == 4             # four different strips
+    assert len({v[2] for v in seen.values()}) == 4             # and four different readouts: the number or the words
+    assert seen["hearing"][2].endswith("Hz") and seen["silent"][2] == "Say something"
+    assert panel.readout.state_chip.kind == "warning"
+
+
+def test_in_range_shows_a_counting_chip_and_a_glowing_band(panel):
+    panel.core.set_targets({"pitch": [130, 150], "delta_f": [1100, 1200]})
+    first = feed_frames(panel, [frame(f0=140, delta_f=1150)] * (2 * SECOND))
+    assert panel.readout.held_chip.isHidden() is False and panel.readout.held_chip.text.startswith("In range")
+    assert panel.graph.in_range and panel.graph.target_band.brush.color().alpha() > 12
+    second = feed_frames(panel, [frame(f0=140, delta_f=1150)] * (2 * SECOND))
+    assert second["held_seconds"] > first["held_seconds"] + 1.5
+    assert panel.readout.held_chip.text != f"In range {first['held_seconds']:.0f} s"          # it counts up
+    feed_frames(panel, [frame(f0=300, delta_f=1150)] * (4 * SECOND))
+    assert panel.readout.held_chip.isHidden() and not panel.graph.in_range
+    assert "of the last minute" in panel.session_row.line.text()
+
+
+def test_cards_go_muted_when_the_voice_stops_then_empty(panel):
+    feed_frames(panel, [frame(cpp=29.0)] * (2 * SECOND))
+    card = panel.cards.cards["cpp"]
+    assert card.value.tone == "primary" and card.note.text() == "Reliable"
+    feed_frames(panel, [frame(**SILENT)] * int(1.7 * SECOND))
+    assert card.value.tone == "muted" and card.note.text().startswith("last heard") and card.text == "Clear"
+    assert card.fade.opacity() < 1
+    feed_frames(panel, [frame(**SILENT)] * (4 * SECOND))
+    assert card.text == "—" and card.note.text() == "listening…"
+
+
+def test_words_come_before_numbers_on_the_cards(panel):
+    feed_frames(panel, [frame(h1h2=-1.9, cpp=29.7)] * 40)
+    weight, clarity = panel.cards.cards["h1h2"], panel.cards.cards["cpp"]
+    assert (weight.text, weight.number.text()) == ("Heavier", "-1.9 dB")
+    assert (clarity.text, clarity.number.text()) == ("Clear", "29.7 dB")
+    assert panel.cards.cards["delta_f"].name.text() == "Resonance"
+    assert panel.cards.cards["pitch_range"].name.text() == "Intonation · last 6 s"
+
+
+def test_the_graph_says_what_its_time_axis_is(panel):
+    axis = panel.graph.getAxis("bottom")
+    assert axis.labelText == "seconds ago" and axis.style["showValues"]
+    assert [text for _, text in axis._tickLevels[0]] == ["8", "6", "4", "2", "now"]
+
+
+def test_the_spectrum_and_the_plane_explain_themselves(panel):
+    panel.show_view("spectrum")
+    assert not panel.spectrum_caption.isHidden() and "Brighter colour = louder" in panel.spectrum_caption.text()
+    panel.show_view("pitch")
+    assert panel.spectrum_caption.isHidden()
+    assert "ΔF" not in panel.plane.getAxis("bottom").labelText and "Resonance" in panel.plane.getAxis("bottom").labelText
+    assert [label.toPlainText() for _, _, label in panel.plane.regions] == ["Masculine", "Feminine"]
+    for number in range(1, 8):                                   # seven takes: only the newest three are named
+        panel.plane.add_take(number, 140 + 10 * number, 1000 + 20 * number)
+    assert sorted(n for n, (_, _, label) in panel.plane.take_points.items() if label.isVisible()) == [5, 6, 7]
+
+
+def test_sing_mode_has_no_speech_leftovers(panel):
+    panel.core.set_targets({"pitch": [130, 150]})
+    panel.core.profile.baseline = {"pitch": 140.0, "recorded": "2026-10-23 09:20"}
+    panel.apply_mode("speak")
+    assert panel.graph.baseline_line.isVisible() and panel.legend.text() != ""
+    panel.core.set_mode("sing")
+    feed_frames(panel, [frame(f0=220.0)] * 40)
+    assert not panel.graph.baseline_line.isVisible() and not panel.graph.target_band.isVisible()
+    assert panel.legend.text() == ""
+    assert panel.phrase.label.text() == "Your note" and panel.phrase.text.text() == "Sing any note"
+    assert panel.phrase.next_btn.isHidden()
+    panel.core.set_mode("speak")
+    feed_frames(panel, [frame()] * 2)
+    assert panel.phrase.label.text() == "Try saying" and not panel.phrase.next_btn.isHidden()
+
+
+# --- THE SCREENS AT 1280x720 ---
+
+def card_rects(live):
+    from PyQt6.QtCore import QPoint
+    out = {}
+    for key, card in live.cards.cards.items():
+        if not card.isHidden():
+            top = card.mapTo(live, QPoint(0, 0))
+            out[key] = (top.y(), top.y() + card.height())
+    return out
+
+
+def test_every_live_card_fits_on_a_720p_live_screen(make_window):
+    window = make_window()
+    window.show()
+    window.resize(1280, 720)
+    window.go("live")
+    QApplication.processEvents()
+    audio = voice(2.0)
+    for i in range(0, len(audio) - HOP + 1, HOP):
+        window.engine.feed(audio[i:i + HOP])
+        window.engine.publish(window.engine.analyzer.analyze(window.engine.latest_window()))
+    QApplication.processEvents()
+    view = window.live.view
+    area = view.parentWidget().parentWidget()                  # the scroll area's viewport
+    assert view.compact
+    assert area.verticalScrollBar().maximum() == 0 and not area.verticalScrollBar().isVisible()    # nothing to scroll to
+    bottom = max(b for _, b in card_rects(view).values())
+    assert bottom <= area.viewport().height()
+    assert len(card_rects(view)) == 6
+    window.resize(1920, 1080)
+    QApplication.processEvents()
+    assert not view.compact
+
+
+def test_the_dashboard_is_today_not_a_second_live_screen(make_window):
+    from ui.live_cards import LiveCards
+    from ui.live_graph import LivePitchGraph
+    from ui.live.strip import LiveStrip
+    window = make_window()
+    window.show()
+    dash = window.dashboard
+    assert not dash.findChildren(LivePitchGraph) and not dash.findChildren(LiveCards)
+    assert isinstance(dash.live, LiveStrip) and dash.session.title_label.text()
+    assert dash.live.title_label.text() == "Right now"
+    window.on_frame(frame())                                   # a strip shows the state and the pitch only
+    assert "Hz" in dash.live.note_label.text() and dash.live.readout.state_chip.text == "Hearing you"
+    window.resize(1280, 720)
+    QApplication.processEvents()
+    assert dash.recent.limit == 3 and dash.progress.isHidden()
+    window.resize(1920, 1080)
+    QApplication.processEvents()
+    assert dash.recent.limit == 6 and not dash.progress.isHidden()
+    from PyQt6.QtWidgets import QLabel
+    texts = " ".join(label.text() for label in dash.findChildren(QLabel))
+    assert "Try saying" not in texts

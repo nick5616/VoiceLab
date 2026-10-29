@@ -25,12 +25,13 @@ CLICK_CURSORS = {Qt.CursorShape.PointingHandCursor, Qt.CursorShape.WhatsThisCurs
 TEXT_CLASSES = (QLabel, QAbstractButton, QLineEdit, QComboBox)
 SKIP_CLASSES = ("QScrollBar", "QFocusFrame", "QRubberBand", "QSizeGrip", "QToolButton_viewport")
 # Containers whose class says what time a reading belongs to (the evals read it as the "context").
-CONTEXTS = {"LiveView": "now", "LatestTakePanel": "last_take", "TakeCard": "take", "RecentTakes": "recent",
+CONTEXTS = {"LiveView": "now", "LiveStrip": "now", "LatestTakePanel": "last_take", "TakeCard": "take", "RecentTakes": "recent",
             "ProgressScreen": "progress", "ProgressMini": "progress", "ExerciseView": "now",
             "VowelCheck": "now", "VoiceMapView": "map", "_RecordingPanel": "now", "ReadAlouds": "now",
             "Phrases": "now"}
 # (owner class, attribute) -> role: what quantity a widget shows, for the truth evals.
-ROLES = {("LiveView", "note_label"): "readout.pitch", ("LiveView", "note_name"): "readout.note",
+ROLES = {("LiveStrip", "note_label"): "readout.pitch", ("LiveStrip", "note_name"): "readout.note",
+         ("LiveView", "note_label"): "readout.pitch", ("LiveView", "note_name"): "readout.note",
          ("LiveView", "coach_label"): "coach", ("LiveView", "graph"): "graph.pitch",
          ("LiveView", "plane"): "plane", ("LiveView", "spectrum"): "spectrum",
          ("ExerciseView", "cents_label"): "readout.tuning", ("TopBar", "status"): "status_line",

@@ -70,15 +70,16 @@ def record_take(window, audio):
 
 
 def cards(window):
-    return window.dashboard.live.cards.cards
+    return window.live.view.cards.cards
 
 
 def test_live_cards_and_the_banner(make_window):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.live.text_interval = 0
     play(window, np.concatenate([VOICE, silence(1.2), VOICE, silence(1.2), VOICE]))
     assert "Hz" in cards(window)["delta_f"].text
-    assert "dB" in cards(window)["cpp"].text
+    assert "dB" in cards(window)["cpp"].number.text()           # the word first ("Clear"), the number second
     assert window.core.live.input["snr"] is not None                # the pauses were heard
     assert window.banner.isHidden()
     play(window, np.clip(VOICE * 4, -1, 1)[:int(0.3 * SR)])
@@ -239,12 +240,13 @@ def test_shift_and_target(make_window):
 
 def test_layout_fits_and_reflows(make_window):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.show()
     for size in ((1920, 1080), (1280, 720)):
         window.resize(*size)
         QApplication.processEvents()
         assert (window.width(), window.height()) == size
-    live = window.dashboard.live
+    live = window.live.view
     assert live.cards.visible_keys() == ["pitch", "delta_f", "h1h2", "cpp", "pitch_range", "register"]
     window.core.set_mode("sing")
     play(window, VOICE[:HOP * 4])
@@ -254,7 +256,7 @@ def test_layout_fits_and_reflows(make_window):
 
 def test_layout_holds_still_while_the_readouts_change(make_window, tmp_path):
     """Changing live text (note, coach line, card values, the input banner) mustn't resize anything on
-    the dashboard, or the latest take and recent takes beside it jump around."""
+    the Live screen, or the graph and the cards jump around."""
     import analysis
     from take_store import TakeStore
     folder = tmp_path / "takes"
@@ -262,6 +264,7 @@ def test_layout_holds_still_while_the_readouts_change(make_window, tmp_path):
     for day in (1, 2):
         store.save(dict(base, time=f"2026-09-{day:02d}T10:00:00"))
     window = make_window(folder)
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.set_baseline(window.core.takes()[0])
     window.core.set_target(window.core.takes()[0])
     glide = synth_vowel(np.geomspace(90, 700, int(3 * SR)), MALE_FORMANTS)
@@ -271,11 +274,11 @@ def test_layout_holds_still_while_the_readouts_change(make_window, tmp_path):
         window.show()
         play(window, VOICE[:HOP * 4])
         QTest.qWait(100)                                    # let the first layout settle
-        d = window.dashboard
+        v = window.live.view
 
         def geometry():
-            return (d.live_card.size(), d.live.stack.size(), d.right.size(), window.stack.size(),
-                    [c.size() for c in d.live.cards.cards.values() if not c.isHidden()])
+            return (v.size(), v.stack.size(), window.stack.size(),
+                    [c.size() for c in v.cards.cards.values() if not c.isHidden()])
         before = geometry()
         for start in range(0, len(audio), SR // 2):         # check while it plays, not only after
             play(window, audio[start:start + SR // 2])
@@ -353,6 +356,7 @@ def two_input_window(make_window, monkeypatch):
 
 def test_live_register_follows_open_quotient(make_window):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.live.text_interval = 0
     card = cards(window)["register"]
     assert "(estimate)" in window.core.live.label("register")
@@ -360,11 +364,11 @@ def test_live_register_follows_open_quotient(make_window):
     # synthetic light voice at 140 Hz chest.
     window.core.set_mode("sing")
     play(window, VOICE[:HOP * 2])
-    assert "register" in window.dashboard.live.cards.visible_keys()
+    assert "register" in window.live.view.cards.visible_keys()
     play(window, np.concatenate([silence(1.0), CHEST_VOICE[:int(1.5 * SR)]]))
-    assert card.bar.value < 35 and "chest" in card.text
+    assert card.bar.value < 35 and "Chest" in card.text
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.5 * SR)]]))
-    assert card.bar.value > 65 and "head" in card.text
+    assert card.bar.value > 65 and "Head" in card.text
     assert [(z["id"], z["lo"], z["hi"]) for z in card.bar.zones][1] == ("mix", 35.0, 65.0)   # the mix zone
 
 
@@ -428,11 +432,12 @@ def test_without_an_egg_there_is_no_cq(make_window, monkeypatch):
     import app_core
     monkeypatch.setattr(app_core, "input_channels", lambda index: 1)
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.show()
     window.update_egg_choice()
     assert window.egg_choice.isHidden() and window.egg_label.isHidden()
     play(window, VOICE)
-    live = window.dashboard.live
+    live = window.live.view
     assert "cq" not in live.cards.visible_keys() and live.egg_chip.isHidden()
     keys = [window.voice_map.metric.itemData(i) for i in range(window.voice_map.metric.count())]
     assert "cq" not in keys and "h1h2" in keys
@@ -445,10 +450,11 @@ def test_egg_session_records_stereo_and_shows_cq(two_input_window, tmp_path):
     from egg import synth_egg
     folder = tmp_path / "takes"
     window = two_input_window(folder)
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     assert not window.egg_choice.isHidden()
     window.egg_choice.setCurrentIndex(window.egg_choice.findData("1"))     # EGG on channel 2
     assert two_input_window.opened[-1] == 1 and window.profile.egg_channel == 1
-    live = window.dashboard.live
+    live = window.live.view
     assert window.core.live.egg_on and not live.egg_chip.isHidden()
     assert "EGG on channel 2" in window.top.mic.label
 
@@ -457,7 +463,7 @@ def test_egg_session_records_stereo_and_shows_cq(two_input_window, tmp_path):
     window.core.live.text_interval = 0
     window.toggle_recording()
     play_with_egg(window, voice, egg_samples)
-    assert "cq" in live.cards.visible_keys() and live.cards.cards["cq"].text.startswith("0.5")
+    assert "cq" in live.cards.visible_keys() and live.cards.cards["cq"].number.text().startswith("0.5")
     assert abs(window.core.live.smoothed["cq"] - 0.5) < 0.05
     keys = [window.voice_map.metric.itemData(i) for i in range(window.voice_map.metric.count())]
     assert "cq" in keys
@@ -540,6 +546,7 @@ def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monk
 
 def test_live_register_reads_fry_when_the_pitch_says_so(make_window):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     play(window, np.concatenate([silence(1.0), HEAD_VOICE[:int(1.0 * SR)]]))
     engine = window.engine
     for _ in range(8):                                    # frames at 50 Hz, below the fry limit

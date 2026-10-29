@@ -240,6 +240,8 @@ class VoiceLabCore:
         self.vowels = VowelCheckSession(engine, profile, self.events, runner=self.runner)
         self.voice_map = voice_map.MapSession(profile.voice_map_path)
         self.live.target_provider = self.exercise.current_target
+        # phase 11 / 03: the engine's mic heartbeat (if it has one) tells the live session when no audio arrives
+        self.live.signal_age = getattr(engine, "seconds_since_audio", None)
         self.events.subscribe("practice", self._practice_changed)
         self.events.subscribe("exercise_scored", self.process_results)
         self.events.subscribe("vowel_check_done", self._vowel_check_done)
