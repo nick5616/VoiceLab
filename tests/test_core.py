@@ -79,7 +79,8 @@ class Recorder:
 
 
 EVENTS = ("take_added", "take_ready", "take_updated", "take_removed", "takes_loaded", "status", "busy", "profile_changed",
-          "mode_changed", "mic_changed", "recording", "controls_changed", "progress_changed", "session_started")
+          "mode_changed", "mic_changed", "recording", "controls_changed", "progress_changed", "session_started",
+          "update_offered", "reanalysis_done")
 
 
 @pytest.fixture
@@ -194,7 +195,7 @@ def test_takes_folder_save_rename_reload_delete(make_core, tmp_path):
     core = make_core(folder)
     take = record(core)
     wav = folder / take["file"]
-    assert wav.exists() and wav.with_suffix(".json").exists() and core.status[0].startswith("Saved")
+    assert wav.exists() and wav.with_suffix(".json").exists() and core.status[0].startswith("Take #1 saved")
     assert not core.profile.read_history()                     # the folder is the record
 
     assert core.rename(take["uid"], "bright ee")
@@ -260,6 +261,9 @@ def test_reanalysis_of_an_outdated_take_leaves_the_wav_unchanged(make_core, tmp_
     wav = folder / take["file"]
     before, mtime = sha(wav), wav.stat().st_mtime_ns
     core = make_core(folder)
+    assert core.outdated_takes() and core.jobs["reanalysis"] is None      # phase 11: nothing changes until you say so
+    assert core.heard["update_offered"] and "1 take now" in core.update_offer_text()
+    core.accept_reanalysis()
     assert core.runner.wait_all(120) and not core.reanalysis_active()
     data = core.takes()[0]
     assert data["analysis_version"] == ANALYSIS_VERSION and not is_outdated(data)

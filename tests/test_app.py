@@ -508,7 +508,7 @@ def test_a_dead_egg_channel_is_explained(two_input_window):
     window.toggle_recording()
     assert wait_for(lambda: window.core.takes()), window.status_text()
     assert "EGG" in window.status_text() and "flat" in window.status_text()
-    assert window.toasts.toasts[-1].kind == "warning"
+    assert any(t.kind == "warning" and "EGG" in t.text for t in window.toasts.toasts)
     take = window.core.takes()[0]
     assert "cq" not in take_view.card(take)["bar_keys"] and "cq" not in take
 
@@ -524,7 +524,7 @@ def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monk
     monkeypatch.setattr(isolation, "available", lambda: False)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
     window = make_window()
-    window.choose_egg_channel = lambda p: (True, 1)          # "channel 2 is EGG"
+    window.choose_import_options = lambda p: (False, 1)      # "channel 2 is a second sensor"
     window.import_audio()
     assert window.record_btn.state == "analysing"
     assert wait_for(lambda: window.core.takes()), window.status_text()
@@ -533,7 +533,7 @@ def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monk
     assert abs(take["pitch"] - 140) < 3
 
     assert wait_for(lambda: window.core.controls()["import"])
-    window.choose_egg_channel = lambda p: (True, None)       # declined: mixed to mono, no EGG
+    window.choose_import_options = lambda p: (False, None)   # declined: mixed to mono, no EGG
     window.import_audio()
     assert wait_for(lambda: len(window.core.takes()) == 2)
     assert "cq" not in window.core.takes()[0]
@@ -541,7 +541,7 @@ def test_import_of_a_stereo_file_with_an_egg_channel(make_window, tmp_path, monk
     mono = str(tmp_path / "mono.wav")
     sf.write(mono, voice, SR)
     from ui.app_window import AppWindow
-    assert AppWindow.choose_egg_channel(window, mono) == (True, None)    # no question for mono
+    assert AppWindow.choose_import_options(window, mono) == (False, None)    # nothing to ask of a mono file
 
 
 def test_live_register_reads_fry_when_the_pitch_says_so(make_window):

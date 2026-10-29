@@ -16,6 +16,8 @@ BLOCK_SIZE = 512          # frames per callback at the app rate; scaled for the 
 WASAPI = "Windows WASAPI"  # preferred host API: native rate, 3-10 ms latency (MME: 90 ms, audit)
 HISTORY_SECONDS = 6       # recent audio kept for the noise badge (a few seconds of pauses and voice)
 RESAMPLER_GUARD = 16      # input samples kept either side of an output sample (filter half-width is about 11)
+LOST_SECONDS = 1.5        # s without a block from an open stream before the mic counts as lost (phase 11 / 05)
+FIRST_AUDIO_SECONDS = 3.0   # s a freshly opened stream may take to deliver its first block
 
 
 class StreamResampler:
@@ -85,6 +87,12 @@ class LiveEngine:
         self._stream = None
         self._resamplers = None     # (mic, egg) when the stream runs at another rate than sample_rate
         self.capture_info = {}      # how the stream was opened: host_api, native_rate, latency, ...
+        # phase 11 / 05 shell: the mic heartbeat (additive; the measurement path does not read these)
+        self.clock = time.monotonic
+        self.last_audio_at = None   # clock() when the stream last delivered a block
+        self.stream_opened_at = None    # clock() when the stream opened; None without a stream
+        self.stream_status = None   # the last non-empty PortAudio status ("input overflow", ...)
+        self.stream_finished = False    # the stream ended by itself (device unplugged)
         self._subscribers = []
         self._worker = _LiveWorker(self)
 
@@ -139,13 +147,16 @@ class LiveEngine:
         stream, info = self._open_wasapi(device, channels)
         if stream is None:
             stream = sd.InputStream(samplerate=self.sample_rate, channels=channels,
-                                    device=device, blocksize=BLOCK_SIZE, callback=self._on_audio)
+                                    device=device, blocksize=BLOCK_SIZE, callback=self._on_audio,
+                                    finished_callback=self._on_stream_finished)
             stream.start()
             info.update(path="default", host_api=_host_api_name(device), native_rate=self.sample_rate,
                         latency=_stream_latency(stream))
             self._resamplers = None
         self.capture_info = info
         self._stream = stream
+        self.stream_opened_at, self.last_audio_at = self.clock(), None
+        self.stream_status, self.stream_finished = None, False
         self.egg_channel = egg_channel
         if egg_channel is not None:
             with self._lock:
@@ -165,7 +176,7 @@ class LiveEngine:
         try:
             stream = sd.InputStream(samplerate=rate, channels=channels, device=index, latency="low",
                                     blocksize=max(1, round(BLOCK_SIZE * rate / self.sample_rate)),
-                                    callback=self._on_audio)
+                                    callback=self._on_audio, finished_callback=self._on_stream_finished)
             stream.start()
         except Exception as e:     # exclusive-mode owner, rate refused, driver quirks: use the old path
             self._resamplers = None
@@ -179,12 +190,16 @@ class LiveEngine:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        self.stream_opened_at = None
 
     def stop(self):
         self._worker.stop()
         self._close_stream()
 
     def _on_audio(self, indata, frames, time_info, status):
+        self.last_audio_at = self.clock()
+        if status:
+            self.stream_status = str(status)
         if self.egg_channel is None:
             mic, egg_samples = indata[:, 0], None
         else:
@@ -194,6 +209,27 @@ class LiveEngine:
             if egg_samples is not None:
                 egg_samples = self._resamplers[1].process(egg_samples)
         self.feed(mic, egg_samples)
+
+    def _on_stream_finished(self):
+        """PortAudio ended the stream by itself: the device went away."""
+        self.stream_finished = True
+
+    def seconds_since_audio(self):
+        """Seconds since the open stream last delivered audio (since it opened, before its first block);
+        None when no stream is open, so a hand-fed engine is never reported lost."""
+        if self.stream_opened_at is None:
+            return None
+        return max(0.0, self.clock() - (self.last_audio_at if self.last_audio_at is not None
+                                        else self.stream_opened_at))
+
+    def mic_alive(self):
+        """False once an open stream stopped delivering audio (or finished); True otherwise."""
+        if self.stream_opened_at is None:
+            return True
+        if self.stream_finished:
+            return False
+        limit = LOST_SECONDS if self.last_audio_at is not None else FIRST_AUDIO_SECONDS
+        return self.seconds_since_audio() <= limit
 
     def feed(self, samples, egg=None):
         """Append mic samples (and the matching EGG samples, if any) to the buffers."""

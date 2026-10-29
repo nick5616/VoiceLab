@@ -70,6 +70,8 @@ def test_old_take_is_reanalysed_without_touching_the_wav(make_core, tmp_path):
     wav = folder / take["file"]
     before, mtime = sha(wav), wav.stat().st_mtime_ns
     core = make_core(folder)
+    core.accept_reanalysis()                              # phase 11: older takes change only after a yes
+    assert shared.wait_for(lambda: not core.reanalysis_active() and not core.runner.jobs(), 120)
     data = core.takes()[0]
     assert data["analysis_version"] == ANALYSIS_VERSION and not is_outdated(data)
     assert data["pitch_range"] < 20                       # the stored 47 st was ghosts

@@ -96,6 +96,18 @@ def factories():
         k.add(c.Label("Jargon"))
         return k
 
+    def mic():
+        m = c.MicIndicator()
+        m.set_mic("USB PnP Audio", "Hearing you", "ok", "hearing", "tooltip", "Microphone (USB PnP Audio Device)")
+        return m
+
+    def recording_line():
+        holder = QWidget()
+        holder.resize(300, 40)
+        holder.line = c.RecordingLine(holder)
+        holder.line.set_on(True)
+        return holder
+
     def grid():
         g = c.FlowGrid(min_column_width=120)
         for i in range(3):
@@ -122,7 +134,9 @@ def factories():
         ("Toast", lambda: c.Toast("Saved", "success", action="Undo", timeout_ms=0)), ("ToastStack", stack),
         ("Banner", lambda: c.Banner("Too noisy to judge brightness", "warning", action="Run mic check")),
         ("EmptyState", lambda: c.EmptyState("ph.microphone", "No takes yet", action="Record")),
-        ("MomentChip", lambda: c.MomentChip(3.1, 4.0)),
+        ("MomentChip", lambda: c.MomentChip(3.1, 4.0)), ("MicIndicator", mic), ("RecordingPill", c.RecordingPill),
+        ("RecordingLine", recording_line), ("FitLabel", lambda: c.FitLabel("Loading your takes")),
+        ("LevelMeter", c.LevelMeter),
     ]
 
 
@@ -349,17 +363,26 @@ def test_zonebar_maps_linear_and_log_values_with_clipping():
     assert log.boundaries() == [150, 220]
 
 
-def test_zonebar_draws_zone_labels_and_shortens_them_when_narrow(app):
+def test_zonebar_uses_one_set_of_words_and_a_legend_when_they_do_not_fit(app):
     bar = c.ZoneBar.from_spec(PITCH)
     bar.resize(900, bar.height())
     bar.grab()
-    assert bar.drawn_labels == [("masculine", "typically masculine"), ("overlap", "overlap / androgynous"),
-                                ("feminine", "typically feminine")]
-    bar.resize(300, bar.height())
-    bar.grab()
-    drawn = dict(bar.drawn_labels)
-    assert drawn["overlap"] in ("Overlap", "androgynous") or "overlap" not in drawn
-    assert drawn["masculine"] in ("typically masculine", "Masculine", "masculine")
+    assert bar.drawn_labels == [("masculine", "Masculine"), ("overlap", "Overlap"), ("feminine", "Feminine")]
+    assert not bar.legend
+    long = c.ZoneBar.from_spec(PITCH, prefer_long=True)       # a caller with room may ask for the long words
+    long.resize(900, long.height())
+    long.grab()
+    assert [text for _, text in long.drawn_labels] == ["typically masculine", "overlap / androgynous",
+                                                        "typically feminine"]
+    narrow = c.ZoneBar.from_spec(PITCH)
+    plain_height = narrow.height()
+    narrow.resize(190, narrow.height())
+    narrow.grab()
+    assert narrow.legend and narrow.height() > plain_height          # names under the bar, not squeezed in
+    assert [text for _, text in narrow.drawn_labels] == ["Masculine", "Overlap", "Feminine"]
+    narrow.resize(900, narrow.height())
+    narrow.grab()
+    assert not narrow.legend and narrow.height() == plain_height     # and back inside when there is room
 
 
 def test_zonebar_labels_keep_clear_of_the_marker(app):
@@ -367,7 +390,9 @@ def test_zonebar_labels_keep_clear_of_the_marker(app):
     bar.resize(900, bar.height())
     bar.set_value(185, animate=False)               # the middle of the overlap zone, under its label
     bar.grab()
-    assert "overlap" in dict(bar.drawn_labels)      # still labelled, beside the marker
+    drawn = dict(bar.drawn_labels)
+    assert drawn["overlap"] == "Overlap" and "overlap" in bar.toolTip()   # still labelled, beside the marker
+    assert drawn["masculine"] == "Masculine"                              # one set of words across the bar
     bar.set_value(None)
     assert bar.shown is None and bar.toolTip() == ""
 

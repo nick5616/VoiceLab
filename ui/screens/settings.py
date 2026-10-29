@@ -1,8 +1,9 @@
 """Settings: microphone (and EGG) with the mic check, the takes folder, the voice goal, targets and
 baseline, appearance, and the kindness note."""
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
+import shell_state
 from app_core import VOICE_GOAL_CHOICES, VOICE_GOAL_TEXT
 from ui import theme
 from ui.components import Button, Caption, Card, Headline, Label, Section, SegmentedControl, Select, Toggle
@@ -12,6 +13,7 @@ from ui.takes import listen
 EGG_CHOICES = [("none", "None"), ("0", "Channel 1"), ("1", "Channel 2")]     # the EGG input channel
 THEME_CHOICES = [("dark", "Dark"), ("light", "Light"), ("system", "Same as Windows")]
 COLUMN_WIDTH = 880              # px: settings read best as one calm column
+AUTOSAVE_MS = 700               # ms after the last edit of a target before it is saved
 ABOUT_TEXT = ("VoiceLab is a practice tool, not a judge. It describes how your voice sounds today and "
               "suggests what to try next; it never decides who you are. Voices vary a lot, and the "
               "coloured zones are tendencies across many speakers, not rules. Go at your own pace, and "
@@ -20,6 +22,60 @@ ABOUT_TEXT = ("VoiceLab is a practice tool, not a judge. It describes how your v
 
 def goal_key(goal):
     return goal or "exploring"
+
+
+class SettingsTargets(TargetsEditor):
+    """The targets in Settings: speaking hides the singing-only rows (Ring, Register), every edit is saved by
+    itself a moment later ("Saved" says so; no Save and Revert), and the baseline line has no technical names."""
+
+    def __init__(self, core):
+        super().__init__(core, buttons=False)
+        self.saved_note = Caption("", tone="secondary")
+        self.layout().insertWidget(1, self.saved_note)
+        listen(self, core, {"mode_changed": lambda *_: self.reload()})
+        self._filter()
+
+    def _timer(self):
+        timer = self.__dict__.get("_autosave")
+        if timer is None:
+            timer = self._autosave = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(AUTOSAVE_MS)
+            timer.timeout.connect(self.apply)
+        return timer
+
+    def reload(self, *_):
+        super().reload()
+        if "saved_note" in self.__dict__:
+            self.saved_note.setText("")
+        self._filter()
+
+    def _filter(self):
+        keep = shell_state.target_keys_for_mode(list(self.rows), self.core.mode)
+        for key, row in self.rows.items():
+            row.setVisible(key in keep)
+        self.grid.relayout()
+        self.baseline_label.setText(shell_state.plain_baseline_text(self.baseline_label.text()))
+
+    def _edited(self):
+        super()._edited()
+        self.saved_note.setText("Saving…")
+        self._timer().start()
+
+    def apply(self):
+        self.__dict__["_applying"] = True
+        try:
+            super().apply()
+        finally:
+            self.__dict__["_applying"] = False
+        self.saved_note.setText("Saved")
+
+    def _profile_changed(self):
+        if self.__dict__.get("_applying"):
+            self.baseline_label.setText(shell_state.plain_baseline_text(self.baseline_label.text()))
+            return
+        super()._profile_changed()
+        self.baseline_label.setText(shell_state.plain_baseline_text(self.baseline_label.text()))
 
 
 class SettingsScreen(QWidget):
@@ -63,8 +119,11 @@ class SettingsScreen(QWidget):
         mic.body.addLayout(check_row)
         self.mic_result = Label("", role="body", wrap=True)
         self.mic_numbers = Caption("")
+        self.mic_fixes = Label("", role="body", tone="secondary", wrap=True)
         mic.add(self.mic_result)
+        mic.add(self.mic_fixes)
         mic.add(self.mic_numbers)
+        self.mic_card = mic
         column.addWidget(mic)
 
         # --- takes folder ---
@@ -94,7 +153,7 @@ class SettingsScreen(QWidget):
         # --- targets ---
         # The editor (spec 06) brings its own cards, so it sits under a plain heading, not in one more card.
         target_section = Section("Targets and baseline")
-        self.targets = TargetsEditor(core)
+        self.targets = SettingsTargets(core)
         target_section.add(self.targets)
         column.addSpacing(theme.S)
         column.addWidget(target_section)
@@ -119,6 +178,17 @@ class SettingsScreen(QWidget):
         # --- about ---
         about = Card("About VoiceLab")
         about.add(Label(ABOUT_TEXT, role="body", tone="secondary", wrap=True))
+        keys = Section("Keyboard shortcuts", level="label")
+        for keys_text, what in shell_state.SHORTCUTS:
+            row = QHBoxLayout()
+            row.setSpacing(theme.L)
+            key = Label(keys_text, role="numeric")
+            key.setMinimumWidth(120)
+            key.setAccessibleName(f"Shortcut {keys_text}")
+            row.addWidget(key)
+            row.addWidget(Label(what, role="body", tone="secondary", wrap=True), 1)
+            keys.body.addLayout(row)
+        about.add(keys)
         welcome = Button("Show the welcome again", variant="ghost", icon="ph.hand-waving")
         welcome.clicked.connect(shell.show_onboarding)
         about.add(welcome)
@@ -130,11 +200,11 @@ class SettingsScreen(QWidget):
         center.setContentsMargins(0, 0, 0, 0)
         content.setMaximumWidth(COLUMN_WIDTH + 2 * theme.XXL)
         center.addWidget(content, 1, Qt.AlignmentFlag.AlignHCenter)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(holder)
-        outer.addWidget(scroll)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidget(holder)
+        outer.addWidget(self.scroll)
 
         listen(self, core, dict((
             ("mic_changed", self._mic_changed), ("folder_changed", self.refresh),
@@ -154,7 +224,16 @@ class SettingsScreen(QWidget):
         self.reload_btn.setVisible(core.store is not None)
         self.goal.set_current(goal_key(core.profile.voice_goal), animate=False)
         lines = core.mic_check_text()
-        self.mic_result.setText(lines[0] if lines else "No mic check yet. It takes 8 seconds and says what to fix.")
+        last = core.mic_check_summary()
+        if last is None:
+            self.mic_result.setText("No mic check yet. It takes 8 seconds and says what to fix.")
+        elif last["ok"]:
+            self.mic_result.setText(f"Last checked {last['when']}: your input looks good.")
+        else:
+            self.mic_result.setText(f"Last checked {last['when']}: {last['issues']} thing"
+                                    f"{'s' if last['issues'] != 1 else ''} to fix.")
+        self.mic_fixes.setText("\n".join(f"• {fix}" for fix in (last or {}).get("fixes", [])))
+        self.mic_fixes.setVisible(bool(last and last["fixes"]))
         self.mic_numbers.setText(" · ".join(lines[1:]))
         self.mic_numbers.setVisible(len(lines) > 1)
 
@@ -162,6 +241,11 @@ class SettingsScreen(QWidget):
         self.reload_btn.setEnabled(controls["reload"])
 
     # --- mic and EGG ---
+
+    def show_mic(self):
+        """Scroll to the microphone card and put the cursor on its picker (a "Choose mic" button lands here)."""
+        self.scroll.ensureWidgetVisible(self.mic_card)
+        self.mic_choice.setFocus()
 
     def current_mic(self):
         return self.mic_choice.currentData() or None
