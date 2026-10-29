@@ -1,8 +1,10 @@
 """Everything the live view decides, as data: meters and their verdicts, the note readout, the coach line,
 the input badges and the pitch history. A UI calls update(frame) once per live frame and draws the
 snapshot it returns. No UI toolkit."""
+import re
 import time
 from collections import deque
+from datetime import datetime
 
 import numpy as np
 
@@ -11,9 +13,9 @@ import denoise
 import register
 import report
 from analysis import (IN_TUNE_CENTS, NOTE_NAMES, PERCEIVED_SECONDS, SAMPLE_RATE, VOICE_BAND_HZ, NoiseMonitor,
-                      hz_to_midi, midi_to_hz, perceived_cents, pitch_range_st, vibrato_stats)
-from display import (BOTH_MODES, LIVE_TEXT_SECONDS, METRIC_DEFS, fraction, metric_reading, midi_name, pitch_label,
-                     reference)
+                      hz_to_midi, hz_to_note, midi_to_hz, perceived_cents, pitch_range_st, vibrato_stats)
+from display import (BOTH_MODES, LIVE_TEXT_SECONDS, METRIC_DEFS, NAMES, READING_TRUST_WORDS, TIME_WORDS,
+                     fraction, metric_reading, midi_name, pitch_label, reference, zone_word)
 from engine import UPDATE_INTERVAL
 from take_register import register_model
 
@@ -47,6 +49,7 @@ FRESH_VERDICT_FRAMES = 20       # a verdict counts for the note readout only whi
 CLIP_REPORT_FRACTION = 1e-4     # share of clipped samples in a noise report that counts as clipping
 H1H2_ROUGH_HZ = coach.FORMANT_MAX_F0     # H1*-H2* is rough above this f0 (F1 meets H1; audit)
 NOTE_WINDOW_SECONDS = 0.25      # the note readout shows the median pitch over this
+NOTE_JUMP_SEMITONES = 0.25      # a change this big skips the readout's hold (spec 07: the readout tracks the voice)
 NOTE_HOLD_SECONDS = 0.5         # ...and keeps the last note this long through gaps
 CLIP_BADGE_SECONDS = 1.0        # the clipping badge stays up this long after a clip
 EGG_SIGNAL_SECONDS = 1.5        # the EGG badge stays green this long after the last contact quotient
@@ -62,6 +65,179 @@ EGG_NO_SIGNAL_TOOLTIP = ("No EGG signal. Check the electrodes, the cable, the ch
                          "and the EGG's gain (and that voice is being made).")
 LABELS = {"pitch_range": f"Intonation Range (last {INTONATION_WINDOW_SECONDS} s)", "level": "Input Level"}
 
+# --- phase 11 / 03: LISTENING STATE, STALE READINGS, IN-RANGE SESSION, PLAIN-WORD CARDS ---
+# One "now" for the pitch: the readout's median of the last NOTE_WINDOW_SECONDS. The readout, the Pitch card,
+# the graph's dot and the plane's dot all draw it, so they agree on every frame (audit A-002).
+CARD_STALE_SECONDS = 1.5        # a reading older than this is muted with "last heard N s ago" (audit A-001)
+CARD_EXPIRE_SECONDS = 5.0       # ...and emptied after this
+HEARING_HOLD_SECONDS = 0.5      # "hearing you" holds this long through a gap in the voice
+NO_SIGNAL_SECONDS = 2.0         # the mic delivering no audio for this long is "no signal" (engine heartbeat)
+QUIET_MARGIN_DB = 8             # level above the noise floor that counts as sound with no pitch in it; own judgement
+QUIET_SECONDS = 1.0             # such sound for this long is "too quiet" (audit A-011)
+QUIET_MAX_DBFS = coach.QUIET_DBFS   # louder unpitched sound is noise, not a quiet voice
+LEVEL_SMOOTHING_SECONDS = 0.3   # time constant of the level used for the quiet check
+FLOOR_RISE_DB = 0.02            # dB per frame the noise floor estimate creeps up (it drops to a quieter level at once)
+SHARE_WINDOW_SECONDS = 60       # "in range N % of the last minute"
+FIRST_WINDOW_SECONDS = 300      # the first minutes of voice a session is compared with
+MIN_SHARE_SECONDS = 3           # voiced seconds before a share is shown
+TREND_BUCKET_SECONDS = 15       # one point of the within-session strip
+TREND_BUCKETS = 20              # ...and how many (5 min)
+SESSION_FRAMES = int(SHARE_WINDOW_SECONDS / UPDATE_INTERVAL)
+FIRST_FRAMES = int(FIRST_WINDOW_SECONDS / UPDATE_INTERVAL)
+TREND_BUCKET_FRAMES = int(TREND_BUCKET_SECONDS / UPDATE_INTERVAL)
+MIN_SHARE_FRAMES = int(MIN_SHARE_SECONDS / UPDATE_INTERVAL)
+
+# The state strip: what the app hears right now, in one calm line (audit State model, rows 1-4).
+STATE_STRIP = {
+    "no_signal": ("No signal from the mic", "error"),
+    "silent": ("Listening · say something", "neutral"),
+    "too_quiet": ("Too quiet · move closer or raise the mic level", "warning"),
+    "hearing": ("Hearing you", "success"),
+}
+RECORDING_STRIP = ("Recording", "recording")
+# Plain words for the cards whose numbers mean little alone (low / middle / high on the bar).
+MID_WORDS = {"h1h2": "In between", "cpp": "A bit breathy", "ring": "In between", "cq": "Medium",
+             "pitch_range": "Moderate"}
+WORD_CUTS = {"pitch_range": (3 / 12, 6 / 12)}      # fractions of the bar; the first is coach.FLAT_INTONATION_ST
+DEFAULT_CUTS = (1 / 3, 2 / 3)                      # thirds of the display range (own judgement, a rough guide)
+REGISTER_WORDS = {"chest": "Chest voice", "mix": "Mix", "head": "Head voice"}
+TRUST_TIPS = {
+    "h1h2": "Weight is a rough guide: the mic and desk rumble shift it.",
+    "register": "Register is a rough guide until you label a few takes chest or head.",
+    "ok": "The input is clean enough to rely on this.",
+}
+BANNER_AFFECTS = {"clipping": {"ring", "cpp", "h1h2"}, "whine": {"cpp", "h1h2"}, "rumble": {"h1h2", "pitch"},
+                  "quiet: move closer": {"delta_f", "h1h2", "cpp", "ring"}}
+QUALITY_KEYS = {"delta_f", "h1h2", "cpp", "ring"}  # readings a "fair" input makes rough
+SPEAK_REWRITES = {"possible_pressing": "Your pitch and voice weight rose together in the last few seconds."}
+EXPLORING_NOTE = "Your pitch moved about {st:.0f} semitones over the last few seconds."
+TARGET_PROMPT = "Set a target to track time in range"
+SEMITONES = "semitones"
+
+
+def age_text(age):
+    """'last heard 3 s ago' for a reading this many seconds old."""
+    return f"last heard {max(1, round(age))} s ago"
+
+
+def state_strip(state, mic_state="ok", recording=False):
+    """{"state", "text", "kind"}: the strip above the readout. `mic_state` is core.mic_status()['state'];
+    a mic that is gone or lost is 'no signal' whatever the last frame said."""
+    if mic_state in ("error", "lost"):
+        state = "no_signal"
+    if recording and state != "no_signal":
+        return {"state": "recording", "text": RECORDING_STRIP[0], "kind": RECORDING_STRIP[1]}
+    text, kind = STATE_STRIP.get(state, STATE_STRIP["silent"])
+    return {"state": state, "text": text, "kind": kind}
+
+
+def note_words(f0):
+    """'G3, 21 cents sharp' (or 'G3, right on'): the nearest note and how far off, in words."""
+    note, cents = hz_to_note(f0)
+    if abs(cents) <= 5:
+        return f"{note}, right on"
+    return f"{note}, {abs(cents)} cents {'sharp' if cents > 0 else 'flat'}"
+
+
+def sing_prompt(target_midi):
+    """What the sing-mode prompt says: the exercise's note, else 'Sing any note'."""
+    return f"Sing {midi_name(int(target_midi))}" if target_midi is not None else "Sing any note"
+
+
+def zone_of(key, value):
+    """The zone id ('masculine', 'overlap', 'feminine') a report-zoned card's value sits in, or None."""
+    if key not in REPORT_ZONE_KEYS or value is None or np.isnan(value):
+        return None
+    zones = report.ZONES[key]["zones"]
+    for z in zones:
+        lo = -np.inf if z.get("lo") is None else z["lo"]
+        hi = np.inf if z.get("hi") is None else z["hi"]
+        if lo <= value < hi:
+            return z["id"]
+    return zones[-1]["id"]
+
+
+def scale_word(key, position):
+    """Low / middle / high word of a card's bar for a 0-1 position (NAMES' pair plus MID_WORDS' middle)."""
+    low, high = NAMES[key]["low"], NAMES[key]["high"]
+    cut_low, cut_high = WORD_CUTS.get(key, DEFAULT_CUTS)
+    return low if position < cut_low else high if position >= cut_high else MID_WORDS[key]
+
+
+def card_words(key, reading):
+    """(headline, number) for a live card: the plain word first and the number second. Pitch and resonance
+    keep their hertz as the headline (and name their zone); a reading with no value is ('—', '')."""
+    value = reading.get("value")
+    if value is None or np.isnan(value):
+        return "—", ""
+    shown = reading.get("shown") or LiveSession.card_text(key, reading)
+    if key in ("pitch", "delta_f"):
+        return shown, zone_word(zone_of(key, value), short=True) or ""
+    if key == "pitch_range":
+        return scale_word(key, reading["position"]), f"{value:.1f} {SEMITONES}"
+    if key in ("h1h2", "cpp", "ring"):
+        return scale_word(key, reading["position"]), shown
+    if key == "cq":
+        return scale_word(key, reading["position"]), f"{value:.2f}"
+    if key == "register":
+        if reading.get("display") == "fry":
+            return "Vocal fry", ""
+        return REGISTER_WORDS[register_zone(value / 100)], ""
+    if key == "tuning":
+        return ("In tune" if reading.get("verdict") else "Sharp" if value > 0 else "Flat"), reading.get("display") or ""
+    if key == "vibrato":
+        return ("Straight tone", "") if value == 0 else ("Vibrato", reading.get("display") or "")
+    return shown, ""
+
+
+def baseline_date(profile):
+    """'Fri 23 Oct' for the day the baseline was recorded, or '' without one."""
+    recorded = (profile.baseline or {}).get("recorded")
+    try:
+        return datetime.strptime(recorded, "%Y-%m-%d %H:%M").strftime("%a %d %b").replace(" 0", " ")
+    except (TypeError, ValueError):
+        return ""
+
+
+def legend_text(profile):
+    """What the green outlines and the dashed line mean, in one line; '' when there is neither a target nor
+    a baseline to explain (audit A-015)."""
+    parts = []
+    if profile.targets:
+        parts.append("Green outline = your target range")
+    if profile.baseline:
+        when = baseline_date(profile)
+        parts.append("dashed line = your baseline" + (f" ({when})" if when else ""))
+    return " · ".join(parts)
+
+
+def next_step(take_count, goal=None, recording=False):
+    """{"title", "text", "action"} for the dashboard's fallback "Next step" card (when the session card of the
+    practice screen isn't available): record a first take, else keep practising."""
+    if recording:
+        return {"title": "Recording", "text": "Say a few sentences, then press Stop.", "action": None}
+    if not take_count:
+        return {"title": "Your first take", "text": "Record a few sentences in your everyday voice. There are no "
+                "wrong answers: it is a starting point.", "action": "record"}
+    return {"title": "Next step", "text": "Warm up with Live, then practise a phrase or a passage. Record a take "
+            "when you want to see how it went.", "action": "practice"}
+
+
+def session_line(session):
+    """The one line under the graph about time in range, from snapshot['session']."""
+    if not session["has_target"]:
+        return TARGET_PROMPT
+    last, whole, first = session["last_minute_share"], session["in_range_share"], session["first_share"]
+    word, verb, past = session["word"], session["verb"], session["past"]
+    if last is None:
+        return f"{word}: {verb} for a few seconds and the count starts"
+    text = f"{word} {last:.0%} of the last minute"
+    if whole is not None:
+        text += f" · {whole:.0%} of the time you {past} today"
+    if first is not None and whole is not None:
+        text += f" (was {first:.0%} in your first 5 minutes)"
+    return text
+
 # Exponential smoothing for live meters (~200 ms time constant).
 METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
 
@@ -69,20 +245,24 @@ METER_SMOOTHING = 1 - np.exp(-UPDATE_INTERVAL / 0.2)
 # The live cards in display order per mode, plain names first; the jargon goes in the help text.
 SPEAK_CARDS = ["pitch", "delta_f", "h1h2", "cpp", "pitch_range", "register", "cq"]
 SING_CARDS = ["tuning", "vibrato", "register", "ring", "cpp", "h1h2", "cq"]
-CARD_TITLES = {"pitch": "Pitch", "delta_f": "Brightness (resonance)", "h1h2": "Weight", "cpp": "Clarity",
-               "pitch_range": "Intonation", "tuning": "Tuning", "vibrato": "Vibrato", "register": "Register",
-               "ring": "Ring", "cq": "Contact (EGG)", "level": "Input level"}
+CARD_TITLES = {"pitch": f"Pitch · {TIME_WORDS['now']}", "delta_f": NAMES["delta_f"]["name"],
+               "h1h2": NAMES["h1h2"]["name"], "cpp": NAMES["cpp"]["name"],
+               "pitch_range": f"Intonation · {TIME_WORDS['window'].format(seconds=INTONATION_WINDOW_SECONDS)}",
+               "tuning": "Tuning", "vibrato": "Vibrato", "register": "Register", "ring": "Ring",
+               "cq": NAMES["cq"]["name"], "level": NAMES["level"]["name"]}
 CARD_HELP = {
-    "pitch": "How high your voice sits: the fundamental frequency (F0) over the last moment, in hertz. "
-             "The zones are tendencies across many speakers, not rules.",
-    "delta_f": "How bright or dark your voice sounds: formant spacing ΔF over F1–F4, in hertz. Higher is "
-               "brighter (a shorter apparent vocal tract). Not judged above about 230 Hz.",
+    "pitch": "How high your voice sits right now: the fundamental frequency (F0), the median of the last "
+             "quarter second, in hertz. It is the same number as the big readout. The zones are tendencies "
+             "across many speakers, not rules.",
+    "delta_f": "Resonance, how bright or dark your voice sounds: formant spacing ΔF over F1–F4, in hertz. "
+               "Higher is brighter (a shorter apparent vocal tract). Not judged above about 230 Hz.",
     "h1h2": "Light or heavy: H1*–H2*, the corrected level difference of the first two harmonics, in dB. "
             "A rough proxy for vocal-fold contact; the mic and desk rumble shift it.",
     "cpp": "Clear or breathy: cepstral peak prominence (CPP), in dB. Background noise and room echo "
            "lower it, so it is withheld when the input is noisy.",
     "pitch_range": "How much your pitch moves: the 10th–90th percentile spread over the last "
-                   f"{INTONATION_WINDOW_SECONDS} s, in semitones (st).",
+                   f"{INTONATION_WINDOW_SECONDS} s, in semitones. A take's report measures the whole take, "
+                   "so the two numbers differ.",
     "tuning": "Cents (¢) from the nearest note, or from the exercise's note; 100¢ is a semitone. "
               f"Within ±{IN_TUNE_CENTS}¢ counts as in tune.",
     "vibrato": "Vibrato rate (Hz) and extent (±¢) over the last second, while you hold a note.",
@@ -121,13 +301,14 @@ def card_scale(key):
     dimensions, the register's chest / mix / head, the tuning's in-tune band, else METRIC_DEFS' range."""
     if key in REPORT_ZONE_KEYS:
         spec = report.ZONES[key]
-        return {"scale": tuple(spec["scale"]), "log": spec["log"], "zones": [dict(z) for z in spec["zones"]],
+        zones = [dict(z, label=zone_word(z["id"], short=True) or z["label"]) for z in spec["zones"]]
+        return {"scale": tuple(spec["scale"]), "log": spec["log"], "zones": zones,
                 "unit": spec["unit"], "fixed_band": None, "ends": METRIC_DEFS[key][3:5],
                 "labels": key in LABELLED_ZONE_KEYS}
     if key == "register":
         lo, hi = 100 * register.MIX_BAND[0], 100 * register.MIX_BAND[1]
-        zones = [{"id": "chest", "label": "chest", "lo": 0.0, "hi": lo}, {"id": "mix", "label": "mix", "lo": lo, "hi": hi},
-                 {"id": "head", "label": "head", "lo": hi, "hi": 100.0}]
+        zones = [{"id": "chest", "label": "Chest", "lo": 0.0, "hi": lo}, {"id": "mix", "label": "Mix", "lo": lo, "hi": hi},
+                 {"id": "head", "label": "Head", "lo": hi, "hi": 100.0}]
         return {"scale": (0.0, 100.0), "log": False, "zones": zones, "unit": "", "fixed_band": None,
                 "ends": None, "labels": True}
     _, lo, hi, low_label, high_label, _, _ = METRIC_DEFS[key]
@@ -137,10 +318,12 @@ def card_scale(key):
 
 
 def live_cards(snapshot, profile):
-    """The live cards to draw for a snapshot, in order: [{"key", "title", "help", "text" (throttled, like the
-    meter titles), "value" (on the card's scale), "unavailable" (a short reason or None), "noisy" (the reason
-    is the input, which the banner reports), "verdict", "target", "baseline"}]. Only the mode's cards, and the
-    EGG card only with an EGG."""
+    """The live cards to draw for a snapshot, in order: [{"key", "title", "help", "text" (the plain headline,
+    throttled like the meter titles), "number" (the value, second), "value" (on the card's scale),
+    "unavailable" (a short reason or None), "noisy" (the reason is the input, which the banner reports),
+    "verdict", "target", "baseline", "trust" ("high" | "medium" | "none" | None), "trust_word", "trust_reason",
+    "age" (seconds since the voice last fed it), "stale"}]. Only the mode's cards, and the EGG card only with
+    an EGG."""
     keys = SPEAK_CARDS if snapshot["mode"] == "speak" else SING_CARDS
     out = []
     for key in keys:
@@ -149,12 +332,17 @@ def live_cards(snapshot, profile):
             continue
         tracked = key not in UNTRACKED_METERS and key not in ("tuning", "vibrato")
         note = reading.get("unavailable") if reading.get("value") is None else None
+        headline, number = card_words(key, reading)
+        trust = reading.get("trust")
         out.append({"key": key, "title": CARD_TITLES[key], "help": CARD_HELP[key],
-                    "text": reading.get("shown") or "—", "value": reading.get("value"),
+                    "text": headline, "number": number, "value": reading.get("value"),
                     "unavailable": note or (None if reading.get("value") is not None else "listening…"),
                     "noisy": bool(note) and note in NOISE_NOTES, "verdict": reading.get("verdict"),
                     "target": profile.target(key) if tracked else None,
-                    "baseline": profile.baseline_value(key) if tracked else None})
+                    "baseline": profile.baseline_value(key) if tracked else None,
+                    "trust": trust, "trust_word": READING_TRUST_WORDS.get(trust, ""),
+                    "trust_reason": reading.get("trust_reason", ""), "age": reading.get("age"),
+                    "stale": bool(reading.get("stale"))})
     return out
 
 
@@ -255,6 +443,21 @@ def _smooth(prev, value):
     return value if np.isnan(prev) else prev + METER_SMOOTHING * (value - prev)
 
 
+def split_sentences(text):
+    """The sentences of a coach text."""
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
+
+
+def coach_line(text):
+    """Up to two sentences for the coach line: what happened, then what to try (the first sentence that
+    starts with 'Try' or, failing that, the second)."""
+    sentences = split_sentences(text)
+    if len(sentences) < 2:
+        return sentences[0] if sentences else text
+    action = next((x for x in sentences[1:] if re.match(r"(Try|Keep|Let|Pick|Notice|Small)\b", x)), sentences[1])
+    return f"{sentences[0]} {action}"
+
+
 class LiveSession:
     """The live meters, verdicts, note, coach line and input badges for one profile. `engine` (optional)
     supplies the audio window for register features, recent audio for the noise report and the capture
@@ -289,7 +492,7 @@ class LiveSession:
         self.tuning_ok = None
         self.coach_frame = -10 ** 9
         self.coach = {"line": COACH_IDLE, "full": ""}
-        self.note = {"text": "—", "on_target": None, "hz": None}
+        self.note = {"text": "—", "on_target": None, "hz": None, "words": ""}
         self.note_shown_at = 0.0
         self.last_voiced_at = 0.0
         self.plane = {"f0": None, "delta_f": None}
@@ -299,6 +502,23 @@ class LiveSession:
         self.metrics = {}
         self._text_at = {}
         self.changed_text = False
+        # phase 11 / 03: the listening state, the age of the readings and the in-range session
+        self.signal_age = None          # callable: seconds since the mic last delivered audio, or None (the engine's heartbeat)
+        self.state = "silent"
+        self.heard = False              # a voice has been heard since the session began
+        self.silent_frames = 0          # frames since the last voiced one
+        self.floor_db = np.nan          # the noise floor estimate (dBFS)
+        self.level_avg = np.nan         # smoothed input level (dBFS)
+        self.quiet_frames = 0           # consecutive frames of sound with no pitch in it
+        self.held_frames = 0            # consecutive frames with pitch and resonance in range
+        self.session_voiced, self.session_in = 0, 0
+        self.first_voiced, self.first_in = 0, 0
+        self.minute = deque()           # last SESSION_FRAMES frames: 0 silent, 1 voiced out of range, 2 in range
+        self.minute_counts = [0, 0, 0]
+        self.buckets = deque(maxlen=TREND_BUCKETS)
+        self.bucket = self._new_bucket()
+        self.has_target = False
+        self.in_range = None
         for key, _ in LIVE_METERS:
             self.metrics[key] = self._reading(key, None)
             self.metrics[key]["title"] = self.label(key)
@@ -362,6 +582,12 @@ class LiveSession:
 
     def update(self, frame, window=None):
         """Take one live frame (and, optionally, the audio window it came from) and return the snapshot."""
+        self._update_frame(frame, window)
+        self._update_listening(frame)
+        self._update_session(frame["f0"])
+        return self.snapshot()
+
+    def _update_frame(self, frame, window):
         self.changed_text = False
         f0 = frame["f0"]
         self.pitch_history.append(f0)
@@ -389,30 +615,194 @@ class LiveSession:
                 tracker.update(None, self.profile.target(key))
             self._set("tuning", None)
             self.plane = {"f0": None, "delta_f": None}
-            return self.snapshot()
+            return
         self._update_tuning()
-        self.smoothed_log_f0 = _smooth(self.smoothed_log_f0, np.log2(f0))
         verdict = self.verdicts["pitch"].update(f0, self.profile.target("pitch"))
-        self._set("pitch", 2 ** self.smoothed_log_f0, on_target=verdict, use_profile=False)
+        now_hz = self.note["hz"] or float(f0)      # the readout's pitch: the card and the plane draw it too
+        self._set("pitch", now_hz, on_target=verdict, use_profile=False, fresh=True)
         for key in SMOOTHED_KEYS:
             self._update_smoothed(key, frame, f0)
         resonance = self.smoothed["delta_f"] if self.reading_note("delta_f", frame, f0) is None else np.nan
-        smoothed_f0 = 2 ** self.smoothed_log_f0
-        self.plane = {"f0": None if np.isnan(smoothed_f0) else float(smoothed_f0),
-                      "delta_f": None if np.isnan(resonance) else float(resonance)}
+        self.plane = {"f0": float(now_hz), "delta_f": None if np.isnan(resonance) else float(resonance)}
         self._update_register(frame, window)
-        return self.snapshot()
+
+    # --- LISTENING STATE AND SESSION (phase 11 / 03) ---
+
+    def _update_listening(self, frame):
+        """Hearing / silent / too quiet / no signal from this frame's pitch and level and the mic heartbeat."""
+        voiced = not np.isnan(frame["f0"])
+        level = frame["level"]
+        if voiced:
+            self.silent_frames, self.heard = 0, True
+        else:
+            self.silent_frames += 1
+        if np.isfinite(level):
+            weight = 1 - np.exp(-UPDATE_INTERVAL / LEVEL_SMOOTHING_SECONDS)
+            self.level_avg = level if np.isnan(self.level_avg) else self.level_avg + weight * (level - self.level_avg)
+            if np.isnan(self.floor_db) or level < self.floor_db:
+                self.floor_db = level
+            elif not voiced:
+                self.floor_db = min(level, self.floor_db + FLOOR_RISE_DB)
+        sound = (not voiced) and (bool(frame.get("too_quiet", False)) or (
+            np.isfinite(self.level_avg) and self.level_avg > self.floor_db + QUIET_MARGIN_DB
+            and self.level_avg < QUIET_MAX_DBFS))
+        self.quiet_frames = self.quiet_frames + 1 if sound else 0
+        self.state = self.current_state()
+
+    def current_state(self):
+        """'no_signal', 'hearing', 'too_quiet' or 'silent' now (also between frames, from the mic heartbeat)."""
+        age = self.signal_age() if self.signal_age else None
+        if age is not None and age > NO_SIGNAL_SECONDS:
+            return "no_signal"
+        if self.heard and self.silent_frames * UPDATE_INTERVAL < HEARING_HOLD_SECONDS:
+            return "hearing"
+        if self.quiet_frames * UPDATE_INTERVAL >= QUIET_SECONDS:
+            return "too_quiet"
+        return "silent"
+
+    @staticmethod
+    def _new_bucket():
+        return {"frames": 0, "voiced": 0, "in": 0, "f0": []}
+
+    def _update_session(self, f0):
+        """Held time in range, the share of voiced time in range (last minute, whole session, first minutes)
+        and the strip of buckets, counted in frames so a fake clock changes nothing."""
+        in_range = self.pitch_and_resonance_on_target()
+        voiced = not np.isnan(f0)
+        self.in_range, self.has_target = in_range, in_range is not None
+        self.held_frames = self.held_frames + 1 if in_range else 0
+        code = 0 if not voiced else 2 if in_range else 1
+        self.minute.append(code)
+        self.minute_counts[code] += 1
+        if len(self.minute) > SESSION_FRAMES:
+            self.minute_counts[self.minute.popleft()] -= 1
+        bucket = self.bucket
+        bucket["frames"] += 1
+        if voiced:
+            bucket["voiced"] += 1
+            bucket["f0"].append(float(f0))
+            if in_range:
+                bucket["in"] += 1
+            if self.has_target:
+                self.session_voiced += 1
+                self.session_in += bool(in_range)
+                if self.first_voiced < FIRST_FRAMES:
+                    self.first_voiced += 1
+                    self.first_in += bool(in_range)
+        if bucket["frames"] >= TREND_BUCKET_FRAMES:
+            self.buckets.append(bucket)
+            self.bucket = self._new_bucket()
+
+    def reset_session(self):
+        """Start the in-range counts over (a new practice session)."""
+        self.held_frames = 0
+        self.session_voiced = self.session_in = self.first_voiced = self.first_in = 0
+        self.minute.clear()
+        self.minute_counts = [0, 0, 0]
+        self.buckets.clear()
+        self.bucket = self._new_bucket()
+
+    def trend(self):
+        """{"kind": "in_range" | "pitch" | None, "values": [...]}: the last minutes in buckets of
+        TREND_BUCKET_SECONDS, oldest first: the share of voiced time in range with a target, else the median
+        pitch; None for a bucket with too little voice."""
+        buckets = list(self.buckets) + [self.bucket]
+        if not any(b["voiced"] for b in buckets):
+            return {"kind": None, "values": []}
+        kind = "in_range" if self.has_target else "pitch"
+        return {"kind": kind, "values": [self._bucket_value(b, kind) for b in buckets]}
+
+    @staticmethod
+    def _bucket_value(bucket, kind):
+        """A bucket's point (None with under a second of voice); a closed bucket remembers it."""
+        if bucket["voiced"] < int(1 / UPDATE_INTERVAL):
+            return None
+        closed = bucket["frames"] >= TREND_BUCKET_FRAMES
+        if closed and kind in bucket:
+            return bucket[kind]
+        value = bucket["in"] / bucket["voiced"] if kind == "in_range" else float(np.median(bucket["f0"]))
+        if closed:
+            bucket[kind] = value
+        return value
+
+    def session(self):
+        """{"has_target", "in_range", "held_seconds", "in_range_share" (of the voiced time this session),
+        "last_minute_share", "first_share" (the first FIRST_WINDOW_SECONDS of voice, once there are that many),
+        "voiced_seconds", "trend", "line"}."""
+        voiced_minute = self.minute_counts[1] + self.minute_counts[2]
+        last = self.minute_counts[2] / voiced_minute if self.has_target and voiced_minute >= MIN_SHARE_FRAMES else None
+        whole = (self.session_in / self.session_voiced
+                 if self.has_target and self.session_voiced >= MIN_SHARE_FRAMES else None)
+        first = (self.first_in / self.first_voiced
+                 if self.first_voiced >= FIRST_FRAMES and self.session_voiced > FIRST_FRAMES else None)
+        sing = self.mode == "sing"
+        out = {"has_target": self.has_target, "in_range": self.in_range,
+               "word": "In tune" if sing else "In range", "verb": "sing" if sing else "speak",
+               "past": "sang" if sing else "spoke",
+               "held_seconds": self.held_frames * UPDATE_INTERVAL, "in_range_share": whole,
+               "last_minute_share": last, "first_share": first,
+               "voiced_seconds": self.session_voiced * UPDATE_INTERVAL, "trend": self.trend()}
+        out["line"] = session_line(out)
+        return out
+
+    # --- READINGS' AGE AND TRUST ---
+
+    def reading_age(self, key):
+        """Seconds since the voice last fed this reading (0 while it does; None before any voice); the input
+        level is always current."""
+        if key == "level":
+            return 0.0
+        return self.silent_frames * UPDATE_INTERVAL if self.heard else None
+
+    def trust(self, key, reading):
+        """('high' | 'medium' | 'none' | None, why): how far to trust a live reading. None without a reading;
+        'none' when it is withheld; 'medium' for a rough guide (weight, an uncalibrated register), a fair input
+        or an input problem the banner reports; else 'high'."""
+        note = reading.get("unavailable")
+        if reading.get("value") is None:
+            return ("none", note) if note in NOISE_NOTES or note == "pitch too high to measure" else (None, "")
+        issues = list(self.input["issues"]) + (["clipping"] if self.input["clipping"] else [])
+        for issue in issues:
+            if key in BANNER_AFFECTS.get(issue, ()):
+                return "medium", BANNER_TEXT.get(issue, issue)
+        if key == "h1h2":
+            return "medium", TRUST_TIPS["h1h2"]
+        if key == "register" and not self.register_model.is_calibrated():
+            return "medium", TRUST_TIPS["register"]
+        if key in QUALITY_KEYS and self.quality["tier"] == "fair" and self.quality["reasons"]:
+            return "medium", self.quality["reasons"][0].capitalize() + "."
+        return "high", TRUST_TIPS["ok"]
+
+    def snapshot_metrics(self):
+        """Each reading with its age, whether it is stale (muted) or expired (emptied), and its trust."""
+        out = {}
+        for key, reading in self.metrics.items():
+            age = self.reading_age(key)
+            live = key != "level"
+            expired = live and age is not None and age >= CARD_EXPIRE_SECONDS
+            item = dict(reading, visible=self.visible(key), age=age,
+                        stale=live and age is not None and age >= CARD_STALE_SECONDS, expired=expired)
+            if expired:
+                item.update(value=None, display=None, shown="—", position=None, marker=None, verdict=None,
+                            unavailable=None, zone=None)
+            item["trust"], item["trust_reason"] = self.trust(key, item)
+            out[key] = item
+        return out
 
     def snapshot(self):
         """The state to draw: {"mode", "voiced", "f0", "note": {"text", "on_target"}, "metrics": {key: reading},
         "coach": {"line", "full"}, "input": {...}, "egg": {"on", "signal", "tooltip"}, "pitch_history",
-        "plane": {"f0", "delta_f"}, "changed_text"}. A reading is display.metric_reading's dict."""
+        "plane": {"f0", "delta_f"}, "changed_text", "banner", and (phase 11) "state" (no_signal | silent |
+        too_quiet | hearing), "held_seconds", "in_range_share", "session" (see session()), "quality" and
+        "sing_prompt"}. A reading is display.metric_reading's dict plus "age", "stale", "expired", "trust" and
+        "trust_reason"."""
+        session = self.session()
         return {
             "mode": self.mode,
             "voiced": bool(len(self.recent_f0)) and not np.isnan(self.recent_f0[-1]),
             "f0": None if not len(self.recent_f0) or np.isnan(self.recent_f0[-1]) else float(self.recent_f0[-1]),
             "note": dict(self.note),
-            "metrics": {key: dict(reading, visible=self.visible(key)) for key, reading in self.metrics.items()},
+            "metrics": self.snapshot_metrics(),
             "coach": dict(self.coach),
             "input": dict(self.input, issues=list(self.input["issues"])),
             "egg": self.egg_state(),
@@ -420,6 +810,9 @@ class LiveSession:
             "plane": dict(self.plane),
             "changed_text": self.changed_text,
             "banner": self.banner(),
+            "state": self.state, "held_seconds": session["held_seconds"], "in_range_share": session["in_range_share"],
+            "session": session, "quality": {"tier": self.quality["tier"], "reasons": list(self.quality["reasons"])},
+            "sing_prompt": sing_prompt(self.target_provider()) if self.mode == "sing" else None,
         }
 
     def _reading(self, key, value, **kwargs):
@@ -434,14 +827,15 @@ class LiveSession:
             reading.update(band=None, band_kind=None, baseline=None)
         return reading
 
-    def _set(self, key, value, marker=None, **kwargs):
+    def _set(self, key, value, marker=None, fresh=False, **kwargs):
         """New reading for a meter. Its text changes at most every text_interval, so numbers stay readable;
-        the bar itself moves every frame."""
+        the bar itself moves every frame. `fresh` skips that throttle (the pitch follows the readout's)."""
         reading = self._reading(key, value, **kwargs)
         reading["marker"] = marker
         now = self.clock()
         old = self.metrics.get(key)
-        if old is not None and self.text_interval and now - self._text_at.get(key, 0.0) < self.text_interval:
+        if (old is not None and self.text_interval and not fresh
+                and now - self._text_at.get(key, 0.0) < self.text_interval):
             reading["title"] = old["title"]
             reading["shown"] = old.get("shown")
         else:
@@ -533,7 +927,10 @@ class LiveSession:
 
     def pitch_and_resonance_on_target(self):
         """True when pitch and resonance are both on target (as Profile.in_both, for the targets that
-        are set), judged on the steady verdicts. None when neither target is set."""
+        are set), judged on the steady verdicts. None when neither target is set. In Sing mode the speaking
+        targets don't apply: "on target" is being in tune."""
+        if self.mode == "sing":
+            return bool(self.tuning_ok) and self.silent_frames <= FRESH_VERDICT_FRAMES
         needed = [key for key in ("pitch", "delta_f") if self.profile.target(key) is not None]
         if not needed:
             return None
@@ -550,15 +947,18 @@ class LiveSession:
         now = self.clock()
         if not np.isnan(f0):
             self.last_voiced_at = now
-        if now - self.note_shown_at < LIVE_TEXT_SECONDS:
-            return
         recent = np.array(list(self.recent_f0)[-int(NOTE_WINDOW_SECONDS / UPDATE_INTERVAL):])
         recent = recent[~np.isnan(recent)]
+        if now - self.note_shown_at < LIVE_TEXT_SECONDS and self.note["hz"] is not None:
+            held = self.note["hz"]      # later changes wait, unless the voice has really moved
+            if len(recent) and abs(12 * np.log2(np.median(recent) / held)) < NOTE_JUMP_SEMITONES:
+                return
         if len(recent):
             pitch = float(np.median(recent))
-            note = {"text": pitch_label(pitch), "on_target": self.pitch_and_resonance_on_target(), "hz": pitch}
+            note = {"text": pitch_label(pitch), "on_target": self.pitch_and_resonance_on_target(), "hz": pitch,
+                    "words": note_words(pitch)}
         elif now - self.last_voiced_at >= NOTE_HOLD_SECONDS:
-            note = {"text": "—", "on_target": None, "hz": None}
+            note = {"text": "—", "on_target": None, "hz": None, "words": ""}
         else:
             return
         self.changed_text = self.changed_text or note != self.note
@@ -610,7 +1010,8 @@ class LiveSession:
             issues.append("quiet: move closer")
         if info.get("clip_fraction", 0) > CLIP_REPORT_FRACTION:
             issues.append("clipping")
-        return issues
+        rank = getattr(denoise, "rank_issues", None)        # spec 07: the problem that stands out comes first
+        return rank(info, issues) if rank else issues
 
     def refresh_input(self):
         """The input badge: the first problem, else the SNR; the tooltip lists everything. Also whether the
@@ -689,22 +1090,43 @@ class LiveSession:
                 "snr": self.snr, "clip_events": 1 if self.clip_frames_left else 0}
 
     def coach_text(self):
-        """(one line, full text) for the coach line from the rolling summary."""
+        """(two sentences, full text) for the coach line from the rolling summary: what happened, then what to
+        try. Tips that point against the voice goal are left out, and nothing names a reading that has no
+        card in the current mode (ring in speech, resonance in singing)."""
         summary = self.rolling_summary()
         if summary is None:
             return COACH_IDLE, ""
         quality = coach.take_quality(summary, self.noise_info)
-        profile = self.profile
-        messages = coach.advice(summary, profile.targets, profile.baseline, self.mode or "speak", quality)
+        profile, mode = self.profile, self.mode or "speak"
+        goal = profile.voice_goal or "exploring"
+        messages = coach.advice(summary, profile.targets, profile.baseline, mode, quality, goal=goal)
         if quality["tier"] == "poor":
             reason = quality["reasons"][0] if quality["reasons"] else "the input is too noisy"
             line = reason[0].upper() + reason[1:] + "."
             return line, line
-        if not messages:
-            line = "Nothing to adjust right now." if profile.targets else "Set targets to get live tips."
+        texts = [self._plain_tip(m, mode) for m in messages]
+        texts = [t for t in texts if t]
+        if not texts:
+            if goal == "exploring" and summary.get("pitch_range") is not None and not profile.targets:
+                line = EXPLORING_NOTE.format(st=summary["pitch_range"])
+            else:
+                line = "Nothing to adjust right now." if profile.targets else "Set targets to get live tips."
             return line, line
-        texts = [m["text"].replace("in this take", "in the last few seconds") for m in messages]
-        return texts[0].split(". ")[0].rstrip(".") + ".", " ".join(texts)
+        return coach_line(texts[0]), " ".join(texts)
+
+    @staticmethod
+    def _plain_tip(message, mode):
+        """A coach message in the live view's words, or '' when it names a reading this mode doesn't show."""
+        text = message["text"].replace("in this take", "in the last few seconds")
+        text = text.replace("brightness (resonance)", "resonance")
+        if mode == "speak" and re.search(r"\bring\b", text, re.I):
+            first = SPEAK_REWRITES.get(message["key"])
+            if first is None:
+                return ""
+            text = " ".join([first] + split_sentences(text)[1:])
+        if mode == "sing" and re.search(r"resonance|brightness", text, re.I):
+            return ""
+        return text.strip()
 
     def _update_tuning(self):
         """Cents from the exercise's target note, or from the nearest note. The bar and verdict follow
@@ -720,11 +1142,11 @@ class LiveSession:
             def offset(c):
                 return (c - 100 * target) - 1200 * round((c - 100 * target) / 1200)     # any octave counts
             shown, raw_shown = offset(cents), offset(raw)
-            text = f"{shown:+.0f}¢ vs {midi_name(target)}"
+            text = f"{shown:+.0f} cents vs {midi_name(target)}"
         else:
             nearest = round(cents / 100)
             shown, raw_shown = cents - 100 * nearest, raw - 100 * nearest
-            text = f"{shown:+.0f}¢ from {NOTE_NAMES[nearest % 12]}"
+            text = f"{shown:+.0f} cents from {NOTE_NAMES[nearest % 12]}"
         limit = TUNING_LEAVE_CENTS if self.tuning_ok else IN_TUNE_CENTS
         self.tuning_ok = abs(shown) <= limit
         self._set("tuning", shown, display=text, on_target=self.tuning_ok, use_profile=False,
@@ -745,4 +1167,4 @@ class LiveSession:
         if vib["rate"] is None:
             self._set("vibrato", 0, display="straight tone")
         else:
-            self._set("vibrato", vib["extent"], display=f"{vib['rate']:.1f} Hz · ±{vib['extent']:.0f}¢")
+            self._set("vibrato", vib["extent"], display=f"{vib['rate']:.1f} Hz, ±{vib['extent']:.0f} cents")

@@ -326,11 +326,12 @@ class Session:
                "f0": frame.get("f0"), "screen": w.current()}
         if view is not None:
             rec["readout"] = view.note_label.text()
-            card = view.cards.cards.get("pitch")
+            cards, graph = getattr(view, "cards", None), getattr(view, "graph", None)    # the dashboard's strip has neither
+            card = cards.cards.get("pitch") if cards is not None else None
             rec["card_pitch"] = card.value.text() if card is not None and card.isVisible() else None
-            x, y = view.graph.dot.getData()
+            x, y = graph.dot.getData() if graph is not None else (None, None)
             rec["dot"] = None if y is None or not len(y) else float(y[0])
-            rec["marker"] = view.graph.marker.toPlainText() if view.graph.marker.isVisible() else None
+            rec["marker"] = graph.marker.toPlainText() if graph is not None and graph.marker.isVisible() else None
         rec["banner"] = w.banner.label.text() if not w.banner.isHidden() else None
         self.events.write(rec)
 

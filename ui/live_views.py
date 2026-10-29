@@ -9,11 +9,11 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsRectItem
 
-from display import note_ticks
+from display import note_ticks, zone_word
 from engine import UPDATE_INTERVAL
 from live_session import HISTORY_LEN, HISTORY_SECONDS
 from ui import theme
-from ui.live_graph import style_plot
+from ui.live_graph import TIME_AXIS_LABEL, TIME_TICKS, X_RANGE, style_plot
 
 HISTORY_TIMES = np.linspace(-HISTORY_SECONDS, 0, HISTORY_LEN)
 SPECTRUM_RANGE_DB = 70            # dynamic range shown in the spectrogram
@@ -28,9 +28,12 @@ PLANE_RESONANCE_RANGE = (900, 1350)
 # (about 16-18 cm vs 14-15.8 cm). Real voices vary and overlap widely, so these
 # are orientation aids, not targets.
 REFERENCE_REGIONS = [
-    ("typically masculine", (960, 1090), (85, 155), "masculine"),
-    ("typically feminine", (1110, 1260), (165, 255), "feminine"),
+    (zone_word("masculine", short=True), (960, 1090), (85, 155), "masculine"),
+    (zone_word("feminine", short=True), (1110, 1260), (165, 255), "feminine"),
 ]
+PLANE_AXIS_LABEL = "Resonance: darker ← → brighter"
+PLANE_NAMED_TAKES = 3             # only the newest takes carry a number label, so the labels never pile up
+SPECTRUM_CAPTION = "Brighter colour = louder. The bright lines at F1 and F2 are your resonances."
 
 
 def _target_band(orientation):
@@ -56,7 +59,7 @@ class SpectrumView(pg.GraphicsLayoutWidget):
         super().__init__()
         self.freqs = freqs
         self.max_freq = float(freqs[-1])
-        self.spec = np.full((HISTORY_LEN, len(freqs)), -200.0)
+        self.spec = np.full((HISTORY_LEN, len(freqs)), np.nan)      # NaN draws transparent: the empty history is the surface
         self.formant_history = np.full((HISTORY_LEN, 4), np.nan)
         self.peak_db = -60.0
 
@@ -68,11 +71,13 @@ class SpectrumView(pg.GraphicsLayoutWidget):
             plot.setYRange(0, self.max_freq, padding=0)
         self.slice_plot.setYLink(self.spec_plot)
         self.slice_plot.hideAxis("left")
-        self.spec_plot.setXRange(-HISTORY_SECONDS, 0, padding=0)
+        self.spec_plot.setXRange(*X_RANGE, padding=0)
+        self.spec_plot.getAxis("bottom").setTicks([TIME_TICKS, []])
+        self.spec_plot.getAxis("bottom").setLabel(TIME_AXIS_LABEL)
 
         # Image axes: x = time (rows of self.spec), y = frequency.
         # setRect needs the image dimensions, so set an initial image first.
-        self.image = pg.ImageItem(self.spec)
+        self.image = pg.ImageItem(self.spec, autoLevels=False, levels=(-SPECTRUM_RANGE_DB, 0))
         self.image.setColorMap(pg.colormap.get("inferno"))
         self.image.setRect(QRectF(-HISTORY_SECONDS, 0, HISTORY_SECONDS, self.max_freq))
         self.spec_plot.addItem(self.image)
@@ -190,7 +195,7 @@ class PitchResonancePlane(pg.PlotWidget):
         self.setBackground(t["surface"])
         style_plot(self.plotItem)
         self.showGrid(x=True, y=True, alpha=0.12)
-        self.getAxis("bottom").setLabel("Resonance ΔF (Hz): darker ← → brighter", color=t["text_muted"])
+        self.getAxis("bottom").setLabel(PLANE_AXIS_LABEL, color=t["text_muted"])
         for zone, region, label in self.regions:
             fill = QColor(t.zone(zone)["edge"])
             fill.setAlpha(50)
@@ -265,12 +270,20 @@ class PitchResonancePlane(pg.PlotWidget):
         self.addItem(label)
         self.take_points[number] = (delta_f, np.log2(f0), label)
         self._draw_takes()
+        self._show_newest_labels()
 
     def remove_take(self, number):
         point = self.take_points.pop(number, None)
         if point:
             self.removeItem(point[2])
             self._draw_takes()
+            self._show_newest_labels()
+
+    def _show_newest_labels(self):
+        """Number labels on the newest PLANE_NAMED_TAKES takes only (the dots of the rest stay)."""
+        newest = sorted(self.take_points)[-PLANE_NAMED_TAKES:]
+        for number, (_, _, label) in self.take_points.items():
+            label.setVisible(number in newest)
 
     def clear_takes(self):
         for number in list(self.take_points):

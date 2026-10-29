@@ -135,7 +135,7 @@ def test_speak_axis_is_fixed_and_the_readout_is_always_on_it(make_window):
     window.go("live")
     graph = window.live.view.graph
     assert graph.y_range() == (70.0, 400.0)
-    assert graph.zone_labels() == ["typically masculine", "overlap / androgynous", "typically feminine"]
+    assert graph.zone_labels() == ["Masculine", "Overlap", "Feminine"]      # display.ZONE_WORDS, short form
     sweep = synth_vowel(np.geomspace(60, 700, int(4 * SR)), MALE_FORMANTS)
     checked = []
     frames = [0]
@@ -157,6 +157,7 @@ def test_speak_axis_is_fixed_and_the_readout_is_always_on_it(make_window):
 
 def test_one_banner_for_an_untrusted_input(make_window):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.live.text_interval = 0
     noisy = mic_noise.at_level(synth_vowel(140, MALE_FORMANTS, seconds=1.6), -42) + mic_noise.mic_noise(int(1.6 * SR))
     play(window, np.concatenate([mic_noise.mic_noise(int(1.5 * SR)), noisy, mic_noise.mic_noise(SR)]))
@@ -164,7 +165,7 @@ def test_one_banner_for_an_untrusted_input(make_window):
     banners = [b for b in window.findChildren(Banner) if not b.isHidden()]
     assert banners == [window.banner]
     assert "weight and clarity" in window.banner.label.text() or "whine" in window.banner.label.text()
-    cards = window.dashboard.live.cards.cards
+    cards = window.live.view.cards.cards
     for key in ("cpp", "h1h2"):
         assert cards[key].unavailable == "paused: noisy input" and cards[key].bar.value is None
     assert not hasattr(cards["cpp"].bar, "hatched")
@@ -218,8 +219,9 @@ def test_rest_nudge_is_a_gentle_toast(make_window):
 @pytest.mark.parametrize("mode", ["speak", "sing"])
 def test_live_cards_and_views_follow_the_mode(make_window, mode):
     window = make_window()
+    window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.set_mode(mode)
-    live = window.dashboard.live
+    live = window.live.view
     play(window, VOICE)
     keys = live.cards.visible_keys()
     if mode == "speak":

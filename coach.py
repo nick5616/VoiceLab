@@ -291,9 +291,14 @@ METRIC_NAMES = {"pitch": "pitch", "delta_f": "brightness (resonance)", "h1h2": "
                 "cpp": "clarity", "ring": "ring", "pitch_range": "pitch range", "register": "register"}
 
 
-def advice(summary, targets, baseline=None, mode="speak", quality=None):
+# phase 11 / 03: tips that point against a goal are left out (a more lively voice is not every goal's aim)
+GOAL_SKIPPED_RULES = {"masculine": {"flat_intonation"}, "exploring": {"flat_intonation"}}
+
+
+def advice(summary, targets, baseline=None, mode="speak", quality=None, goal=None):
     """Up to 3 messages [{"key", "text", "severity"}], most useful first. Reads nothing from a
-    metric quality["trust"] marks unreliable, and says what could not be judged instead."""
+    metric quality["trust"] marks unreliable, and says what could not be judged instead. `goal` (a voice
+    goal; None leaves everything in) drops the tips that point against it."""
     quality = quality or take_quality(summary)
     context = _Context(summary, targets or {}, baseline, mode, quality)
     messages = []
@@ -303,6 +308,8 @@ def advice(summary, targets, baseline=None, mode="speak", quality=None):
                  "text": f"This take is hard to judge: {reason}. A quick re-record will give "
                          "you much more useful feedback."}]
     for key, _, severity, applies, text in sorted(RULES, key=lambda r: r[1]):
+        if key in GOAL_SKIPPED_RULES.get(goal, ()):
+            continue
         if RULE_MODES.get(key, mode) == mode and applies(context):
             messages.append({"key": key, "text": text(context), "severity": severity})
     untrusted = [METRIC_NAMES[m] for m in METRIC_NAMES

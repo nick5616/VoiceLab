@@ -82,7 +82,8 @@ class Tracer:
                 "screen": w.current()}
         if view is not None:
             line["readout"] = view.note_label.text()
-            card = view.cards.cards.get("pitch")
+            cards = getattr(view, "cards", None)        # the dashboard's strip has no cards
+            card = cards.cards.get("pitch") if cards is not None else None
             line["card_pitch"] = card.value.text() if card is not None and card.isVisible() else None
         line["banner"] = w.banner.label.text() if not w.banner.isHidden() else None
         self.events.write(line)
