@@ -1,5 +1,5 @@
-"""The main window: a nav rail (Dashboard, Live, Practice, Takes, Progress, Settings), a top bar (Speak /
-Sing, voice goal, mic, what's running, session time), one input banner, the screens, a bottom action
+"""The main window: a nav rail (Dashboard, Live, Practice, History, Progress, Settings), a top bar (Speak /
+Sing, voice goal, mic, an input chip, what's running, session time), the screens, a bottom action
 bar (import, folder, record, replay, mic check) and toasts. The window asks the questions (dialogs) and
 shows the results; app_core.VoiceLabCore decides everything else."""
 import os
@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QMa
 import shell_state
 from app_core import REST_TOOLTIP, VOICE_GOAL_CHOICES, status_display
 from ui import theme
-from ui.components import (ActivityCenter, Banner, Button, FitLabel, IconButton, Label, MicIndicator, NavRail,
+from ui.components import (ActivityCenter, AlertChip, Banner, Button, FitLabel, IconButton, Label, MicIndicator, NavRail,
                            RecordButton, RecordingLine, RecordingPill, SegmentedControl, Select, ThemedWidget,
                            ToastStack)
 from ui.mic_check_dialog import MicCheckDialog
@@ -29,17 +29,17 @@ from ui.screens.settings import SettingsScreen
 REANALYSED_PREFIX = "Re-analysed"       # the core's success status when the older takes are done
 AUDIO_FILE_FILTER = "Audio files (*.wav *.flac *.ogg *.mp3 *.aiff *.aif)"
 NAV = [("dashboard", "ph.squares-four", "Dashboard"), ("live", "ph.activity", "Live"),
-       ("practice", "ph.barbell", "Practice"), ("takes", "ph.list-bullets", "Takes"),
+       ("practice", "ph.barbell", "Practice"), ("takes", "ph.clock-counter-clockwise", "History"),
        ("progress", "ph.chart-line-up", "Progress")]
 FOOTER = [("settings", "ph.gear-six", "Settings")]
 SCREENS = [key for key, _, _ in NAV + FOOTER]
 ACTION_BAR_SCREENS = {"dashboard", "live", "practice"}      # screens that record
 SESSION_TICK_MS = 15000
-BANNER_HOLD_MS = 3000           # an input banner stays at least this long, so it doesn't flicker
+BANNER_HOLD_MS = 3000           # an input chip stays at least this long, so it doesn't flicker
 REST_TOAST_MS = 15000           # the rest nudge stays a little longer than other toasts
 MODES = [("speak", "Speak", "ph.chat-circle"), ("sing", "Sing", "ph.music-note")]
 GOALS = [(g or "exploring", label) for g, label in VOICE_GOAL_CHOICES]
-TOP_BAR_HEIGHT = 60             # px: room for the two-line input banner
+TOP_BAR_HEIGHT = 60             # px: the top bar
 MIC_POLL_MS = 1000              # ms between looks at the mic's heartbeat
 OFFER_UPDATE_KEY = "update"     # the banner action that accepts the re-analysis offer
 SHORTCUT_HINT = "Keyboard shortcuts (?)"
@@ -77,7 +77,7 @@ class ActivityButton(ActivityCenter):
     what it is doing and what it changes."""
 
     def __init__(self):
-        super().__init__(expanded=False)
+        super().__init__(expanded=False, hide_when_idle=True)      # nothing running: nothing shown
         self.setMinimumWidth(168)
         self.setMaximumWidth(260)
         self.popup = QFrame(self, Qt.WindowType.Popup)      # parented: deleted with the button, never by the GC
@@ -107,8 +107,8 @@ class ActivityButton(ActivityCenter):
 
 class TopBar(Bar):
     """Speak / Sing, the goal, the mic (name, state in words, level), a quiet status line, the recording
-    pill, the session time and what is running. Nothing in it is cut: the status line shows a whole phrase
-    that fits, or none."""
+    pill, the session time and what is running (only while something is). Nothing in it is cut: the status
+    line shows a whole phrase that fits, or none."""
 
     def __init__(self, core):
         super().__init__("bottom")
@@ -141,15 +141,14 @@ class TopBar(Bar):
         row.addWidget(self.activity)
 
     def make_room(self, on):
-        """While the input banner shows, the goal, the quiet status line and the session time give way to it:
-        the banner takes their width, so it never pushes the screen below it about."""
+        """While the input chip shows, the quiet status line and the session time step aside for it, so the
+        bar keeps its width (the goal stays)."""
         self.room = on
-        for w in (self.goal_label, self.goal, self.session):
-            w.setVisible(not on)
+        self.session.setVisible(not on)
         self.status.setVisible(not on and not self.recording.isVisible())
 
     def set_recording(self, on):
-        """The REC pill in, the quiet status line out (unless the banner already took its place)."""
+        """The REC pill in, the quiet status line out (unless the input chip already took its place)."""
         if on and not self.recording.isVisible():
             self.recording.start()
         elif not on and self.recording.isVisible():
@@ -242,14 +241,12 @@ class AppWindow(QMainWindow):
         self.top = TopBar(core)
         self.activity = self.top.activity
         main.addWidget(self.top)
-        # One banner in the top bar, in place of the goal, the status line and the session time while it shows,
-        # so it never pushes the screens about when it comes and goes. It wraps to two lines; it never cuts.
-        self.banner = Banner("", kind="warning", action="Mic check", on_action=self._banner_action)
-        self.banner.hide()
-        self.banner.set_compact(True)
-        self.banner.stack_narrow = False        # it lives in the top bar: one row, text to the left of the button
+        # One input chip beside the mic: the problem in a few words and its action, the whole sentence on
+        # hover. Small, so it never pushes the bar or the screens about when it comes and goes.
+        self.banner = AlertChip()
+        self.banner.clicked.connect(self._banner_action)
         row = self.top.layout()
-        row.insertWidget(row.indexOf(self.top.status) + 1, self.banner, 1)
+        row.insertWidget(row.indexOf(self.top.mic) + 1, self.banner)
         self.offer = Banner("", kind="info", action="Update now", on_action=self.accept_update, second_action="Later",
                             on_second=self.defer_update)
         self.offer.hide()
@@ -329,10 +326,15 @@ class AppWindow(QMainWindow):
         self.action_bar.replay_btn.setVisible(key != "live")      # the Live screen has its own
 
     def open_report(self, uid):
-        """A take's full report, on the Takes screen."""
+        """A take's full report, on the History screen."""
         self.go("takes")
         if uid:
             self.takes.show_take(uid)
+
+    def open_session(self, key):
+        """A day of Today's practice: its report on the whole routine, on the History screen."""
+        self.go("takes")
+        self.takes.show_session(key)
 
     def _shortcuts(self):
         keys = {"record": ("Space", self.toggle_recording), "replay": ("R", self.replay),
@@ -373,7 +375,7 @@ class AppWindow(QMainWindow):
     # --- banner, status and toasts ---
 
     def show_banner(self, info, force=False):
-        """The input banner (what the live frames say is wrong with the input); once shown it stays at least
+        """The input chip (what the live frames say is wrong with the input); once shown it stays at least
         BANNER_HOLD_MS. A mic that is missing or stopped outranks it."""
         self.banner_info = info
         shown = self.core.mic_banner() or info
@@ -383,9 +385,8 @@ class AppWindow(QMainWindow):
             self.banner.hide()
             self.top.make_room(False)
         else:
-            self.banner.kind = shown["kind"]
-            self.banner.set_text(shown["text"], shown.get("more"))
-            self.banner.action.setText(shown["action"])
+            chip = shell_state.alert_chip(shown)
+            self.banner.set_alert(chip["label"], shown["action"], shown["kind"], shown["text"], chip["tooltip"])
             if self.banner.isHidden():
                 self.top.make_room(True)
                 self.banner.show()
@@ -638,10 +639,12 @@ class AppWindow(QMainWindow):
         self.settings.restore_egg()
 
     def mic_check(self):
-        """Open the mic check (non-modal); its result is kept in the profile. Nothing without an engine."""
+        """Open the mic check (non-modal); its result is kept in the profile. Nothing without an engine.
+        Over an open modal (the welcome) it belongs to that modal, which would otherwise block it."""
         if self.engine is None:
             return None
-        self.mic_dialog = MicCheckDialog(self.engine, self, core=self.core)
+        parent = QApplication.activeModalWidget() or self
+        self.mic_dialog = MicCheckDialog(self.engine, parent, core=self.core)
         self.mic_dialog.finished_check.connect(self._mic_checked)
         self.mic_dialog.show()
         return self.mic_dialog

@@ -256,6 +256,17 @@ def font(role="body", size=None, weight=None):
     return f
 
 
+def in_points(f):
+    """`f` (a px font) sized in points instead, the same size on screen. For menu buttons: Qt's windows11
+    style sizes their chevron from font().pointSize(), which is -1 for a px font, and warns
+    "QFont::setPointSize: Point size <= 0 (-1)" on every layout and paint."""
+    f = QFont(f)
+    if f.pixelSize() > 0:
+        screen = QGuiApplication.primaryScreen()
+        f.setPointSizeF(f.pixelSize() * 72 / (screen.logicalDotsPerInchY() if screen else 96))
+    return f
+
+
 def palette():
     """A QPalette from the active theme, for stock Qt widgets."""
     c, pal = _current, QPalette()

@@ -8,7 +8,7 @@ Events (Events.emit): "take_added"(take) (also for every take loaded from the fo
 "takes_loaded"(count, problems), "status"(text, level: "info"|"success"|"warning"|"error"|"busy"|"recording"),
 "busy"(jobs), "profile_changed"(), "mode_changed"(mode), "mic_changed"(info), "recording"(bool),
 "controls_changed"(controls), "progress_changed"(), "session_started"(), "folder_changed"(),
-"voice_map_changed"(), "update_offered"(count, seconds), "reanalysis_done"(count), "ui_changed"(prefs), "phrase_changed"(phrase), "practice_plan_changed"(), plus the practice sessions'
+"voice_map_changed"(), "update_offered"(count, seconds), "reanalysis_done"(count), "ui_changed"(prefs), "phrase_changed"(phrase), "practice_plan_changed"(), "sessions_changed"(), plus the practice sessions'
 "exercise_changed", "vowels_changed" and "practice".
 """
 import time
@@ -26,6 +26,7 @@ import profile_store
 import register
 import report
 import session_plan
+import session_report
 import shell_state
 import speech
 import take_trash
@@ -257,6 +258,7 @@ class VoiceLabCore:
         self.events.subscribe("vowel_check_done", self._vowel_check_done)
         self.events.subscribe("vowel_check_done", self._plan_vowels)        # phase 11 / 06-practice
         self.events.subscribe("take_ready", self._plan_changed)
+        self.events.subscribe("takes_loaded", self._record_session)       # phase 11 / history: today's, at start
         self.set_mode(profile.mode)
         self.live.set_targets(profile.targets)
 
@@ -517,6 +519,7 @@ class VoiceLabCore:
     def skip_practice_step(self, key):
         """Skip a step of today's practice; "practice_plan_changed"() follows."""
         self.profile.set_ui(practice_session=self.practice_plan().skip(key))
+        self._record_session()
         self.events.emit("practice_plan_changed")
 
     def practice_summary(self):
@@ -525,11 +528,62 @@ class VoiceLabCore:
         return plan.summary(rest_text=self.rest_nudge())
 
     def _plan_changed(self, *_):
+        self._record_session()
         self.events.emit("practice_plan_changed")
 
     def _plan_vowels(self, _result):
         self.profile.set_ui(practice_session=self.practice_plan().note_vowel_check())
+        self._record_session()
         self.events.emit("practice_plan_changed")
+
+    # phase 11 / history: a finished day of Today's practice is kept, with a report on the whole routine
+    def _record_session(self, *_):
+        """Once today's routine is done (something in it done, the rest done or skipped), keep it as a
+        practice session; "sessions_changed"() when that is new or changed."""
+        plan = self.practice_plan()
+        if not plan.finished or not any(s["state"] == "done" for s in plan.steps()[:-1]):
+            return
+        state = plan.state
+        entry = {"day": plan.today, "mode": plan.mode, "skipped": list(state["skipped"]),
+                 "vowels": bool(state["vowels"])}
+        known = next((s for s in self.profile.practice_sessions
+                      if (s.get("day"), s.get("mode")) == (entry["day"], entry["mode"])), None)
+        mine = session_report.session_takes(self._takes, plan.today, plan.mode)      # when it ended: its last take
+        entry["time"] = (known or {}).get("time") or (mine[-1]["time"][:19] if mine else
+                                                      datetime.now().isoformat(timespec="seconds"))
+        if self.profile.record_session(entry):
+            self.events.emit("sessions_changed")
+
+    def practice_sessions(self):
+        """The kept practice sessions, newest first, each with its History "key"."""
+        out = [dict(s, key=session_report.key_of(s["day"], s.get("mode", "speak")))
+               for s in self.profile.practice_sessions]
+        return sorted(out, key=lambda s: s.get("time") or s["day"], reverse=True)
+
+    def session_report(self, key):
+        """session_report.build for a kept session (its key), or None."""
+        parsed = session_report.parse_key(key)
+        session = next((s for s in self.profile.practice_sessions
+                        if parsed and (s.get("day"), s.get("mode", "speak")) == parsed), None)
+        if session is None:
+            return None
+        day, mode = parsed
+        mine = session_report.session_takes(self._takes, day, mode)
+        vowels = [e for e in self.profile.read_history()
+                  if e.get("kind") == "vowels" and str(e.get("time", ""))[:10] == day]
+        shares = {}
+        for t in mine:
+            if session_report.is_phrase(t):
+                result = self.phrase_result(t["uid"])
+                shares[t["uid"]] = result.get("pitch_share") if result else None
+        readings = [t for t in mine if session_report.is_passage(t)]
+        passage = self.passage_result(readings[-1]["uid"]) if readings else None
+        earlier_days = sorted({str(t.get("time", ""))[:10] for t in self._takes
+                               if str(t.get("time", ""))[:10] < day and session_report.session_takes([t], str(
+                                   t.get("time", ""))[:10], mode)})
+        previous = session_report.session_takes(self._takes, earlier_days[-1], mode) if earlier_days else []
+        return session_report.build(session, self._takes, vowels[-1] if vowels else None, shares, passage,
+                                    previous, self.profile.target("pitch"))
 
     def passage_result(self, uid):
         """speech.passage_result for a take against the last reading of the same passage; None if unknown."""

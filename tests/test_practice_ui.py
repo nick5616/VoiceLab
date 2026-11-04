@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), ".."), os.path.dirname(__file__)]
 from PyQt6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
+import speech  # noqa: E402
 from analysis import midi_to_hz  # noqa: E402
 from conftest import wait_for  # noqa: E402
 from test_analysis import MALE_FORMANTS, SR, synth_vowel  # noqa: E402
@@ -227,6 +228,24 @@ def test_reading_shows_the_readout_timer_and_where_you_are(window):
     assert wait_for(lambda: window.core.takes())
 
 
+def test_the_reading_highlight_waits_while_you_are_silent(window):
+    window.go("practice")
+    clock = Clock(window)
+    window.practice.open("read")
+    reading = window.practice.read
+    reading.toggle()
+    first = speech.sentence_spans(reading.text.passage)[0]
+    seen = []
+
+    def tick(t):
+        clock.advance(0.5)                                  # a long wait before the first word
+        window.practice.show_frame(None, {"live": window.core.live.snapshot()})
+        seen.append(reading.text.span)
+    play(window, silence(3.0), on_frame=tick)
+    assert seen and set(seen) == {first}                    # it never runs ahead of you
+    reading.toggle()
+
+
 def test_a_reading_ends_in_a_result_that_leads_to_the_report(window):
     window.go("practice")
     clock = Clock(window)
@@ -295,6 +314,113 @@ def test_phrases_show_a_result_and_count_what_you_recorded_today(window):
     assert window.core.takes()[0]["phrase"] == 0
     phrases.result_card.button_widgets["next"].click()
     assert "Phrase 2 of 16" in phrases.counter.text() and not phrases.result_card.isVisibleTo(phrases)
+
+
+def earlier_phrases(window, indices):
+    """Phrase takes said earlier today (only the plan and the phrase count read them)."""
+    from datetime import datetime
+    now = datetime.now().replace(microsecond=0).isoformat()
+    window.core._takes.extend({"task": "phrases", "phrase": i, "time": now, "mode": "speak", "pitch": 170.0,
+                               "uid": f"earlier-{i}"} for i in indices)
+
+
+def say_phrase(window, clock):
+    phrases = window.practice.phrases
+    count = len(window.core.takes())
+    phrases.toggle()
+    play(window, VOICE, on_frame=lambda t: clock.advance(0.025))
+    phrases.toggle()
+    assert wait_for(lambda: len(window.core.takes()) > count)
+    QApplication.processEvents()
+    return phrases.result_card
+
+
+def warmed_up(window):
+    from datetime import date
+    window.core.profile.set_ui(practice_session={"day": date.today().isoformat(), "skipped": [], "vowels": True})
+
+
+def test_the_last_phrase_of_the_step_points_on_to_the_passage(window):
+    warmed_up(window)
+    earlier_phrases(window, [5, 6])
+    window.go("practice")
+    clock = Clock(window)
+    window.practice.open("phrases")
+    card = say_phrase(window, clock)
+    assert card.next_step == {"key": "read", "label": "Next: Read the passage"}
+    go = card.button_widgets["go:read"]
+    assert go.variant == "primary" and card.button_widgets["next"].variant == "secondary"   # the rest stay
+    go.click()
+    assert window.practice.current == "read"
+
+
+def test_one_phrase_in_keeps_you_on_the_phrases(window):
+    window.go("practice")
+    clock = Clock(window)
+    window.practice.open("phrases")
+    card = say_phrase(window, clock)
+    assert card.next_step is None and card.button_widgets["next"].variant == "primary"
+
+
+def test_saying_every_phrase_ends_the_round_instead_of_looping(window):
+    warmed_up(window)
+    earlier_phrases(window, range(15))
+    window.go("practice")
+    clock = Clock(window)
+    window.practice.open("phrases")
+    window.core.next_phrase(-1)                                            # phrase 16
+    phrases = window.practice.phrases
+    card = say_phrase(window, clock)
+    assert card.data["title"] == "All phrases done" and "all the phrases" in card.data["headline"]
+    assert "next" not in card.button_widgets                               # no silent trip back to phrase 1
+    assert "All phrases recorded today" in phrases.today.text()
+    assert card.button_widgets["go:read"].variant == "primary"             # what to do next leads
+    card.button_widgets["restart"].click()
+    assert "Phrase 1 of 16" in phrases.counter.text()
+
+
+def test_the_last_step_leads_to_todays_result(window):
+    warmed_up(window)
+    earlier_phrases(window, [0, 1, 2])
+    window.go("practice")
+    clock = Clock(window)
+    window.practice.open("read")
+    read_passage(window, clock)
+    card = window.practice.read.result_card
+    assert card.next_step == {"key": "summary", "label": "See today's report"}
+    card.button_widgets["go:summary"].click()
+    assert window.practice.current is None and window.current() == "takes"        # straight to the report
+    report = window.takes.full
+    assert report.uid.startswith("session:") and report.report["headline"] == "You did the whole routine."
+    assert [x["title"] for x in report.report["sections"]] == ["Warm up", "3 phrases", "Read the passage"]
+    assert report.report["sections"][1]["uids"] == ["earlier-0", "earlier-1", "earlier-2"]
+    row = window.takes.cards[report.uid]
+    assert row.isVisibleTo(window.takes) and row.view["chip"] == "All steps"
+    assert "practice session" in window.takes.count.text()
+    reading = report.report["sections"][2]["uids"][0]
+    links = [b for b in report.findChildren(QPushButton) if b.text().startswith("Take #")]
+    links[-1].click()                                                           # a take of the session opens
+    assert window.takes.selected == reading
+    window.go("practice")
+    summary = window.practice.session_card
+    assert summary.summary_head.isVisibleTo(window.practice) and summary.report_btn.isVisibleTo(window.practice)
+    summary.report_btn.click()
+    assert window.current() == "takes" and window.takes.selected == report.uid
+
+
+def test_history_shows_only_sessions_or_only_takes_on_request(window):
+    test_the_last_step_leads_to_todays_result(window)
+    takes = window.takes
+    takes.show_sel.set_current_key("sessions")
+    takes.refresh()
+    assert takes.selected.startswith("session:") and takes.filter_btn.text() == "Filter · 1"
+    shown = [w for w in takes.cards.values() if w.isVisibleTo(takes)]
+    assert len(shown) == 1
+    takes.show_sel.set_current_key("takes")
+    takes.refresh()
+    assert not takes.selected.startswith("session:")
+    takes.clear_filters()
+    assert takes.show_sel.current_key() is None
 
 
 # --- exercises ---

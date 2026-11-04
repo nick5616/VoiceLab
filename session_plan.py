@@ -128,6 +128,20 @@ class SessionPlan:
         self.state["vowels"] = True
         return dict(self.state)
 
+    def next_step(self, practice):
+        """What a result in `practice` offers as the way on: {"key" (a practice, or "summary"), "label"}. None
+        while the plan still has a step for this practice (keep going here); else the plan's current step, or
+        today's summary once the plan is done (and something in it was)."""
+        steps = self.steps()
+        if any(s["practice"] == practice and s["state"] in ("current", "todo") for s in steps):
+            return None
+        current = self.current()
+        if current["key"] == "result":
+            if not any(s["state"] == "done" for s in steps[:-1]):
+                return None
+            return {"key": "summary", "label": "See today's report"}
+        return {"key": current["practice"], "label": f"Next: {current['title']}"}
+
     def title(self):
         """'Today's practice' with where you are: 'Step 2 of 4' or 'All done'."""
         n, m = self.position()

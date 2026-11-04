@@ -85,7 +85,7 @@ class Tracer:
             cards = getattr(view, "cards", None)        # the dashboard's strip has no cards
             card = cards.cards.get("pitch") if cards is not None else None
             line["card_pitch"] = card.value.text() if card is not None and card.isVisible() else None
-        line["banner"] = w.banner.label.text() if not w.banner.isHidden() else None
+        line["banner"] = w.banner.full if not w.banner.isHidden() else None
         self.events.write(line)
 
     def shoot(self, why):

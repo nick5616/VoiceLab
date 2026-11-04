@@ -332,7 +332,7 @@ class Session:
             x, y = graph.dot.getData() if graph is not None else (None, None)
             rec["dot"] = None if y is None or not len(y) else float(y[0])
             rec["marker"] = graph.marker.toPlainText() if graph is not None and graph.marker.isVisible() else None
-        rec["banner"] = w.banner.label.text() if not w.banner.isHidden() else None
+        rec["banner"] = w.banner.full if not w.banner.isHidden() else None
         self.events.write(rec)
 
     # --- beats ---

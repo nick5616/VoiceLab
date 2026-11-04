@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QApplication,
 
 from tools.uilab import colors as colormath
 from ui import theme
-from ui.components import (ActivityCenter, Badge, Banner, Button, Chip, ConfidenceChip, EmptyState, HelpTip,
+from ui.components import (ActivityCenter, AlertChip, Badge, Banner, Button, Chip, ConfidenceChip, EmptyState, HelpTip,
                            MetricCard, MomentChip, NavRail, RecordButton, SegmentedControl, Select, Skeleton,
                            Spinner, StatusDot, Tabs, Toast, ToastStack, Toggle, ZoneBar)
 from ui.components.base import TONES, tone_color
@@ -319,6 +319,8 @@ class Inspector:
         if isinstance(w, Banner):
             return "banner", {"kind": w.kind, "text": plain(w.label.text()),
                               "action": w.action.text() if w.action else None}
+        if isinstance(w, AlertChip):
+            return "banner", {"kind": w.kind, "text": w.full, "label": w.text, "action": w.action_text or None}
         if isinstance(w, Toast):
             return "toast", {"kind": w.kind, "text": w.text, "action": w.action.text() if w.action else None,
                              "closing": w.closing}

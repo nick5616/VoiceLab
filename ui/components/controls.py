@@ -104,9 +104,14 @@ QPushButton:focus {{ border: 2px solid {t['accent'] if self.variant != 'primary'
 QPushButton:disabled {{ background: {t['surface_raised'] if self.variant in ('primary', 'secondary') else 'transparent'};
     color: {t['text_muted']}; border: 1px solid {t['border']}; }}
 """)
-        self.setFont(theme.font("label", size=12 if self.small else None))
+        font = theme.font("label", size=12 if self.small else None)
+        self.setFont(theme.in_points(font) if self.menu() else font)
         self.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         self._apply_icon()
+
+    def setMenu(self, menu):
+        super().setMenu(menu)
+        self.restyle()          # a menu button's font is in points: see theme.in_points
 
     def _apply_icon(self):
         color = self.colors()["text"]

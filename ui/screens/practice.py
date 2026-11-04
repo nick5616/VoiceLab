@@ -5,10 +5,11 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QHBoxLayout, QPlainTextEdit, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
                              QWidget)
 
+import session_report
 from exercise import TAIL_SECONDS
 from practice_state import disabled_reason, readout_view, start_reason, state_view
-from speech import (CUSTOM_PASSAGE_HINT, CUSTOM_PASSAGE_NAME, PHRASES, RangeTracker, phrases_summary,
-                    reading_position)
+from speech import (CUSTOM_PASSAGE_HINT, CUSTOM_PASSAGE_NAME, PHRASES, PHRASES_FINISHED, RangeTracker,
+                    ReadingFollower, phrases_progress, phrases_summary)
 from ui import theme
 from ui.components import Button, Caption, Card, Chip, Collapsible, FlowGrid, Headline, IconButton, Label, Select
 from ui.exercise_view import ExerciseView
@@ -161,13 +162,14 @@ class _RecordingPanel(QWidget):
 
 
 class ReadAlouds(_RecordingPanel):
-    """A passage to read while recording, with the sentence you should be on shaded; your own passage can be
-    pasted and saved."""
+    """A passage to read while recording, with the sentence you are on shaded (it follows your voice, never a
+    clock); your own passage can be pasted and saved."""
     kind = "read"
 
     def __init__(self, core):
         super().__init__(core, "Start reading")
         self.index = 0
+        self.follower = ReadingFollower("")
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(theme.M)
@@ -241,6 +243,7 @@ class ReadAlouds(_RecordingPanel):
 
     def before_recording(self):
         self.core.set_reading(self.index)
+        self.follower = ReadingFollower(self.text.passage)
 
     def recording_changed(self, on):
         for w in (self.picker, self.prev_btn, self.next_btn):
@@ -279,8 +282,8 @@ class ReadAlouds(_RecordingPanel):
     def show_frame(self, frame, views):
         super().show_frame(frame, views)
         if self.core.is_recording:
-            pos = reading_position(self.text.passage, self.seconds())
-            self.text.set_span(pos["span"])
+            self.follower.add(views["live"].get("f0") is not None, self.core.clock())
+            self.text.set_span(self.follower.position()["span"])
 
     def opened(self):
         super().opened()
@@ -292,7 +295,8 @@ class ReadAlouds(_RecordingPanel):
 
 
 class Phrases(_RecordingPanel):
-    """One everyday phrase at a time; record it, see how it went, then the next."""
+    """One everyday phrase at a time; record it, see how it went, then the next. Once every phrase is said
+    today the result says so, and goes round again only if you ask."""
     kind = "phrases"
 
     def __init__(self, core):
@@ -348,11 +352,10 @@ class Phrases(_RecordingPanel):
             self.graph.setVisible(True)
 
     def show_today(self):
-        takes = self.core.phrases_today()
-        numbered = {t["phrase"] for t in takes if t.get("phrase") is not None}
-        count = min(len(PHRASES), len(numbered) + sum(1 for t in takes if t.get("phrase") is None))
-        self.dots.set_state(numbered, self.current)
-        self.today.setText(f"{count} of {len(PHRASES)} recorded today")
+        progress = phrases_progress(self.core.phrases_today())
+        self.dots.set_state(progress["done"], self.current)
+        self.today.setText("All phrases recorded today" if progress["finished"] else
+                           f"{progress['count']} of {progress['total']} recorded today")
         self.dots.setToolTip("A filled dot is a phrase you have recorded today; the ring is the one on screen.")
 
     def recording_changed(self, on):
@@ -370,18 +373,29 @@ class Phrases(_RecordingPanel):
         for name, share in (("Pitch", result["pitch_share"]), ("Resonance", result["resonance_share"])):
             if share is not None:
                 chips.append((f"{name} in your range {share:.0%}", "on_target" if share >= 0.5 else "warning"))
-        summary = phrases_summary(self.core.phrases_today())
-        self.result_card.show_result({
-            "title": "That phrase", "headline": result["text"], "chips": chips, "uid": take["uid"],
-            "lines": [summary] if summary else [],
-            "actions": [("next", "Next phrase", "primary"), ("again", "Record it again", "secondary"),
-                        ("report", "Open full report", "ghost")]})
+        today = self.core.phrases_today()
+        summary = phrases_summary(today)
+        if phrases_progress(today)["finished"]:
+            self.result_card.show_result({
+                "title": "All phrases done", "headline": PHRASES_FINISHED, "chips": chips, "uid": take["uid"],
+                "lines": [f"That last one: {result['text']}"] + ([summary] if summary else []),
+                "actions": [("again", "Record it again", "secondary"),
+                            ("restart", "Go round again", "secondary"), ("go:overview", "All practice", "ghost"),
+                            ("report", "Open full report", "ghost")]})
+        else:
+            self.result_card.show_result({
+                "title": "That phrase", "headline": result["text"], "chips": chips, "uid": take["uid"],
+                "lines": [summary] if summary else [],
+                "actions": [("next", "Next phrase", "primary"), ("again", "Record it again", "secondary"),
+                            ("report", "Open full report", "ghost")]})
         self.graph.setVisible(False)
         self.show_today()
 
     def result_action(self, key):
         if key == "next":
             self.core.next_phrase()
+        elif key == "restart":
+            self.core.next_phrase(-self.current)
         elif key == "again":
             self.result_card.clear()
             self.graph.setVisible(True)
@@ -449,6 +463,7 @@ class PracticeScreen(QWidget):
                             "clear start and stop.", role="body", tone="secondary", wrap=True))
         self.session_card = SessionCard(core)
         self.session_card.open_step.connect(self.open)
+        self.session_card.open_report.connect(self.open_todays_report)
         box.addWidget(self.session_card)
         box.addWidget(Label("Pick your own", role="heading"))
         grid = FlowGrid(min_column_width=300, max_columns=3, max_column_width=520)
@@ -470,6 +485,7 @@ class PracticeScreen(QWidget):
         overview_scroll.setWidgetResizable(True)
         overview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         overview_scroll.setWidget(overview)
+        self.overview_scroll = overview_scroll
         self.stack.addWidget(overview_scroll)
 
         # the focused practices
@@ -490,6 +506,11 @@ class PracticeScreen(QWidget):
         }
         for panel in (self.read, self.phrases, self.exercise):
             panel.open_report.connect(self._open_report)
+        # every result offers the next thing to do (today's practice), and every practice stays one click away
+        self.result_cards = {"read": self.read.result_card, "phrases": self.phrases.result_card,
+                             "vowels": self.vowel_check.result_card, "exercise": self.exercise.result_card}
+        for card in self.result_cards.values():
+            card.go.connect(self.go)
         self.pages, self.status_strips, self.notices = {}, {}, {}
         for key, title, text, mode, icon in PRACTICES:
             page = QWidget()
@@ -524,7 +545,8 @@ class PracticeScreen(QWidget):
         refresh = lambda *_: self.refresh_status()      # noqa: E731
         listen(self, core, {"recording": refresh, "controls_changed": refresh, "take_ready": refresh,
                             "vowels_changed": refresh, "exercise_changed": refresh, "busy": refresh,
-                            "voice_map_changed": refresh, "status": refresh, "practice_plan_changed": refresh})
+                            "voice_map_changed": refresh, "status": refresh,
+                            "practice_plan_changed": lambda *_: (self.refresh_status(), self.offer_next())})
 
     # --- facts of the wrapped practices ---
 
@@ -587,6 +609,31 @@ class PracticeScreen(QWidget):
         self.stack.setCurrentWidget(self.pages[key])
         self.panels[key].opened()
         self.refresh_status()
+        self.offer_next()
+
+    def offer_next(self):
+        """Point the open practice's result at the next thing to do in today's practice."""
+        card = self.result_cards.get(self.current)
+        if card is not None:
+            card.set_next(self.core.practice_plan().next_step(self.current))
+
+    def go(self, where):
+        """A result's way on: another practice, today's report ("summary"), or back to the overview."""
+        if where in self.panels:
+            self.open(where)
+            return
+        self.close_practice()
+        self.overview_scroll.verticalScrollBar().setValue(0)
+        if where == "summary":
+            self.open_todays_report()
+
+    def open_todays_report(self):
+        """Today's practice session's full report, in History (when the day's routine is kept)."""
+        plan = self.core.practice_plan()
+        key = session_report.key_of(plan.today, plan.mode)
+        opener = getattr(self.shell, "open_session", None)
+        if opener and key in {s["key"] for s in self.core.practice_sessions()}:
+            opener(key)
 
     def close_practice(self):
         if self.current:

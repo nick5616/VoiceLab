@@ -252,7 +252,12 @@ class VowelCheckSession:
 
 
 # --- phase 11 / 06-practice: reading position, in-range strip and per-take results ---
-READING_WPM = 150               # words per minute: a relaxed reading pace, for the "you are here" highlight
+# The reading highlight follows your voice, never a clock: it moves on when you pause after about a sentence's
+# worth of voice, or when you read straight on well past it. Judgment calls (unverified): a quick reader voices
+# about 0.18 s a word and a slow one about 0.3 s (voiced time only, the gaps and unvoiced consonants left out).
+FOLLOW_PAUSE_SECONDS = 0.45     # s of silence after enough voice: that sentence is finished
+FOLLOW_MIN_PER_WORD = 0.12      # s of voice per word before a pause can finish a sentence (a comma pause can't)
+FOLLOW_MAX_PER_WORD = 0.45      # s of voice per word after which it moves on without a pause
 RANGE_GAP_SECONDS = 0.3         # s: a silence this long ends a held stretch in range
 RANGE_MAX_STEP = 0.25           # s: the most one frame step can add to the clocks (a paused feed adds nothing)
 MIN_PHRASE_SECONDS = 1.0        # s of clear voice a phrase needs before it gets a pitch result
@@ -261,6 +266,7 @@ RESONANCE_SAME_HZ = 40.0        # Hz: report.CHANGE_MIN for resonance
 INTONATION_SAME_ST = 1.5        # st: report.CHANGE_MIN for intonation
 FIRST_READING = "This is your first reading of this passage."
 PHRASES_FOR_SUMMARY = 3          # phrases recorded in a day before they are summed up
+PHRASES_FINISHED = "That's all the phrases for today. Nicely done."   # the headline once every one is said
 
 
 def sentence_spans(text):
@@ -274,24 +280,50 @@ def sentence_spans(text):
     return [(s, e) for s, e in spans if text[s:e].strip()]
 
 
-def reading_position(text, seconds, wpm=READING_WPM):
-    """Where a reader at `wpm` has got to after `seconds`: {"sentence" (index), "count", "span" (start, end
-    characters of that sentence), "fraction" (0-1 of the passage), "done" (the passage should be finished)}."""
-    spans = sentence_spans(text)
-    if not spans:
-        return {"sentence": 0, "count": 0, "span": (0, 0), "fraction": 0.0, "done": False}
-    counts = [len(text[s:e].split()) for s, e in spans]
-    words = max(0.0, seconds) * wpm / 60.0
-    total = sum(counts)
-    done_words, index = 0, 0
-    for index, n in enumerate(counts):
-        if words < done_words + n:
-            break
-        done_words += n
-    else:
-        index = len(counts) - 1
-    return {"sentence": index, "count": len(spans), "span": spans[index],
-            "fraction": min(1.0, words / total) if total else 0.0, "done": words >= total}
+class ReadingFollower:
+    """Which sentence of a passage you are reading, from your voice: add(voiced, now) per live frame while
+    recording; position() says where you are. It never runs ahead of you: silence before you start, or a
+    pause mid-sentence, leaves it where it is."""
+
+    def __init__(self, text):
+        self.text = text or ""
+        self.spans = sentence_spans(self.text)
+        self.words = [max(1, len(self.text[a:b].split())) for a, b in self.spans]
+        self.reset()
+
+    def reset(self):
+        self.index, self.voiced, self.silent, self.last = 0, 0.0, 0.0, None
+
+    def add(self, voiced, now):
+        step = 0.0 if self.last is None else min(RANGE_MAX_STEP, max(0.0, now - self.last))
+        self.last = now
+        if not self.spans:
+            return
+        words = self.words[self.index]
+        if voiced:
+            self.voiced += step
+            self.silent = 0.0
+            if self.voiced >= words * FOLLOW_MAX_PER_WORD:
+                self._next()
+        else:
+            self.silent += step
+            if self.silent >= FOLLOW_PAUSE_SECONDS and self.voiced >= words * FOLLOW_MIN_PER_WORD:
+                self._next()
+
+    def _next(self):
+        if self.index < len(self.spans) - 1:
+            self.index += 1
+            self.voiced = 0.0
+        else:
+            self.voiced = float("inf")          # the last sentence is said: done
+
+    def position(self):
+        """{"sentence" (index), "count", "span" (start, end characters of it), "done" (the passage is read)}."""
+        if not self.spans:
+            return {"sentence": 0, "count": 0, "span": None, "done": False}
+        done = self.voiced == float("inf")
+        return {"sentence": self.index, "count": len(self.spans), "span": None if done else self.spans[self.index],
+                "done": done}
 
 
 def clock_text(seconds):
@@ -439,6 +471,14 @@ def passage_result(take, previous=None, profile=None, rep=None):
 
 
 NUMBER_WORDS = {3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight", 9: "Nine", 10: "Ten"}
+
+
+def phrases_progress(takes):
+    """How far through the phrases today's phrase takes go: {"done" (indices recorded), "count", "total",
+    "finished" (every phrase said today)}. A take from before phrases were numbered counts once, unplaced."""
+    done = {t["phrase"] for t in takes if t.get("phrase") is not None}
+    count = min(len(PHRASES), len(done) + sum(1 for t in takes if t.get("phrase") is None))
+    return {"done": done, "count": count, "total": len(PHRASES), "finished": count >= len(PHRASES)}
 
 
 def phrases_summary(takes):

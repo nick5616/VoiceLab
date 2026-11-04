@@ -76,6 +76,29 @@ def test_sing_session_is_a_warm_up_then_an_exercise():
     assert p.finished
 
 
+def test_each_result_points_to_the_next_thing_to_do():
+    vowels = {"day": TODAY, "skipped": [], "vowels": True}
+    assert plan().next_step("vowels") is None                                # the warm-up is still this one
+    assert plan().next_step("phrases") is None                               # phrases still to do: keep going here
+    assert plan().next_step("voicemap") == {"key": "vowels", "label": "Next: Warm up"}
+    assert plan(state=vowels).next_step("vowels") == {"key": "phrases", "label": "Next: 3 phrases"}
+    two = plan([take("phrases")] * 2, state=vowels)
+    assert two.next_step("phrases") is None                                 # one more phrase to go
+    three = plan([take("phrases")] * 3, state=vowels)
+    assert three.next_step("phrases") == {"key": "read", "label": "Next: Read the passage"}
+    assert three.next_step("voicemap")["key"] == "read"                    # off the plan, it still shows the way
+    assert three.next_step("read") is None                                  # the passage is the step: read it here
+    done = plan([take("phrases")] * 3 + [take("passage: Vowel tour")], state=vowels)
+    assert done.next_step("read") == {"key": "summary", "label": "See today's report"}
+    assert done.next_step("phrases")["key"] == "summary"
+    skipped = plan(state={"day": TODAY, "skipped": ["warmup", "phrases", "read"], "vowels": False})
+    assert skipped.next_step("read") is None                                # nothing done: no summary to see
+    ex = {"notes_total": 9, "notes_in_tune": 7}
+    sing = plan([take("x", mode="sing", exercise=ex)], mode="sing")
+    assert sing.next_step("exercise") is None                               # both sing steps are exercises
+    assert plan([take("x", mode="sing", exercise=ex)] * 2, mode="sing").next_step("exercise")["key"] == "summary"
+
+
 def test_goal_shapes_the_phrases_hint():
     assert "brighter" in plan(goal="feminine").steps()[1]["detail"]
     assert "low and warm" in plan(goal="masculine").steps()[1]["detail"]
@@ -112,14 +135,38 @@ def test_sentence_spans_cover_each_sentence():
                                                        "Eleven twelve."]
 
 
-def test_reading_position_follows_the_pace():
-    wpm = 120                                             # two words a second
-    at = lambda s: speech.reading_position(PASSAGE, s, wpm)  # noqa: E731
-    assert at(0)["sentence"] == 0 and at(1.9)["sentence"] == 0
-    assert at(2.0)["sentence"] == 1 and at(4.9)["sentence"] == 1
-    assert at(5.0)["sentence"] == 2 and not at(5.9)["done"] and at(6.0)["done"]
-    assert at(60)["done"] and at(60)["sentence"] == 2 and at(60)["fraction"] == 1.0
-    assert speech.reading_position("", 5)["count"] == 0
+def follow(text, timeline, step=0.025):
+    """A ReadingFollower fed [(seconds, voiced)] stretches, frame by frame; the sentence after each."""
+    f, t, out = speech.ReadingFollower(text), 0.0, []
+    f.add(False, t)
+    for seconds, voiced in timeline:
+        for _ in range(int(round(seconds / step))):
+            t += step
+            f.add(voiced, t)
+        out.append(f.position()["sentence"])
+    return f, out
+
+
+def test_the_reading_highlight_waits_for_you():
+    f, at = follow(PASSAGE, [(10.0, False)])                    # silence: it never moves on its own
+    assert at == [0] and f.position()["span"] == speech.sentence_spans(PASSAGE)[0]
+    _, at = follow(PASSAGE, [(1.0, True), (0.3, False), (0.5, True)])
+    assert at == [0, 0, 0]                                       # a short pause mid-sentence keeps it there
+
+
+def test_the_reading_highlight_moves_when_you_pause_after_a_sentence():
+    _, at = follow(PASSAGE, [(1.2, True), (0.6, False), (1.8, True), (0.6, False), (0.6, True), (0.6, False)])
+    assert at == [0, 1, 1, 2, 2, 2]
+    f, _ = follow(PASSAGE, [(1.2, True), (0.6, False), (1.8, True), (0.6, False), (0.6, True), (0.6, False)])
+    assert f.position()["done"] and f.position()["span"] is None
+
+
+def test_reading_straight_on_still_moves_but_never_ahead():
+    _, at = follow(PASSAGE, [(4 * speech.FOLLOW_MAX_PER_WORD - 0.1, True), (0.2, True)])
+    assert at == [0, 1]                                          # well past four words of voice: next sentence
+    _, at = follow(PASSAGE, [(30.0, False), (0.5, True)])
+    assert at == [0, 0]                                          # a long wait first changes nothing
+    assert speech.ReadingFollower("").position()["count"] == 0
     assert speech.clock_text(42) == "0:42" and speech.clock_text(75) == "1:15"
 
 
@@ -337,3 +384,73 @@ def test_start_is_off_for_a_drill_only_when_something_else_runs():
     assert "recording is running" in practice_state.start_reason(ready, True, False)
     assert "still being analysed" in practice_state.start_reason(ready, False, True)
     assert "still being worked out" in practice_state.start_reason(busy, False, False)
+
+
+# --- the report on a day's routine ---
+
+def test_a_whole_routine_report_has_each_step_and_compares_with_last_session():
+    import session_report
+    before = [take("phrases", day="2026-10-27", pitch=190.0, delta_f=1000.0, uid="old")]
+    phrases = [take("phrases", hour=9, pitch=p, delta_f=1100.0, uid=f"p{i}") for i, p in enumerate((200, 205, 210))]
+    reading = take("passage: Vowel tour", hour=10, pitch=173.0, uid="r1")
+    vowel = {"delta_f": 1180.0, "formant_ceiling": 4800, "time": f"{TODAY}T08:50:00"}
+    passage = {"headline": "Your voice sat in the overlap.", "tip": "Let the ends of sentences lift.",
+               "rows": [{"name": "Pitch", "value": "173 Hz", "change": None},
+                        {"name": "Intonation", "value": "5.0 st", "change": "1.6 st more varied than last time"}]}
+    rep = session_report.build({"day": TODAY, "mode": "speak", "skipped": []}, phrases + [reading], vowel,
+                               {"p0": 0.8, "p1": 0.7, "p2": 0.9}, passage, before, (180, 220))
+    assert rep["key"] == f"session:{TODAY}:speak" and rep["headline"] == "You did the whole routine."
+    assert (rep["steps_done"], rep["steps"]) == (3, 3) and rep["minutes"] == 70
+    warmup, phr, read = rep["sections"]
+    assert warmup["state"] == "Done" and "1180 Hz" in warmup["headline"]
+    rows = {name: (value, change) for name, value, change in phr["rows"]}
+    assert rows["Pitch"] == ("205 Hz", "15 Hz higher than last session") and rows["Resonance"][1].endswith("brighter than last session")
+    assert rows["In your pitch range"][0] == "80% of the time" and phr["uids"] == ["p0", "p1", "p2"]
+    assert read["headline"] == passage["headline"] and read["uids"] == ["r1"] and read["rows"][0][:2] == ("Pitch", "173 Hz")
+    assert read["rows"][1] == ("Intonation", "5.0 semitones", "1.6 semitones more varied than last time")
+    assert rep["next_time"] == "Let the ends of sentences lift."
+    assert session_report.parse_key(rep["key"]) == (TODAY, "speak") and session_report.parse_key("abc") is None
+
+
+def test_a_partial_routine_says_what_was_left_and_aims_at_the_range():
+    import session_report
+    phrases = [take("phrases", uid=f"p{i}") for i in range(2)]
+    rep = session_report.build({"day": TODAY, "mode": "speak", "skipped": ["read"]}, phrases)
+    assert rep["headline"] == "You did 0 of 3 steps." or rep["steps_done"] == 0
+    states = [s["state"] for s in rep["sections"]]
+    assert states == ["Not done", "Not done", "Skipped"] and rep["sections"][2]["headline"] == "Skipped today."
+    assert "whole routine" in rep["next_time"]
+    low = session_report.build({"day": TODAY, "mode": "speak", "skipped": []}, phrases, None,
+                               {"p0": 0.2, "p1": 0.3}, None, (), (180, 220))
+    assert "between 180 and 220 Hz" in low["next_time"] and "25%" in low["next_time"]
+
+
+def test_a_sing_routine_reports_the_notes_in_tune():
+    import session_report
+    ex = [take("Five-note scale", mode="sing", exercise={"notes_total": 9, "notes_in_tune": 7}, uid=f"e{i}")
+          for i in range(2)]
+    rep = session_report.build({"day": TODAY, "mode": "sing", "skipped": []}, ex)
+    assert rep["key"].endswith(":sing") and rep["steps_done"] == 2
+    assert [x["title"] for x in rep["sections"]] == ["Exercises"]                 # each exercise counted once
+    assert rep["sections"][0]["headline"] == "14 of 18 notes in tune." and rep["sections"][0]["state"] == "Done"
+
+
+def test_history_mixes_sessions_with_takes_and_filters_them():
+    import session_report
+    from datetime import datetime
+    s = {"day": TODAY, "mode": "speak", "time": f"{TODAY}T11:00:00"}
+    old = {"day": "2026-10-20", "mode": "speak", "time": "2026-10-20T11:00:00"}
+    takes = [take("phrases", hour=10, uid="a"), take("phrases", day="2026-10-21", uid="b")]
+    merged = session_report.merge(takes, [s, old])
+    assert [k for k, _ in merged] == ["session", "take", "take", "session"]
+    assert [k for k, _ in session_report.merge(takes, [s, old], show="sessions")] == ["session", "session"]
+    assert [k for k, _ in session_report.merge(takes, [s], show="takes")] == ["take", "take"]
+    assert len(session_report.merge(takes, [s, old], oldest="2026-10-21")) == 3       # the old one waits
+    same = take("phrases", hour=11, uid="c") | {"time": f"{TODAY}T11:00:00.500000"}
+    assert session_report.merge([same], [s])[0][0] == "session"                     # above its own last take
+    now = datetime.fromisoformat(NOW)
+    assert session_report.matches(s, "practice", now=now) and not session_report.matches(s, "soup", now=now)
+    assert not session_report.matches(s, task="phrases") and not session_report.matches(s, mode="sing")
+    assert not session_report.matches(old, days=7, now=now) and session_report.matches(s, days=7, now=now)
+    view = session_report.row_view(s, takes)
+    assert view["title"] == "Daily practice" and "Speak" in view["subtitle"] and view["chip"] == "0 of 3 steps"

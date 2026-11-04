@@ -1,5 +1,6 @@
 """The result of a practice, in plain words, with where to go next: a headline, a few rows (with "vs last time"),
-one tip and buttons. One card for read aloud, phrases, vowel check, exercises and the Voice Map."""
+one tip and buttons. One card for read aloud, phrases, vowel check, exercises and the Voice Map. With a next step
+(set_next) its main button moves you on to the next thing to do; the practice's own buttons stay beside it."""
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
@@ -7,10 +8,15 @@ from ui import theme
 from ui.components import Button, Caption, Card, Chip, Headline, Label, WrapRow
 
 
+GO_PREFIX = "go:"                # an action key "go:<where>" leaves the practice: it emits go(<where>)
+
+
 class ResultCard(Card):
     """show_result(data) draws {"title", "headline", "compare", "rows" [(name, value, change)], "chips"
-    [(text, kind)], "tip", "lines" [str], "actions" [(key, label, variant)]}; a click emits `action(key)`."""
+    [(text, kind)], "tip", "lines" [str], "actions" [(key, label, variant)]}; a click emits `action(key)`, or
+    `go(where)` for the next step and for "go:<where>" keys."""
     action = pyqtSignal(str)
+    go = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("Your result", raised=True, parent=parent)
@@ -35,7 +41,16 @@ class ResultCard(Card):
             self.add(w)
         self.button_widgets = {}
         self.data = None
+        self.next_step = None           # {"key", "label"}: where the main button goes, or None
         self.hide()
+
+    def set_next(self, step):
+        """The next thing to do ({"key", "label"} from SessionPlan.next_step, or None); a shown result redraws."""
+        if step == self.next_step:
+            return
+        self.next_step = step
+        if self.data is not None:
+            self.show_result(self.data)
 
     def clear(self):
         self.data = None
@@ -74,10 +89,21 @@ class ResultCard(Card):
             if item.widget():
                 item.widget().deleteLater()
         self.button_widgets = {}
-        for key, label, variant in data.get("actions", []):
-            button = Button(label, variant=variant)
-            button.clicked.connect(lambda _=False, k=key: self.action.emit(k))
+        actions = list(data.get("actions", []))
+        if self.next_step:              # the way on leads; the practice's own main button steps back
+            actions = [(GO_PREFIX + self.next_step["key"], self.next_step["label"], "primary")] + [
+                (k, label, "secondary" if v == "primary" else v) for k, label, v in actions]
+        for key, label, variant in actions:
+            onward = self.next_step is not None and key == GO_PREFIX + self.next_step["key"]
+            button = Button(label, variant=variant, icon="ph.arrow-right" if onward else None)
+            button.clicked.connect(lambda _=False, k=key: self._clicked(k))
             self.buttons.addWidget(button)
             self.button_widgets[key] = button
         self.buttons.addStretch(1)
         self.show()
+
+    def _clicked(self, key):
+        if key.startswith(GO_PREFIX):
+            self.go.emit(key[len(GO_PREFIX):])
+        else:
+            self.action.emit(key)

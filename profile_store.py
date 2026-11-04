@@ -196,6 +196,7 @@ class Profile:
         self.mic_check_asked = False   # offered once on first launch
         self.voice_goal = None         # one of VOICE_GOALS; None = just exploring (phase 10 spec 02)
         self.ui = dict(UI_DEFAULTS)    # UI preferences (phase 10 spec 05); set with set_ui
+        self.practice_sessions = []    # finished days of Today's practice: {"day", "mode", "skipped", "vowels", "time"}
         self.load()
 
     def load(self):
@@ -222,6 +223,8 @@ class Profile:
         self.mic_check_asked = data.get("mic_check_asked", False)
         goal = data.get("voice_goal")
         self.voice_goal = goal if goal in VOICE_GOALS else None
+        sessions = data.get("practice_sessions")
+        self.practice_sessions = [s for s in sessions if isinstance(s, dict) and s.get("day")]             if isinstance(sessions, list) else []
         ui = data.get("ui")
         self.ui = dict(UI_DEFAULTS) | ({k: v for k, v in ui.items() if k in UI_DEFAULTS}
                                        if isinstance(ui, dict) else {})
@@ -235,7 +238,7 @@ class Profile:
                 "egg_channel": self.egg_channel, "register_model": self.register_model,
                 "register_version": self.register_version, "noise_floor": self.noise_floor,
                 "mic_check": self.mic_check, "mic_check_asked": self.mic_check_asked,
-                "voice_goal": self.voice_goal, "ui": self.ui}
+                "voice_goal": self.voice_goal, "ui": self.ui, "practice_sessions": self.practice_sessions}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -317,6 +320,16 @@ class Profile:
             raise ValueError(f"voice goal must be one of {VOICE_GOALS}, not {goal!r}")
         self.voice_goal = goal
         self.save()
+
+    def record_session(self, entry):
+        """Keep a finished day of Today's practice ({"day", "mode", ...}), replacing that day and mode's entry.
+        True when it changed anything."""
+        kept = [s for s in self.practice_sessions if (s.get("day"), s.get("mode")) != (entry["day"], entry["mode"])]
+        if len(kept) < len(self.practice_sessions) and dict(entry) in self.practice_sessions:
+            return False
+        self.practice_sessions = kept + [dict(entry)]
+        self.save()
+        return True
 
     def set_ui(self, **values):
         """Change UI preferences (keys of UI_DEFAULTS) and save them."""

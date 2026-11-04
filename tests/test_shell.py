@@ -155,22 +155,23 @@ def test_speak_axis_is_fixed_and_the_readout_is_always_on_it(make_window):
     assert max(checked) > 400 and min(checked) < 120                   # it went off the top of the axis
 
 
-def test_one_banner_for_an_untrusted_input(make_window):
+def test_one_input_chip_for_an_untrusted_input(make_window):
     window = make_window()
     window.go("live")      # the full live view is on the Live screen; the dashboard has a strip
     window.core.live.text_interval = 0
     noisy = mic_noise.at_level(synth_vowel(140, MALE_FORMANTS, seconds=1.6), -42) + mic_noise.mic_noise(int(1.6 * SR))
     play(window, np.concatenate([mic_noise.mic_noise(int(1.5 * SR)), noisy, mic_noise.mic_noise(SR)]))
     play(window, np.concatenate([noisy, mic_noise.mic_noise(int(0.5 * SR))]))
-    banners = [b for b in window.findChildren(Banner) if not b.isHidden()]
-    assert banners == [window.banner]
-    assert "weight and clarity" in window.banner.label.text() or "whine" in window.banner.label.text()
+    assert not [b for b in window.findChildren(Banner) if not b.isHidden()]          # a chip, not a banner
+    assert not window.banner.isHidden() and window.banner.action_text == "Mic check"
+    assert "weight and clarity" in window.banner.full or "whine" in window.banner.full
+    assert window.banner.full in window.banner.toolTip() and len(window.banner.text) <= 28
     cards = window.live.view.cards.cards
     for key in ("cpp", "h1h2"):
         assert cards[key].unavailable == "paused: noisy input" and cards[key].bar.value is None
     assert not hasattr(cards["cpp"].bar, "hatched")
     assert window.top.mic.state == "warn"
-    window.banner.action.click()                                       # "Mic check"
+    window.banner.click()                                              # "Mic check"
     assert window.mic_dialog is not None and window.mic_dialog.isVisible()
     window.mic_dialog.reject()
 
@@ -346,6 +347,20 @@ def test_mic_errors_are_plain_and_every_error_has_an_action():
     assert shell_state.error_action("Saved", "success") is None and shell_state.error_action("x", "info") is None
 
 
+def test_the_input_chip_names_the_problem_in_a_few_words_and_never_cuts_one():
+    import live_session
+    chip = shell_state.alert_chip({"text": "Desk rumble: set the mic on something soft · can't judge weight right "
+                                           "now", "action": "Mic check", "kind": "warning"})
+    assert chip["label"] == "Desk rumble" and chip["tooltip"].startswith("Desk rumble: set the mic")
+    assert chip["tooltip"].endswith("Click: Mic check")
+    for text in list(live_session.BANNER_TEXT.values()) + [live_session.SLOW_PATH_BANNER, shell_state.LOST_TEXT]:
+        label = shell_state.alert_chip({"text": text, "action": "Mic check"})["label"]
+        assert label and len(label) <= shell_state.ALERT_CHIP_CHARS and text.startswith(label), text
+    long = shell_state.alert_chip({"text": shell_state.ERROR_TEXTS[0][1], "action": "Choose mic", "kind": "error"})
+    assert long["label"] == "Mic problem"                                  # a cut phrase never shows
+    assert shell_state.alert_chip(None) is None
+
+
 def test_activity_text_names_the_job_and_agrees_with_the_job_list():
     job = {"id": 1, "kind": "reanalysis", "label": "Updating takes 3/11", "done": 0, "total": None, "text": None}
     described = shell_state.describe_job(job)
@@ -420,8 +435,8 @@ def test_a_dead_mic_is_lost_in_two_seconds_and_recovers(make_window):
     window.poll_mic()
     assert core.mic_status()["state"] == "lost" and core.mic_lost
     assert window.top.mic.key == "lost" and window.top.mic.state == "error" and "Mic stopped" in window.top.mic.label
-    assert not window.banner.isHidden() and "stopped sending audio" in window.banner.label.text()
-    assert window.banner.action.text() == "Choose mic"
+    assert not window.banner.isHidden() and "stopped sending audio" in window.banner.full
+    assert window.banner.action_text == "Choose mic"
     assert window.record_btn.state == "disabled" and "Mic stopped" in window.record_btn.caption()
     play(window, VOICE[:HOP * 3])                                               # stale frames must not look live
     assert window.top.mic.key == "lost"
@@ -430,7 +445,7 @@ def test_a_dead_mic_is_lost_in_two_seconds_and_recovers(make_window):
     window.poll_mic()
     assert not core.mic_lost and core.mic_status()["state"] == "ok" and window.record_btn.state == "idle"
     assert any("reconnected" in t.text for t in window.toasts.toasts)
-    assert window.banner.isHidden() or "stopped" not in window.banner.label.text()
+    assert window.banner.isHidden() or "stopped" not in window.banner.full
 
 
 def test_the_mic_block_follows_the_voice_and_the_level(make_window):
@@ -443,10 +458,10 @@ def test_the_mic_block_follows_the_voice_and_the_level(make_window):
     assert "Microphone" in mic.accessibleName() and "Hearing you" in mic.accessibleName()
     window.core.set_mic_available(False, "Error opening InputStream: Device unavailable [PaErrorCode -9985]")
     assert mic.key == "unavailable" and mic.state == "error"
-    assert not window.banner.isHidden() and "another app" in window.banner.label.text()
-    assert window.banner.action.text() == "Choose mic"
+    assert not window.banner.isHidden() and "another app" in window.banner.full
+    assert window.banner.action_text == "Choose mic"
     assert window.toasts.toasts[-1].action is not None                          # the toast says what to do too
-    window.banner.action.click()
+    window.banner.click()
     assert window.current() == "settings"
 
 
@@ -518,8 +533,9 @@ def test_the_activity_chip_names_the_job_and_what_it_changes(make_window):
     assert window.activity.title.text() == "Updating takes 3/11"
     row = next(iter(window.activity.detail.rows.values()))
     assert "older takes" in row.text.text() and "Updating your takes" in row.label.text()
+    assert not window.activity.isHidden()
     window.core.events.emit("busy", [])
-    assert window.activity.title.text() == "Nothing running"
+    assert window.activity.title.text() == "Nothing running" and window.activity.isHidden()   # idle: not shown
 
 
 def test_the_takes_badge_counts_a_re_analysis_that_is_only_just_submitted(make_window, tmp_path):
@@ -551,6 +567,20 @@ def test_onboarding_ends_with_a_first_take_and_hears_you(make_window):
     assert window.current() == "dashboard" and window.core.is_recording            # the first take starts
     window.toggle_recording()
     assert wait_for(lambda: window.record_btn.state == "idle")
+
+
+def test_the_welcome_opens_a_mic_check_it_does_not_block(make_window):
+    window = make_window()
+    window.start_up()
+    dialog = window.onboarding
+    dialog.mic_btn.click()
+    mic = window.mic_dialog
+    assert mic.isVisible() and mic.parent() is dialog       # a child of the modal welcome, so it takes clicks
+    mic.reject()
+    dialog.reject()
+    window.mic_check()
+    assert window.mic_dialog.parent() is window              # on its own it stays the window's
+    window.mic_dialog.reject()
 
 
 def test_the_folder_step_offers_one_click_default(make_window, tmp_path, monkeypatch):

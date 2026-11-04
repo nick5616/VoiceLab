@@ -55,6 +55,12 @@ def dim(confidence="high", **extra):
 
 def factories():
     """(name, make) for every component, each in a typical state."""
+    def alert_chip():
+        chip = c.AlertChip()
+        chip.set_alert("Desk rumble", "Mic check", "warning", "Desk rumble: set the mic on something soft")
+        chip.show()
+        return chip
+
     def metric():
         card = c.MetricCard("Pitch", PITCH)
         card.set_dimension(dim())
@@ -133,6 +139,7 @@ def factories():
         ("ProgressStrip", c.ProgressStrip), ("ActivityCenter", activity), ("Skeleton", lambda: c.Skeleton("block")),
         ("Toast", lambda: c.Toast("Saved", "success", action="Undo", timeout_ms=0)), ("ToastStack", stack),
         ("Banner", lambda: c.Banner("Too noisy to judge brightness", "warning", action="Run mic check")),
+        ("AlertChip", alert_chip),
         ("EmptyState", lambda: c.EmptyState("ph.microphone", "No takes yet", action="Record")),
         ("MomentChip", lambda: c.MomentChip(3.1, 4.0)), ("MicIndicator", mic), ("RecordingPill", c.RecordingPill),
         ("RecordingLine", recording_line), ("FitLabel", lambda: c.FitLabel("Loading your takes")),
@@ -611,3 +618,17 @@ def test_gallery_renders_both_themes_to_png(app, tmp_path):
         width, height = gallery.render(str(path), width=1280, name=name)
         assert path.exists() and path.stat().st_size > 50_000
         assert width == 1280 and height > 2000
+
+
+def test_the_alert_chip_is_one_small_click_target(app):
+    chip = c.AlertChip()
+    assert chip.isHidden()                                                  # nothing to say: not shown
+    clicks = []
+    chip.clicked.connect(lambda: clicks.append(1))
+    chip.set_alert("Desk rumble", "Mic check", "warning", "Desk rumble: set the mic on something soft", "tip")
+    chip.show()
+    assert chip.height() == c.AlertChip.HEIGHT and chip.width() < 260 and chip.toolTip() == "tip"
+    assert "Desk rumble: set the mic" in chip.accessibleName() and "Mic check" in chip.accessibleName()
+    QTest.mouseClick(chip, Qt.MouseButton.LeftButton)
+    QTest.keyClick(chip, Qt.Key.Key_Space)
+    assert clicks == [1, 1]

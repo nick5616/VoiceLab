@@ -83,7 +83,7 @@ def test_live_cards_and_the_banner(make_window):
     assert window.core.live.input["snr"] is not None                # the pauses were heard
     assert window.banner.isHidden()
     play(window, np.clip(VOICE * 4, -1, 1)[:int(0.3 * SR)])
-    assert not window.banner.isHidden() and "clipping" in window.banner.label.text()
+    assert not window.banner.isHidden() and "clipping" in window.banner.full
 
 
 def test_takes_folder_crud(make_window, tmp_path):

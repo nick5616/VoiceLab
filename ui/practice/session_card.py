@@ -95,6 +95,7 @@ class SessionCard(Card):
     """Today's practice. `open_step(key)` is emitted with a practice key ('vowels', 'phrases', 'read',
     'exercise') when a step is started."""
     open_step = pyqtSignal(str)
+    open_report = pyqtSignal()          # the finished day's full report (History)
 
     def __init__(self, core, parent=None):
         super().__init__("Today's practice", parent=parent)
@@ -111,12 +112,16 @@ class SessionCard(Card):
         self.summary_head = Label("", role="heading", wrap=True)
         self.summary_lines = Label("", role="body", tone="secondary", wrap=True)
         self.rest_line = Label("", role="caption", tone="muted", wrap=True)
+        self.report_btn = Button("Open full report", variant="secondary", icon="ph.arrow-right", small=True)
+        self.report_btn.clicked.connect(self.open_report.emit)
+        self.report_btn.hide()
+        self.add_action(self.report_btn)            # in the title row: the finished card grows no taller
         for w in (self.summary_head, self.summary_lines, self.rest_line):
             self.add(w)
             w.hide()
         self.rest_text = None
         listen(self, core, {"practice_plan_changed": self.refresh, "mode_changed": lambda *_: self.refresh(),
-                            "profile_changed": self.refresh})
+                            "profile_changed": self.refresh, "sessions_changed": self.refresh})
         self.refresh()
 
     def refresh(self, *_):
@@ -145,10 +150,12 @@ class SessionCard(Card):
             self.summary_lines.setText("\n".join(summary["lines"]))
             self.summary_head.show()
             self.summary_lines.setVisible(bool(summary["lines"]))
+            self.report_btn.setVisible(bool(self.core.practice_sessions()))
             self.rows["result"].hide()
         else:
             self.summary_head.hide()
             self.summary_lines.hide()
+            self.report_btn.hide()
         self.rest_line.setText(self.rest_text or "")
         self.rest_line.setVisible(bool(self.rest_text))
 

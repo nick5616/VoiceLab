@@ -39,7 +39,7 @@ LOST_TEXT = "Mic stopped sending audio. Plug it back in, then choose your mic."
 RECONNECTED_TEXT = "Mic reconnected."
 ACTIONS = {                     # key: button text
     "choose_mic": "Choose mic", "mic_check": "Mic check", "choose_folder": "Choose folder",
-    "retry": "Try again", "settings": "Open Settings", "open_takes": "Open Takes",
+    "retry": "Try again", "settings": "Open Settings", "open_takes": "Open History",
     "rebuild_map": "Rebuild Voice Map", "open_report": "Open report", "update_takes": "Update now",
     "set_baseline": "Set baseline",
 }
@@ -49,7 +49,7 @@ CHIP_CHARS = 24                 # the activity chip's text, at most
 JOB_WORDS = {                   # kind: (short chip text, what it changes)
     "reanalysis": ("Updating takes", "Numbers in your older takes may change while this runs. Live readings "
                                      "are not affected."),
-    "analysis": ("Analysing your take", "Your new take appears in Takes when it is ready."),
+    "analysis": ("Analysing your take", "Your new take appears in History when it is ready."),
     "load": ("Loading your takes", "Your takes appear as they load."),
     "register": ("Updating register", "Register shares in your takes may change. Live readings are not affected."),
     "voicemap": ("Rebuilding Voice Map", "The Voice Map in Practice is replaced when this finishes."),
@@ -179,6 +179,23 @@ def activity_summary(jobs):
     return {"text": text, "tooltip": "\n".join(f"{j['label']}: {j['affects']}" for j in jobs)}
 
 
+ALERT_CHIP_CHARS = 28           # the input chip's words, at most
+ALERT_SPLIT = re.compile(r":|\s·\s|\.\s|,\s")     # where a banner sentence's first idea ends
+
+
+def alert_chip(banner):
+    """The top bar's input chip for a banner {"text", "action", ...}: {"label" (the problem in a few words),
+    "tooltip" (the whole sentence and what a click does)}, or None without a banner."""
+    if not banner:
+        return None
+    text = (banner.get("text") or "").strip()
+    label = ALERT_SPLIT.split(text, maxsplit=1)[0].strip().rstrip(".")
+    if not label or len(label) > ALERT_CHIP_CHARS:      # never a cut phrase: say what kind of problem it is
+        label = "Mic problem" if banner.get("kind") == "error" else "Input problem"
+    tooltip = text + (f"\nClick: {banner['action']}" if banner.get("action") else "")
+    return {"label": label, "tooltip": tooltip}
+
+
 def take_ready_text(number):
     """The toast after a take is analysed."""
     return f"Take #{number} is ready" if number else "Your take is ready"
@@ -198,7 +215,7 @@ SHORTCUTS = [               # (keys, what it does): the cheat-sheet, the Setting
     ("Space", "Start or stop recording a take"),
     ("R", "Replay the last 10 seconds"),
     ("Ctrl+I", "Import an audio file"),
-    ("Ctrl+1 … 6", "Go to Today, Live, Practice, Takes, Progress or Settings"),
+    ("Ctrl+1 … 6", "Go to Today, Live, Practice, History, Progress or Settings"),
     ("F11", "Full screen"),
     ("Ctrl+Shift+D", "Show what the app is measuring (the inspector)"),
     ("?", "Show this list"),

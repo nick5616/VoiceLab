@@ -1,15 +1,18 @@
-"""The Takes screen: a searchable list of compact rows on the left (newest first, older ones loaded as you
-scroll; the filters in one popover), and the selected take's full report on the right. A take you just
-made is selected as soon as it is ready; a deleted one can be brought back from the toast."""
+"""The History screen (it was "Takes"): a searchable list of compact rows on the left, newest first (takes,
+and the days of Today's practice you finished; older takes load as you scroll; the filters in one popover),
+and the selected take's or practice session's full report on the right. A take you just made is selected as
+soon as it is ready; a deleted one can be brought back from the toast."""
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QHBoxLayout, QLineEdit, QMenu, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
                              QWidgetAction)
 
+import session_report
 import take_view
 from ui import theme
 from ui.components import Button, Caption, EmptyState, Headline, Label, Select, Skeleton
 from ui.takes import listen
 from ui.takes.recent_list import RecentRow
+from ui.takes.session_view import SessionReportCard, SessionRow
 from ui.takes.take_card import TakeCard, clear_layout
 
 LIST_WIDTH = (340, 440)         # px: the list column's narrowest and widest
@@ -31,7 +34,7 @@ class SearchBox(QLineEdit):
     def __init__(self, placeholder):
         super().__init__()
         self.setPlaceholderText(placeholder)
-        self.setAccessibleName("Search takes")     # the placeholder disappears once you type (spec 05: every stop named)
+        self.setAccessibleName("Search history")     # the placeholder disappears once you type (spec 05: every stop named)
         self.setClearButtonEnabled(True)
         theme.changed.connect(self.restyle)
         self.restyle()
@@ -46,8 +49,9 @@ QLineEdit:focus {{ border-color: {c['accent']}; }}""")
 
 
 class TakesScreen(QWidget):
-    """Every take: the list (search, and a Filter popover for mode, task, quality and date) and the selected
-    take's full card. show_take(uid) selects one. record_requested() / import_requested() from the empty
+    """History: every take and practice session in one list (search, and a Filter popover for what to show,
+    mode, task, quality and date) and the selected one's full report. show_take(uid) / show_session(key)
+    select one. record_requested() / import_requested() from the empty
     state; mic_check_requested() from a card's trust line."""
 
     record_requested = pyqtSignal()
@@ -73,11 +77,11 @@ class TakesScreen(QWidget):
         side = QVBoxLayout(left)
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(theme.M)
-        self.heading = Headline("Takes", level="title")
+        self.heading = Headline("History", level="title")
         self.count = Caption("", tone="secondary")
         side.addWidget(self.heading)
         side.addWidget(self.count)
-        self.search = SearchBox("Search by name, task or date")
+        self.search = SearchBox("Search takes and practice by name, task or date")
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(SEARCH_DELAY_MS)
@@ -87,10 +91,12 @@ class TakesScreen(QWidget):
         self.task = Select([(None, "All tasks")])
         self.tier = Select(_keyed(take_view.TIERS))
         self.days = Select(_keyed(take_view.DAYS))
-        for select in (self.mode, self.task, self.tier, self.days):
+        self.show_sel = Select(_keyed(session_report.SHOW))
+        for select in (self.show_sel, self.mode, self.task, self.tier, self.days):
             select.changed.connect(self.refresh)
         self.filter_btn = Button(take_view.filter_label({}), "secondary", icon="ph.funnel", small=True)
-        self.filter_btn.setToolTip("Narrow the list by mode, task, recording quality or date.")
+        self.filter_btn.setToolTip("Show takes or practice sessions, or narrow the list by mode, task, "
+                                   "recording quality or date.")
         self.filter_menu = QMenu(self.filter_btn)
         self.filter_menu.addAction(self._filter_panel())
         self.filter_btn.setMenu(self.filter_menu)
@@ -129,7 +135,8 @@ class TakesScreen(QWidget):
         row.addWidget(self.detail, 1)
         listen(self, core, {"take_added": self._added, "take_removed": self._removed, "take_ready": self._ready,
                             "takes_loaded": self._loaded, "take_updated": self._updated,
-                            "take_trashed": self._trashed, "busy": self._busy, "profile_changed": self._rebuild_rows})
+                            "take_trashed": self._trashed, "busy": self._busy, "profile_changed": self._rebuild_rows,
+                            "sessions_changed": self._sessions_changed})
         self.refresh()
 
     def _filter_panel(self):
@@ -138,7 +145,8 @@ class TakesScreen(QWidget):
         box = QVBoxLayout(panel)
         box.setContentsMargins(theme.M, theme.M, theme.M, theme.M)
         box.setSpacing(theme.S)
-        for text, select in (("Mode", self.mode), ("Task", self.task), ("Quality", self.tier), ("Date", self.days)):
+        for text, select in (("Show", self.show_sel), ("Mode", self.mode), ("Task", self.task),
+                             ("Quality", self.tier), ("Date", self.days)):
             line = QHBoxLayout()
             label = Label(text, role="label", tone="secondary")
             label.setFixedWidth(FILTER_LABEL_WIDTH)
@@ -159,15 +167,27 @@ class TakesScreen(QWidget):
                 "tier": self.tier.current_key(), "days": self.days.current_key()}
 
     def clear_filters(self):
-        """Back to every take: the search emptied and each filter on its first option."""
-        for widget in (self.search, self.mode, self.task, self.tier, self.days):
+        """Back to everything: the search emptied and each filter on its first option."""
+        selects = (self.show_sel, self.mode, self.task, self.tier, self.days)
+        for widget in (self.search,) + selects:
             widget.blockSignals(True)
         self.search.clear()
-        for select in (self.mode, self.task, self.tier, self.days):
+        for select in selects:
             select.setCurrentIndex(0)
-        for widget in (self.search, self.mode, self.task, self.tier, self.days):
+        for widget in (self.search,) + selects:
             widget.blockSignals(False)
         self.refresh()
+
+    def visible_sessions(self):
+        """The practice sessions (newest first) that pass the search and filters."""
+        f = self.filters()
+        return [s for s in self.core.practice_sessions() if session_report.matches(s, **f)]
+
+    def entries(self):
+        """The list as shown: [("take" | "session", item)], newest first."""
+        oldest = self.core.shown_takes()[-1].get("time") if self.core.older_count() > 0 else None
+        return session_report.merge(self.visible_takes(), self.visible_sessions(), self.show_sel.current_key(),
+                                    oldest)
 
     def visible_takes(self):
         """The shown takes (newest first) that pass the search and filters."""
@@ -183,11 +203,14 @@ class TakesScreen(QWidget):
     def refresh(self, *_):
         """Lay the list out again from the core's shown takes and the filters."""
         self._fill_tasks()
-        self.filter_btn.setText(take_view.filter_label(self.filters()))
+        label = take_view.filter_label(self.filters())
+        if self.show_sel.current_key():                 # what to show counts as a filter too
+            label = f"Filter · {len(take_view.active_filters(self.filters())) + 1}"
+        self.filter_btn.setText(label)
         while self.list.count():
             self.list.takeAt(0)
         shown = {t.get("uid") for t in self.core.shown_takes()}
-        for uid in [u for u in self.cards if u not in shown]:
+        for uid in [u for u in self.cards if u not in shown]:     # session rows too: their counts may change
             self.cards.pop(uid).deleteLater()
         for card in self.cards.values():
             card.hide()
@@ -197,23 +220,25 @@ class TakesScreen(QWidget):
             self._show_detail(None)
             self._sync_count([])
             return
-        takes = self.visible_takes()
-        for take in takes:
-            uid = take.get("uid")
+        entries = self.entries()
+        keys = []
+        for kind, item in entries:
+            uid = item.get("uid") if kind == "take" else item["key"]
             card = self.cards.get(uid)
             if card is None:
-                card = self.cards[uid] = RecentRow(self.core, take)
+                card = self.cards[uid] = RecentRow(self.core, item) if kind == "take" else SessionRow(self.core, item)
                 card.clicked.connect(self.select)
             self.list.addWidget(card)
             card.show()
             card.set_selected(uid == self.selected)
             card.set_status(self._status_of(uid))
-        if not takes and self.core.shown_takes():
-            self.list.addWidget(Caption("No takes match. Clear the search or the filters to see them all.",
+            keys.append(uid)
+        if not entries and (self.core.shown_takes() or self.core.practice_sessions()):
+            self.list.addWidget(Caption("Nothing matches. Clear the search or the filters to see everything.",
                                         tone="secondary"))
-        self._sync_count(takes)
-        if self.selected not in {t.get("uid") for t in takes}:
-            self.select(takes[0].get("uid") if takes else None)
+        self._sync_count([item for kind, item in entries if kind == "take"])
+        if self.selected not in keys:
+            self.select(keys[0] if keys else None)
 
     def _status_of(self, uid):
         if uid == self.updating_uid:
@@ -226,7 +251,10 @@ class TakesScreen(QWidget):
 
     def _sync_count(self, takes):
         total = len(self.core.takes())
-        self.count.setText(f"{len(takes)} of {total} take{'s' if total != 1 else ''}" if total else "")
+        sessions = len(self.core.practice_sessions())
+        parts = [f"{len(takes)} of {total} take{'s' if total != 1 else ''}" if total else "",
+                 f"{sessions} practice session{'s' if sessions != 1 else ''}" if sessions else ""]
+        self.count.setText(" · ".join(p for p in parts if p))
         older = self.core.older_count()
         self.older_btn.setText(self.core.older_text())
         self.older_btn.setVisible(older > 0)
@@ -265,8 +293,28 @@ class TakesScreen(QWidget):
         if card is not None:
             QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(card, 0, theme.L))
 
+    def show_session(self, key):
+        """Select a practice session's report, clearing filters that hide it."""
+        if key not in {s["key"] for s in self.core.practice_sessions()}:
+            return
+        if key not in {s["key"] for s in self.visible_sessions()} or self.show_sel.current_key() == "takes":
+            self.clear_filters()
+        self.refresh()
+        self.select(key)
+        card = self.cards.get(key)
+        if card is not None:
+            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(card, 0, theme.L))
+
     def _show_detail(self, uid):
         if self.full is not None and self.full.uid == uid and not self.full.removed:
+            return
+        if session_report.parse_key(uid):
+            clear_layout(self.detail_box)
+            self.full = SessionReportCard(self.core, uid)
+            self.full.open_take.connect(self.show_take)
+            self.detail_box.addWidget(self.full)
+            self.detail_box.addStretch(1)
+            self.detail.verticalScrollBar().setValue(0)
             return
         clear_layout(self.detail_box)
         self.full = None
@@ -326,6 +374,13 @@ class TakesScreen(QWidget):
             self._sync_status()
 
     def _loaded(self, *_):
+        self.refresh()
+
+    def _sessions_changed(self, *_):
+        """A practice session was kept or changed: its row and, when open, its report are drawn again."""
+        if self.full is not None and session_report.parse_key(self.full.uid):
+            self.full = None
+            self._show_detail(self.selected)
         self.refresh()
 
     def _updated(self, data):

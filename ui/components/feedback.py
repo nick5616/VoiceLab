@@ -6,7 +6,8 @@ from PyQt6.QtGui import QColor, QLinearGradient, QPen
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from ui import anim, theme
-from ui.components.base import KIND_ICONS, KINDS, Label, ThemedWidget, draw_icon, mix, painter, rounded, rounded_path
+from ui.components.base import (KIND_ICONS, KINDS, Label, ThemedWidget, draw_icon, mix, painter, rounded,
+                                rounded_path, text_width)
 from ui.components.controls import Button, IconButton
 from ui.components.layout import _Chevron
 
@@ -574,6 +575,93 @@ class Banner(ThemedWidget):
         rounded(p, self.rect(), theme.RADIUS["medium"], fill=t.q(self.kind, 30 if t.dark else 26),
                 border=t.q(self.kind, 90))
         draw_icon(p, KIND_ICONS[self.kind], QRectF(theme.M, (self.height() - 20) / 2, 20, 20), self.kind)
+
+
+class AlertChip(ThemedWidget):
+    """A compact, clickable issue pill for a bar: an icon, the problem in a few words and its action
+    ("⚠ Desk rumble · Mic check"); the whole sentence is the tooltip. A click (or Enter / Space) emits
+    clicked(). Hidden until set_alert() gives it something to say."""
+
+    clicked = pyqtSignal()
+    HEIGHT = 28                 # px
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.kind, self.text, self.action_text, self.full = "warning", "", "", ""
+        self.hover = False
+        self.setFixedHeight(self.HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.hide()
+
+    def set_alert(self, text, action="", kind="warning", full="", tooltip=""):
+        """Show `text` (a few words) with `action`; `full` is the whole sentence, `tooltip` what hovering says."""
+        if kind not in KINDS:
+            raise ValueError(f"kind must be one of {KINDS}")
+        self.kind, self.text, self.action_text, self.full = kind, text, action or "", full or text
+        self.setToolTip(tooltip or self.full)
+        self.setAccessibleName(f"{kind}: {self.full}" + (f". {self.action_text}" if self.action_text else ""))
+        self.restyle()
+        self.update()
+
+    def _fonts(self):
+        return theme.font("caption", weight=600), theme.font("caption", weight=700)
+
+    def restyle(self):
+        body, bold = self._fonts()
+        width = theme.S + 16 + theme.S + text_width(body, self.text)
+        if self.action_text:
+            width += text_width(body, "  ·  ") + text_width(bold, self.action_text)
+        self.setFixedWidth(int(width + theme.M))
+        self.updateGeometry()
+
+    def sizeHint(self):
+        return QSize(self.width(), self.HEIGHT)
+
+    def enterEvent(self, event):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+        else:
+            super().keyPressEvent(event)
+
+    def click(self):
+        self.clicked.emit()
+
+    def paintEvent(self, event):
+        t = theme.current()
+        p = painter(self)
+        wash = (46 if self.hover else 32) if t.dark else (38 if self.hover else 26)
+        rounded(p, self.rect(), self.HEIGHT / 2, fill=t.q(self.kind, wash),
+                border=t.q(self.kind, 160 if self.hasFocus() else 90))
+        x = theme.S
+        draw_icon(p, KIND_ICONS[self.kind], QRectF(x, (self.HEIGHT - 16) / 2, 16, 16), self.kind)
+        x += 16 + theme.S
+        body, bold = self._fonts()
+        p.setFont(body)
+        p.setPen(t.q("text"))
+        p.drawText(QRectF(x, 0, self.width() - x, self.HEIGHT), int(Qt.AlignmentFlag.AlignVCenter), self.text)
+        if self.action_text:
+            x += text_width(body, self.text)
+            p.setPen(t.q("text_muted"))
+            p.drawText(QRectF(x, 0, self.width() - x, self.HEIGHT), int(Qt.AlignmentFlag.AlignVCenter), "  ·  ")
+            x += text_width(body, "  ·  ")
+            p.setFont(bold)
+            p.setPen(t.q(self.kind))
+            p.drawText(QRectF(x, 0, self.width() - x, self.HEIGHT), int(Qt.AlignmentFlag.AlignVCenter),
+                       self.action_text)
 
 
 class EmptyState(ThemedWidget):

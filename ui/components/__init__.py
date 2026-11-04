@@ -8,8 +8,8 @@ from ui.components.chips import Badge, Chip, ConfidenceChip, StatusDot
 from ui.components.controls import (Button, IconButton, NavRail, RecordButton, SegmentedControl, Select,
                                     Tabs, Toggle)
 from ui.components.data import BigNumber, MetricCard, ShareBar, Sparkline, ZoneBar
-from ui.components.feedback import (ActivityCenter, Banner, EmptyState, ProgressStrip, Skeleton, Spinner,
-                                    Toast, ToastStack)
+from ui.components.feedback import (ActivityCenter, AlertChip, Banner, EmptyState, ProgressStrip, Skeleton,
+                                    Spinner, Toast, ToastStack)
 from ui.components.layout import Card, Collapsible, Divider, FlowGrid, Section, WrapRow
 from ui.components.moments import MomentChip
 from ui.components.status import FitLabel, LevelMeter, MicIndicator, RecordingLine, RecordingPill
@@ -22,6 +22,7 @@ __all__ = [
     "ZoneBar", "MetricCard", "BigNumber", "ShareBar", "Sparkline",
     "ConfidenceChip", "Chip", "Badge", "StatusDot",
     "Button", "IconButton", "SegmentedControl", "Tabs", "RecordButton", "NavRail", "Toggle", "Select",
-    "Spinner", "ProgressStrip", "ActivityCenter", "Skeleton", "Toast", "ToastStack", "Banner", "EmptyState",
+    "Spinner", "ProgressStrip", "ActivityCenter", "AlertChip", "Skeleton", "Toast", "ToastStack", "Banner",
+    "EmptyState",
     "MomentChip", "MicIndicator", "RecordingPill", "RecordingLine", "FitLabel", "LevelMeter",
 ]
